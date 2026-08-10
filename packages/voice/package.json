@@ -1,7 +1,7 @@
 {
   "name": "@cloudflare/voice",
   "version": "0.3.5",
-  "description": "Voice pipeline for Cloudflare Agents — STT, TTS, VAD, streaming, and SFU utilities",
+  "description": "Voice pipeline for Cloudflare Agents \u2014 STT, TTS, VAD, streaming, and SFU utilities",
   "repository": {
     "directory": "packages/voice",
     "type": "git",
@@ -47,7 +47,7 @@
   ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "prepare": "pnpm build",
+    "prepare": "echo \"dist committed; skipping build\"",
     "test": "vitest --run",
     "test:workers": "vitest --project voice-workers",
     "test:react": "vitest --project voice-react"
