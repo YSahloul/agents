@@ -47,7 +47,6 @@
   ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "prepare": "echo \"dist committed; skipping build\"",
     "test": "vitest --run",
     "test:workers": "vitest --project voice-workers",
     "test:react": "vitest --project voice-react"
