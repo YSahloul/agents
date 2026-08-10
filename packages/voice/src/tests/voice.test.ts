@@ -6,12 +6,12 @@
  * text messages, conversation persistence, and the beforeCallStart hook.
  */
 import { env } from "cloudflare:workers";
-import { createExecutionContext } from "cloudflare:test";
+import { createExecutionContext, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import worker from "./worker";
+import type { TestVoiceAgent } from "./agents/voice";
 
 // --- Helpers ---
-
 async function connectWS(path: string) {
   const ctx = createExecutionContext();
   const req = new Request(`http://example.com${path}`, {
@@ -68,6 +68,10 @@ function uniqueAISDKTextStreamPath() {
   return `/agents/test-ai-sdk-text-stream-voice-agent/voice-test-${++instanceCounter}`;
 }
 
+function uniqueStreamingTTSPath() {
+  return `/agents/test-streaming-tts-voice-agent/voice-test-${++instanceCounter}`;
+}
+
 function waitForStatus(ws: WebSocket, status: string) {
   return waitForMessageMatching(
     ws,
@@ -97,6 +101,30 @@ async function waitForAck(ws: WebSocket, command: string): Promise<void> {
       m !== null &&
       (m as Record<string, unknown>).type === "_ack" &&
       (m as Record<string, unknown>).command === command
+  );
+}
+
+async function getTransportEvents(ws: WebSocket): Promise<string[]> {
+  const response = waitForType(ws, "_transport_events");
+  sendJSON(ws, { type: "_get_transport_events" });
+  const message = (await response) as { events: string[] };
+  return message.events;
+}
+
+async function getRealtimeTTSEvents(ws: WebSocket): Promise<string[]> {
+  const response = waitForType(ws, "_realtime_tts_events");
+  sendJSON(ws, { type: "_get_realtime_tts_events" });
+  const message = await response;
+  if (
+    !message ||
+    typeof message !== "object" ||
+    !("events" in message) ||
+    !Array.isArray(message.events)
+  ) {
+    throw new Error("Expected realtime TTS events");
+  }
+  return message.events.filter(
+    (event): event is string => typeof event === "string"
   );
 }
 
@@ -533,8 +561,8 @@ describe("VoiceAgent — transcriber readiness", () => {
       >;
       expect(failedCounts.callStart).toBe(0);
       expect(failedCounts.callEnd).toBe(1);
-      expect(failedCounts.keepAliveAcquired).toBe(0);
-      expect(failedCounts.keepAliveReleased).toBe(0);
+      expect(failedCounts.keepAliveAcquired).toBe(1);
+      expect(failedCounts.keepAliveReleased).toBe(1);
 
       await setTranscriberMode(ws, "default");
       sendJSON(ws, { type: "start_call" });
@@ -547,8 +575,8 @@ describe("VoiceAgent — transcriber readiness", () => {
       >;
       expect(restartedCounts.callStart).toBe(1);
       expect(restartedCounts.callEnd).toBe(1);
-      expect(restartedCounts.keepAliveAcquired).toBe(1);
-      expect(restartedCounts.keepAliveReleased).toBe(0);
+      expect(restartedCounts.keepAliveAcquired).toBe(2);
+      expect(restartedCounts.keepAliveReleased).toBe(1);
     } finally {
       ws.close();
       errorLog.mockRestore();
@@ -860,6 +888,8 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     >;
     expect(metrics).toHaveProperty("llm_ms");
     expect(metrics).toHaveProperty("tts_ms");
+    expect(metrics).toHaveProperty("first_model_delta_ms");
+    expect(metrics).toHaveProperty("first_sentence_ms");
     expect(metrics).toHaveProperty("first_audio_ms");
     expect(metrics).toHaveProperty("total_ms");
     expect(metrics).not.toHaveProperty("vad_ms");
@@ -1292,6 +1322,39 @@ describe("VoiceAgent — interrupt", () => {
         (m as Record<string, unknown>).role === "user"
     )) as Record<string, unknown>;
     expect((transcript.text as string).includes("utterance 1")).toBe(true);
+
+    ws.close();
+  });
+
+  it("debounces rapid barge-in so a freshly-started turn isn't immediately re-aborted", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "_set_turn_delay", value: 1000 });
+    await waitForType(ws, "_ack");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // First turn + first barge-in: succeeds.
+    sendJSON(ws, { type: "text_message", text: "long response 1" });
+    await waitForStatus(ws, "thinking");
+    ws.send(new ArrayBuffer(5000));
+    await waitForType(ws, "playback_interrupt");
+    await waitForStatus(ws, "listening");
+
+    // A second turn starts immediately after; a second speech-start within
+    // the cooldown window must NOT abort it.
+    sendJSON(ws, { type: "text_message", text: "long response 2" });
+    await waitForStatus(ws, "thinking");
+    ws.send(new ArrayBuffer(5000));
+
+    sendJSON(ws, { type: "_get_counts" });
+    const duringCooldown = (await waitForType(ws, "_counts")) as Record<
+      string,
+      unknown
+    >;
+    expect(duringCooldown.interrupt).toBe(1);
 
     ws.close();
   });
@@ -1744,6 +1807,138 @@ describe("VoiceAgent — empty response handling", () => {
     expect(types).not.toContain("metrics");
     // Should have received an error
     expect(types).toContain("error");
+
+    ws.close();
+  });
+});
+describe("VoiceAgent — server audio transport", () => {
+  it("routes ingress, TTS, flush, interrupt, and end through the transport", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "_set_audio_transport", value: true });
+    await waitForAck(ws, "_set_audio_transport");
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+    expect(await getTransportEvents(ws)).toEqual([
+      expect.stringMatching(/^start:/)
+    ]);
+
+    sendJSON(ws, { type: "_transport_ingress", byteLength: 20000 });
+    await waitForAck(ws, "_transport_ingress");
+    await waitForType(ws, "transcript_end");
+    await waitForStatus(ws, "listening");
+    expect(await getTransportEvents(ws)).toEqual([
+      expect.stringMatching(/^start:/),
+      expect.stringMatching(/^send:/),
+      "flush"
+    ]);
+
+    const interrupted = waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "interrupt" });
+    await interrupted;
+    expect(await getTransportEvents(ws)).toContain("interrupt");
+
+    const ended = waitForStatus(ws, "idle");
+    sendJSON(ws, { type: "end_call" });
+    await ended;
+    expect(await getTransportEvents(ws)).toContain("stop");
+  });
+
+  it("stops the transport on abrupt connection close", async () => {
+    const instanceName = `voice-test-${crypto.randomUUID()}`;
+    const stub = env.TestVoiceAgent.get(
+      env.TestVoiceAgent.idFromName(instanceName)
+    ) as DurableObjectStub<TestVoiceAgent>;
+
+    const events = await runInDurableObject(stub, (instance) =>
+      instance.exerciseAbruptTransportCloseForTest()
+    );
+    expect(events).toContain("stop");
+  });
+
+  it("keeps binary WebSocket playback without a server transport", async () => {
+    const instanceName = `voice-test-${crypto.randomUUID()}`;
+    const stub = env.TestVoiceAgent.get(
+      env.TestVoiceAgent.idFromName(instanceName)
+    ) as DurableObjectStub<TestVoiceAgent>;
+
+    await expect(
+      runInDurableObject(stub, (instance) =>
+        instance.exerciseWebSocketPlaybackForTest()
+      )
+    ).resolves.toBe(true);
+  });
+});
+
+describe("VoiceAgent — streaming TTS (synthesizeStream branch)", () => {
+  async function collectBinaryUntilMetrics(
+    ws: WebSocket,
+    timeout = 5000
+  ): Promise<string[]> {
+    return new Promise<string[]>((resolve, reject) => {
+      const frames: string[] = [];
+      // ponytail: real-wait integration test — resolves on the `metrics` WS
+      // event; the timer is only a hang backstop (matches every helper here).
+      const timer = setTimeout(() => {
+        ws.removeEventListener("message", handler);
+        reject(new Error("Timeout collecting binary TTS frames"));
+      }, timeout);
+      const handler = (e: MessageEvent) => {
+        if (typeof e.data === "string") {
+          try {
+            const msg = JSON.parse(e.data) as Record<string, unknown>;
+            if (msg.type === "metrics") {
+              clearTimeout(timer);
+              ws.removeEventListener("message", handler);
+              resolve(frames);
+            }
+          } catch {
+            // ignore non-JSON text control messages
+          }
+          return;
+        }
+        void toArrayBuffer(e.data).then((buffer) => {
+          if (buffer) frames.push(decodeAudio(buffer));
+        });
+      };
+      ws.addEventListener("message", handler);
+    });
+  }
+
+  it("delivers chunked streaming audio when the TTS provider implements synthesizeStream", async () => {
+    const { ws } = await connectWS(uniqueStreamingTTSPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    const allFrames = collectBinaryUntilMetrics(ws);
+
+    // 20000 bytes triggers one utterance in the deterministic transcriber.
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    // Confirm the streaming branch ran — metrics is emitted after the pipeline.
+    const frames = await allFrames;
+
+    // Query the provider for the chunks it actually streamed.
+    const chunksResponse = waitForType(ws, "_streaming_tts_chunks");
+    sendJSON(ws, { type: "_get_streaming_tts_chunks" });
+    const chunks = (await chunksResponse) as {
+      chunks: string[];
+    };
+
+    // synthesizeStream splits a single sentence into exactly two chunks;
+    // batch synthesize() would leave this array empty.
+    expect(chunks.chunks).toHaveLength(2);
+    expect(frames.length).toBe(2);
+
+    // The concatenated streamed audio must reconstruct the spoken echo,
+    // proving both chunks arrived on the connection (not just the first).
+    const echoed = frames.join("");
+    expect(echoed).toEqual(expect.stringContaining("Echo:"));
 
     ws.close();
   });

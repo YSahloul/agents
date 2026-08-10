@@ -33,6 +33,8 @@ export type {
   VoicePipelineMetrics,
   TranscriptMessage
 } from "./types";
+export { SFUVoiceAudioInput } from "./sfu-voice-client";
+export type { SFUVoiceAudioInputOptions } from "./sfu-voice-client";
 
 export interface VoiceClientOptions {
   /** Agent name (matches the server-side Durable Object class). */
@@ -423,6 +425,25 @@ export class VoiceClient {
     this.#emit("outputdeviceerror", error);
   }
 
+  async #setAudioInputOutputDevice(input: VoiceAudioInput): Promise<void> {
+    if (!input.setOutputDevice) return;
+    try {
+      await input.setOutputDevice(this.#outputDeviceId);
+      this.#setOutputDeviceError(null);
+    } catch (error) {
+      const unsupported =
+        typeof error === "object" &&
+        error !== null &&
+        "name" in error &&
+        error.name === "NotSupportedError";
+      this.#setOutputDeviceError(
+        unsupported
+          ? UNSUPPORTED_OUTPUT_DEVICE_ERROR
+          : OUTPUT_DEVICE_SWITCH_ERROR
+      );
+    }
+  }
+
   // --- Connection ---
 
   connect(): void {
@@ -469,6 +490,12 @@ export class VoiceClient {
     };
 
     transport.onmessage = (data: string | ArrayBuffer | Blob) => {
+      if (
+        typeof data !== "string" &&
+        this.#options.audioInput?.handlesPlayback
+      ) {
+        return;
+      }
       if (typeof data === "string") {
         this.#handleJSONMessage(data);
       } else if (data instanceof Blob) {
@@ -515,23 +542,48 @@ export class VoiceClient {
     if (this.#options.preferredFormat) {
       startMsg.preferred_format = this.#options.preferredFormat;
     }
-    this.#transport.sendJSON(startMsg);
-    const ctx = await this.#getAudioContext();
-    if (this.#abortStaleCallStartup(callGeneration)) return;
-    await this.#getPlaybackDestination(ctx);
-    if (this.#abortStaleCallStartup(callGeneration)) return;
-    if (this.#options.audioInput) {
-      this.#options.audioInput.onAudioLevel = (rms) =>
-        this.#processAudioLevel(rms);
-      this.#options.audioInput.onAudioData = (pcm) => {
+    const audioInput = this.#options.audioInput;
+    if (!audioInput?.handlesPlayback) this.#transport.sendJSON(startMsg);
+    if (!audioInput?.handlesPlayback) {
+      const ctx = await this.#getAudioContext();
+      if (this.#abortStaleCallStartup(callGeneration)) return;
+      await this.#getPlaybackDestination(ctx);
+      if (this.#abortStaleCallStartup(callGeneration)) return;
+    }
+    if (audioInput) {
+      audioInput.onAudioLevel = (rms) => this.#processAudioLevel(rms);
+      audioInput.onAudioData = (pcm) => {
         if (this.#transport?.connected && !this.#isMuted) {
           this.#transport.sendBinary(pcm);
         }
       };
-      await this.#options.audioInput.start();
+      try {
+        await audioInput.start();
+        if (this.#abortStaleCallStartup(callGeneration)) return;
+        audioInput.setMuted?.(this.#isMuted);
+        await this.#setAudioInputOutputDevice(audioInput);
+      } catch (error) {
+        if (!this.#isCurrentCallStartup(callGeneration)) return;
+        this.#callGeneration++;
+        this.#inCall = false;
+        this.#serverCallAcknowledged = false;
+        if (this.#transport?.connected && !audioInput.handlesPlayback) {
+          this.#transport.sendJSON({ type: "end_call" });
+        }
+        this.#stopLocalCall();
+        this.#status = "idle";
+        this.#emit("statuschange", "idle");
+        this.#error =
+          error instanceof Error
+            ? error.message
+            : "Custom audio input failed to start";
+        this.#emit("error", this.#error);
+        throw error;
+      }
     } else {
       await this.#startMic();
     }
+    if (audioInput?.handlesPlayback) this.#transport.sendJSON(startMsg);
     this.#abortStaleCallStartup(callGeneration);
   }
 
@@ -593,6 +645,7 @@ export class VoiceClient {
       }
     }
 
+    this.#options.audioInput?.setMuted?.(this.#isMuted);
     this.#emit("mutechange", this.#isMuted);
   }
 
@@ -624,6 +677,11 @@ export class VoiceClient {
    */
   async setOutputDevice(outputDeviceId?: string): Promise<void> {
     this.#outputDeviceId = outputDeviceId ?? "default";
+    const audioInput = this.#options.audioInput;
+    if (audioInput?.setOutputDevice) {
+      await this.#setAudioInputOutputDevice(audioInput);
+      return;
+    }
     const generation = ++this.#outputDeviceSwitchGeneration;
     if (this.#playbackElement) {
       await this.#applyOutputDevice(this.#playbackElement, generation);

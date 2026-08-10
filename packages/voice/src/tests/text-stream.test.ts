@@ -95,7 +95,7 @@ describe("iterateText", () => {
       const chunks = await collect(iterateText(stream));
       expect(chunks).toEqual(["hello"]);
       expect(warn).toHaveBeenCalledWith(
-        "[voice] AI SDK textStream is not recommended because non-adjacent text parts may be joined incorrectly. Return result.stream from onTurn() instead."
+        "[voice] AI SDK textStream is not recommended because non-adjacent text parts may be joined incorrectly. Return result.fullStream from onTurn() instead."
       );
     } finally {
       warn.mockRestore();

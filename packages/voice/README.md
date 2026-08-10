@@ -1,6 +1,6 @@
 # @cloudflare/voice
 
-Voice pipeline for [Cloudflare Agents](https://github.com/cloudflare/agents) -- continuous STT, TTS, streaming, and real-time audio over WebSocket.
+Voice pipeline for [Cloudflare Agents](https://github.com/cloudflare/agents) -- speculative turn detection, persistent streaming TTS, and real-time WebRTC audio.
 
 The published package includes the complete Voice guide at `docs/index.md`.
 
@@ -22,7 +22,7 @@ npm install @cloudflare/voice
 
 ## Server: full voice agent (`withVoice`)
 
-Adds the complete voice pipeline: continuous STT, LLM turn handling, streaming TTS, interruption, and conversation persistence. When the transcriber reports speech start, the pipeline aborts active LLM/TTS work and tells the client to stop any queued playback so users can barge in before a final transcript is available.
+Adds the complete voice pipeline: continuous STT, LLM turn handling, streaming TTS, interruption, and conversation persistence. LLM tokens stream straight into the TTS provider so speech can begin before the response completes, and speech start clears active LLM, TTS, and playback work for barge-in.
 
 ```typescript
 import { Agent } from "agents";
@@ -45,7 +45,7 @@ export class MyAgent extends VoiceAgent<Env> {
 }
 ```
 
-`onTurn()` can also return streaming text, including AI SDK `stream` values:
+`onTurn()` can also return streaming text, including AI SDK `fullStream` values:
 
 ```typescript
 import { streamText } from "ai";
@@ -60,7 +60,7 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
     ]
   });
 
-  return result.stream;
+  return result.fullStream;
 }
 ```
 
@@ -100,6 +100,68 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
 - `forceEndCall(connection)` -- programmatically end a call
 - `saveMessage(role, content)` -- persist a message to conversation history
 - `getConversationHistory()` -- retrieve conversation history from SQLite
+
+## Bidirectional WebRTC audio (`withSFUVoice`)
+
+`withSFUVoice` keeps the voice protocol on the Agent WebSocket while routing
+microphone and assistant audio through Cloudflare Realtime SFU:
+
+```typescript
+import { Agent } from "agents";
+import {
+  withSFUVoice,
+  WorkersAIFluxSTT,
+  WorkersAITTS,
+  type SFUConfig
+} from "@cloudflare/voice";
+
+const VoiceAgent = withSFUVoice(Agent);
+
+export class MyAgent extends VoiceAgent<Env> {
+  transcriber = new WorkersAIFluxSTT(this.env.AI);
+  tts = new WorkersAITTS(this.env.AI);
+
+  getSFUConfig(): SFUConfig {
+    return {
+      appId: this.env.REALTIME_SFU_APP_ID,
+      apiToken: this.env.REALTIME_SFU_API_TOKEN
+    };
+  }
+
+  async onTurn(transcript: string) {
+    return `You said: ${transcript}`;
+  }
+}
+```
+
+Pass `SFUVoiceAudioInput` to the framework-agnostic client or React hook. Its
+endpoint is the public Agent instance route with `/voice` appended:
+
+```tsx
+import { useMemo } from "react";
+import { SFUVoiceAudioInput, useVoiceAgent } from "@cloudflare/voice/react";
+
+function App() {
+  const audioInput = useMemo(
+    () =>
+      new SFUVoiceAudioInput({
+        endpoint: "/agents/my-agent/alice/voice"
+      }),
+    []
+  );
+  const voice = useVoiceAgent({
+    agent: "my-agent",
+    name: "alice",
+    audioInput
+  });
+
+  return <button onClick={voice.startCall}>Start call</button>;
+}
+```
+
+Store `REALTIME_SFU_APP_ID` and `REALTIME_SFU_API_TOKEN` as Worker secrets.
+The browser transport uses native echo cancellation, noise suppression, and
+automatic gain control.
 
 ## Server: voice input only (`withVoiceInput`)
 

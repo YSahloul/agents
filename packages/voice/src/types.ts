@@ -22,7 +22,7 @@ export type VoiceStatus = "idle" | "listening" | "thinking" | "speaking";
 // --- Audio format ---
 
 /** Audio format the server uses for binary audio payloads. */
-export type VoiceAudioFormat = "mp3" | "pcm16" | "wav" | "opus";
+export type VoiceAudioFormat = "mp3" | "pcm16" | "wav" | "opus" | "mulaw";
 
 // --- Conversation message role ---
 
@@ -83,11 +83,52 @@ export interface TTSProvider {
   synthesize(text: string, signal?: AbortSignal): Promise<ArrayBuffer | null>;
 }
 
+/**
+ * Streaming text-to-speech — a stateless, **per-sentence** audio stream.
+ *
+ * `synthesizeStream(text)` is called once per sentence (the pipeline's
+ * `SentenceChunker` waits for a sentence boundary) and yields that sentence's
+ * audio chunks as they are produced. Stateless: one independent call per
+ * sentence, no session held between calls.
+ *
+ * Distinct from {@link RealtimeTTSProvider}, which holds a live,
+ * token-granular session.
+ */
 export interface StreamingTTSProvider {
   synthesizeStream(
     text: string,
     signal?: AbortSignal
   ): AsyncGenerator<ArrayBuffer>;
+}
+
+/**
+ * A text-to-speech provider that holds one bidirectional synthesis session,
+ * fed **token-by-token** as the LLM streams, so audio starts before any
+ * sentence boundary. Stateful and interruptible (`clear()` for mid-utterance
+ * barge-in).
+ *
+ * Distinct from {@link StreamingTTSProvider}, which is stateless and
+ * per-sentence.
+ */
+export interface RealtimeTTSProvider {
+  /** Binary audio format emitted by the session. */
+  readonly audioFormat?: VoiceAudioFormat;
+  /** Sample rate of raw PCM session output. */
+  readonly sampleRate?: number;
+  createSession(options: RealtimeTTSSessionOptions): RealtimeTTSSession;
+}
+
+export interface RealtimeTTSSessionOptions {
+  onAudio: (audio: ArrayBuffer) => void | Promise<void>;
+  onError?: (error: unknown) => void;
+}
+
+export interface RealtimeTTSSession {
+  waitUntilReady?(): Promise<void>;
+  speak(text: string): void | Promise<void>;
+  flush(): void | Promise<void>;
+  clear(): void | Promise<void>;
+  close(): void | Promise<void>;
 }
 
 // --- Transcriber (continuous per-call STT) ---
@@ -125,6 +166,17 @@ export interface TranscriberSessionOptions {
    * utterance is available. The transcript may be omitted or unstable.
    */
   onSpeechStart?: (text?: string) => void;
+  /**
+   * Called when the model predicts that the user has finished speaking.
+   * The transcript is provisional; providers may subsequently call
+   * `onTurnResumed` instead of `onUtterance`.
+   */
+  onEagerUtterance?: (transcript: string) => void;
+  /**
+   * Called when speech resumes after an eager end-of-turn prediction.
+   * The active speculative response must be cancelled.
+   */
+  onTurnResumed?: (transcript?: string) => void;
   /**
    * Called when the model detects a complete utterance.
    * The transcript is the stable text for this turn.
@@ -203,6 +255,8 @@ export interface TranscriberSession {
  * ```
  */
 export interface VoiceAudioInput {
+  /** True when this input owns assistant audio playback. */
+  readonly handlesPlayback?: boolean;
   /** Start capturing audio. Called by VoiceClient on startCall(). */
   start(): Promise<void>;
   /** Stop capturing audio. Called by VoiceClient on endCall() or disconnect(). */
@@ -228,6 +282,23 @@ export interface VoiceAudioInput {
    * unused — the audio will arrive on a separate connection.
    */
   onAudioData?: ((pcm: ArrayBuffer) => void) | null;
+  /** Apply the client's current mute state to the input. */
+  setMuted?(muted: boolean): void;
+  /** Select the input-owned assistant playback device. */
+  setOutputDevice?(deviceId: string): void | Promise<void>;
+}
+
+// --- Server audio transport ---
+
+export interface VoiceServerAudioTransport {
+  start(
+    connectionId: string,
+    onAudio: (audio: ArrayBuffer) => void
+  ): void | Promise<void>;
+  send(connectionId: string, audio: ArrayBuffer): void | Promise<void>;
+  flush(connectionId: string): void | Promise<void>;
+  interrupt(connectionId: string): void | Promise<void>;
+  stop(connectionId: string): void | Promise<void>;
 }
 
 // --- Voice transport ---

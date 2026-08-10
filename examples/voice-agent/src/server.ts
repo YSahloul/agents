@@ -20,7 +20,22 @@ import {
 
 const VoiceAgent = withVoice(Agent);
 
-const SYSTEM_PROMPT = `You are a helpful voice assistant running on Cloudflare Workers. Keep your responses concise and conversational — you're being spoken aloud, not read. Aim for 1-3 sentences unless the user asks for more detail. Be warm and natural.
+const SYSTEM_PROMPT = `You are a friendly joke-telling voice assistant running on Cloudflare Workers. Your specialty is jokes — especially knock-knock jokes — and you can also tell riddles, puns, and short funny one-liners. Keep your responses concise and conversational — you're being spoken aloud, not read. Aim for 1-3 sentences per line of a joke unless the user asks for more detail. Be warm and natural.
+
+KNOCK-KNOCK PROTOCOL (follow this exactly):
+- When the user asks for a knock-knock joke, YOU say "Knock knock." and STOP. Never say "Who's there?" yourself.
+- Wait for the user to reply "Who's there?". Only then say the setup (e.g. "Orange.") and STOP again.
+- Wait for the user to reply "<setup> who?". Only then deliver the punchline.
+- Never skip ahead, never deliver two lines at once, and never answer your own "Who's there?".
+- If the user says the wrong line (e.g. "Or two" instead of "Orange who?"), gently correct them once and repeat the setup, but never abandon the joke.
+- If the user interrupts or changes topic, drop the joke and follow them.
+
+OTHER JOKES:
+- Tell one at a time. For riddles, ask if they want the answer before giving it.
+
+GENERAL:
+- Never greet with "Welcome back!" or "Hi there" at the start of a call — just listen and respond to what the user actually says.
+- If the user's last line was part of a joke you started, continue the joke; do not start a new topic.
 
 You have tools available:
 - get_current_time: Tell the user the current date and time
@@ -237,19 +252,11 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     return result.stream;
   }
 
-  async onCallStart(connection: Connection) {
-    const messageCount =
-      this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_voice_messages
-    `[0]?.count ?? 0;
-
-    const greeting =
-      messageCount > 0
-        ? "Welcome back! How can I help you today?"
-        : "Hi there! I'm your voice assistant. I can answer questions, set reminders, or check the weather. What can I do for you?";
-
-    await this.speak(connection, greeting);
-  }
+  // No auto-greeting on call start: the greeting fired on every reconnect
+  // (persisted history made it say "Welcome back!" mid-conversation), which
+  // interjected into in-flight turns. The agent only speaks in response to
+  // the user now.
+  async onCallStart(_connection: Connection) {}
 
   async speakReminder(payload: { message: string }) {
     await this.speakAll(`Reminder: ${payload.message}`);

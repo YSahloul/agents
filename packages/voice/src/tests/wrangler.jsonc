@@ -36,12 +36,24 @@
         "name": "TestPcm24kVoiceAgent"
       },
       {
+        "class_name": "TestStreamingTtsVoiceAgent",
+        "name": "TestStreamingTtsVoiceAgent"
+      },
+      {
         "class_name": "TestVoiceInputAgent",
         "name": "TestVoiceInputAgent"
       },
       {
         "class_name": "TestRejectCallVoiceInputAgent",
         "name": "TestRejectCallVoiceInputAgent"
+      },
+      {
+        "class_name": "TestSFUVoiceAgent",
+        "name": "TestSFUVoiceAgent"
+      },
+      {
+        "class_name": "TestMissingSFUConfigAgent",
+        "name": "TestMissingSFUConfigAgent"
       }
     ]
   },

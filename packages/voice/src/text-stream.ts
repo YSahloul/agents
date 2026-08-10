@@ -206,7 +206,7 @@ function warnDeprecatedTextStream(source?: object): void {
   warnedTextStreamSources.add(source);
 
   console.warn(
-    "[voice] AI SDK textStream is not recommended because non-adjacent text parts may be joined incorrectly. Return result.stream from onTurn() instead."
+    "[voice] AI SDK textStream is not recommended because non-adjacent text parts may be joined incorrectly. Return result.fullStream from onTurn() instead."
   );
 }
 

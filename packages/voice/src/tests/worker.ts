@@ -21,8 +21,11 @@ export type Env = {
   TestAiSdkFullStreamVoiceAgent: DurableObjectNamespace;
   TestAiSdkTextStreamVoiceAgent: DurableObjectNamespace;
   TestPcm24kVoiceAgent: DurableObjectNamespace;
+  TestStreamingTtsVoiceAgent: DurableObjectNamespace;
   TestVoiceInputAgent: DurableObjectNamespace;
   TestRejectCallVoiceInputAgent: DurableObjectNamespace;
+  TestSFUVoiceAgent: DurableObjectNamespace;
+  TestMissingSFUConfigAgent: DurableObjectNamespace;
 };
 
 export default {

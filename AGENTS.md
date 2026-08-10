@@ -179,6 +179,7 @@ CI runs on every PR (`pnpm install --frozen-lockfile && pnpm run build && pnpm r
 - Keep examples simple and self-contained — they're user-facing learning material
 - Use Cloudflare Workers APIs (KV, D1, R2, Durable Objects, etc.) over third-party equivalents
 - Use Workers AI for LLM calls in examples — not third-party APIs like OpenAI or Anthropic
+- Say "I don't know" or "the logs don't show that" when the evidence isn't there — NEVER invent an explanation, root cause, or model behavior the logs/code can't support. If a diagnosis requires information the logs don't capture, say so explicitly and (if asked) add the logging that would capture it. Do not present inference or plausible-sounding narratives as fact.
 
 **Ask first:**
 

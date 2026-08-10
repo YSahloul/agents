@@ -4,13 +4,19 @@
  * Tests protobuf varint encoding/decoding, packet encode/decode roundtrips,
  * and audio format conversion (48kHz stereo ↔ 16kHz mono).
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  addSFUTracks,
+  closeSFUWebSocketAdapter,
+  createSFUSession,
+  createSFUWebSocketAdapter,
   decodeVarint,
+  downsample48kStereoTo16kMono,
+  encodePayloadToProtobuf,
   encodeVarint,
   extractPayloadFromProtobuf,
-  encodePayloadToProtobuf,
-  downsample48kStereoTo16kMono,
+  renegotiateSFUSession,
+  resample24kMonoTo48kStereo,
   upsample16kMonoTo48kStereo
 } from "../sfu-utils";
 
@@ -234,21 +240,19 @@ describe("audio conversion", () => {
   });
 
   describe("upsample16kMonoTo48kStereo", () => {
-    it("duplicates mono samples to stereo pairs (3x)", () => {
+    it("linearly interpolates mono samples into stereo pairs (3x)", () => {
       const mono = make16kMono([1000, -500]);
       const stereo = upsample16kMonoTo48kStereo(mono);
       const pairs = read48kStereo(stereo);
 
-      // 2 mono samples → 6 stereo pairs
-      expect(pairs.length).toBe(6);
-      // First 3 pairs should be [1000, 1000]
-      expect(pairs[0]).toEqual([1000, 1000]);
-      expect(pairs[1]).toEqual([1000, 1000]);
-      expect(pairs[2]).toEqual([1000, 1000]);
-      // Next 3 pairs should be [-500, -500]
-      expect(pairs[3]).toEqual([-500, -500]);
-      expect(pairs[4]).toEqual([-500, -500]);
-      expect(pairs[5]).toEqual([-500, -500]);
+      expect(pairs).toEqual([
+        [1000, 1000],
+        [500, 500],
+        [0, 0],
+        [-500, -500],
+        [-500, -500],
+        [-500, -500]
+      ]);
     });
 
     it("returns empty buffer for empty input", () => {
@@ -279,5 +283,123 @@ describe("audio conversion", () => {
 
       expect(result).toEqual(original);
     });
+  });
+});
+
+describe("malformed protobuf packets", () => {
+  it.each([
+    new Uint8Array([0x80]),
+    new Uint8Array([0x08, 0x80]),
+    new Uint8Array([0x2a, 0x02, 0x01]),
+    new Uint8Array([0x09])
+  ])("returns null instead of reading past the packet", (packet) => {
+    expect(extractPayloadFromProtobuf(packet.buffer)).toBeNull();
+  });
+});
+
+describe("linear PCM resampling", () => {
+  it("interpolates 24kHz mono to 48kHz stereo", () => {
+    const input = new Int16Array([0, 1000, 2000]);
+    const output = resample24kMonoTo48kStereo(input.buffer);
+    expect(Array.from(new Int16Array(output.buffer))).toEqual([
+      0, 0, 500, 500, 1000, 1000, 1500, 1500, 2000, 2000, 2000, 2000
+    ]);
+  });
+
+  it("truncates odd trailing bytes and returns aligned fresh output", () => {
+    const source = new Uint8Array([0xe8, 0x03, 0xff]);
+    const output = resample24kMonoTo48kStereo(source.buffer);
+    expect(output.byteOffset).toBe(0);
+    expect(output.byteLength % 2).toBe(0);
+    expect(Array.from(new Int16Array(output.buffer))).toEqual([
+      1000, 1000, 1000, 1000
+    ]);
+    expect(output.buffer).not.toBe(source.buffer);
+  });
+});
+
+describe("SFU API helpers", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("uses a custom API base and PUT for renegotiation", async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        sessionDescription: { type: "answer", sdp: "answer" }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renegotiateSFUSession(
+      {
+        appId: "app",
+        apiToken: "token",
+        apiBase: "https://example.com/realtime"
+      },
+      "session",
+      "offer"
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://example.com/realtime/apps/app/sessions/session/renegotiate",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          sessionDescription: { type: "offer", sdp: "offer" }
+        })
+      })
+    );
+  });
+
+  it("throws precise errors for malformed successful responses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({}))
+    );
+    await expect(
+      createSFUSession({ appId: "app", apiToken: "token" })
+    ).rejects.toThrow("SFU create session response missing sessionId");
+    await expect(
+      renegotiateSFUSession(
+        { appId: "app", apiToken: "token" },
+        "session",
+        "offer"
+      )
+    ).rejects.toThrow(
+      "SFU renegotiate session response missing sessionDescription.sdp"
+    );
+  });
+
+  it("includes the operation, status, and body in API errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("bad offer", { status: 422 }))
+    );
+    await expect(
+      addSFUTracks({ appId: "app", apiToken: "token" }, "session", {})
+    ).rejects.toThrow("SFU add tracks failed (422): bad offer");
+    await expect(
+      createSFUWebSocketAdapter({ appId: "app", apiToken: "token" }, [])
+    ).rejects.toThrow("SFU create WebSocket adapter failed (422): bad offer");
+  });
+
+  it("treats only adapter_not_found 503 responses as already closed", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json(
+          { tracks: [{ errorCode: "adapter_not_found" }] },
+          { status: 503 }
+        )
+      )
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const config = { appId: "app", apiToken: "token" };
+
+    await expect(closeSFUWebSocketAdapter(config, "closed")).resolves.toEqual({
+      alreadyClosed: true
+    });
+    await expect(closeSFUWebSocketAdapter(config, "broken")).rejects.toThrow(
+      "SFU close WebSocket adapter failed (503): unavailable"
+    );
   });
 });

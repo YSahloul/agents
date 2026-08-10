@@ -32,6 +32,25 @@ export function decodeVarint(
   return { value, bytesRead };
 }
 
+function readVarint(
+  buf: Uint8Array,
+  offset: number
+): { value: number; bytesRead: number } | null {
+  let value = 0;
+  for (
+    let bytesRead = 0;
+    bytesRead < 5 && offset + bytesRead < buf.length;
+    bytesRead++
+  ) {
+    const byte = buf[offset + bytesRead];
+    value |= (byte & 0x7f) << (bytesRead * 7);
+    if ((byte & 0x80) === 0) {
+      return { value: value >>> 0, bytesRead: bytesRead + 1 };
+    }
+  }
+  return null;
+}
+
 export function encodeVarint(value: number): Uint8Array {
   const bytes: number[] = [];
   while (value > 0x7f) {
@@ -50,30 +69,31 @@ export function extractPayloadFromProtobuf(
   let offset = 0;
 
   while (offset < buf.length) {
-    const { value: tag, bytesRead: tagBytes } = decodeVarint(buf, offset);
-    offset += tagBytes;
+    const tag = readVarint(buf, offset);
+    if (!tag) return null;
+    offset += tag.bytesRead;
 
-    const fieldNumber = tag >>> 3;
-    const wireType = tag & 0x07;
+    const fieldNumber = tag.value >>> 3;
+    const wireType = tag.value & 0x07;
 
     if (wireType === 0) {
-      // Varint
-      const { bytesRead } = decodeVarint(buf, offset);
-      offset += bytesRead;
-    } else if (wireType === 2) {
-      // Length-delimited (bytes)
-      const { value: length, bytesRead: lenBytes } = decodeVarint(buf, offset);
-      offset += lenBytes;
-
-      if (fieldNumber === 5) {
-        // payload field
-        return buf.slice(offset, offset + length);
-      }
-      offset += length;
-    } else {
-      // Unknown wire type — skip
-      break;
+      const value = readVarint(buf, offset);
+      if (!value) return null;
+      offset += value.bytesRead;
+      continue;
     }
+
+    if (wireType !== 2) return null;
+
+    const length = readVarint(buf, offset);
+    if (!length) return null;
+    offset += length.bytesRead;
+    if (length.value > buf.length - offset) return null;
+
+    if (fieldNumber === 5) {
+      return buf.slice(offset, offset + length.value);
+    }
+    offset += length.value;
   }
 
   return null;
@@ -97,55 +117,71 @@ export function encodePayloadToProtobuf(payload: Uint8Array): ArrayBuffer {
 
 // --- Audio conversion ---
 
+function alignedInt16(input: ArrayBuffer | Uint8Array): Int16Array {
+  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+  const copy = bytes.slice(0, bytes.byteLength - (bytes.byteLength % 2));
+  return new Int16Array(copy.buffer);
+}
+
+function resampleLinear(
+  input: Int16Array,
+  fromRate: number,
+  toRate: number
+): Int16Array {
+  if (input.length === 0) return new Int16Array();
+  const outputLength = Math.floor((input.length * toRate) / fromRate);
+  const output = new Int16Array(outputLength);
+  const ratio = fromRate / toRate;
+
+  for (let i = 0; i < outputLength; i++) {
+    const sourceIndex = i * ratio;
+    const low = Math.floor(sourceIndex);
+    const high = Math.min(low + 1, input.length - 1);
+    const fraction = sourceIndex - low;
+    output[i] = Math.round(
+      input[low] * (1 - fraction) + input[high] * fraction
+    );
+  }
+  return output;
+}
+
+/** Convert mono PCM16 at an arbitrary sample rate to 48kHz stereo PCM16. */
+export function resampleMonoTo48kStereo(
+  input: ArrayBuffer,
+  inputSampleRate: number
+): Uint8Array {
+  const mono48k = resampleLinear(alignedInt16(input), inputSampleRate, 48000);
+  const stereo = new Int16Array(mono48k.length * 2);
+  for (let i = 0; i < mono48k.length; i++) {
+    stereo[i * 2] = mono48k[i];
+    stereo[i * 2 + 1] = mono48k[i];
+  }
+  return new Uint8Array(stereo.buffer);
+}
+
 /** Downsample 48kHz stereo interleaved PCM to 16kHz mono PCM (both 16-bit LE). */
 export function downsample48kStereoTo16kMono(
   stereo48k: Uint8Array
 ): ArrayBuffer {
-  // Input: 48kHz stereo 16-bit LE → 2 channels × 2 bytes = 4 bytes per sample pair
-  // Output: 16kHz mono 16-bit LE → 2 bytes per sample
-  // Ratio: 48000/16000 = 3, plus stereo→mono = average of L+R
-
-  const inputView = new DataView(
-    stereo48k.buffer,
-    stereo48k.byteOffset,
-    stereo48k.byteLength
-  );
-  const inputSamples = stereo48k.byteLength / 4; // stereo sample pairs
-  const outputSamples = Math.floor(inputSamples / 3);
-  const output = new ArrayBuffer(outputSamples * 2);
-  const outputView = new DataView(output);
-
-  for (let i = 0; i < outputSamples; i++) {
-    const srcOffset = i * 3 * 4; // 3x downsample, 4 bytes per stereo pair
-    if (srcOffset + 3 >= stereo48k.byteLength) break;
-    const left = inputView.getInt16(srcOffset, true);
-    const right = inputView.getInt16(srcOffset + 2, true);
-    const mono = Math.round((left + right) / 2);
-    outputView.setInt16(i * 2, mono, true);
+  const stereo = alignedInt16(stereo48k);
+  const mono48k = new Int16Array(Math.floor(stereo.length / 2));
+  for (let i = 0; i < mono48k.length; i++) {
+    mono48k[i] = Math.round((stereo[i * 2] + stereo[i * 2 + 1]) / 2);
   }
-
-  return output;
+  const samples = resampleLinear(mono48k, 48000, 16000);
+  const output = new Uint8Array(samples.byteLength);
+  output.set(new Uint8Array(samples.buffer));
+  return output.buffer;
 }
 
 /** Upsample 16kHz mono PCM to 48kHz stereo interleaved PCM (both 16-bit LE). */
 export function upsample16kMonoTo48kStereo(mono16k: ArrayBuffer): Uint8Array {
-  const inputView = new DataView(mono16k);
-  const inputSamples = mono16k.byteLength / 2;
-  const outputSamples = inputSamples * 3; // 3x upsample
-  const output = new ArrayBuffer(outputSamples * 4); // stereo = 4 bytes per pair
-  const outputView = new DataView(output);
+  return resampleMonoTo48kStereo(mono16k, 16000);
+}
 
-  for (let i = 0; i < inputSamples; i++) {
-    const sample = inputView.getInt16(i * 2, true);
-    // Write 3 stereo samples (simple sample duplication)
-    for (let j = 0; j < 3; j++) {
-      const outOffset = (i * 3 + j) * 4;
-      outputView.setInt16(outOffset, sample, true); // left
-      outputView.setInt16(outOffset + 2, sample, true); // right
-    }
-  }
-
-  return new Uint8Array(output);
+/** Resample 24kHz mono PCM to 48kHz stereo interleaved PCM (both 16-bit LE). */
+export function resample24kMonoTo48kStereo(mono24k: ArrayBuffer): Uint8Array {
+  return resampleMonoTo48kStereo(mono24k, 24000);
 }
 
 // --- SFU API helpers ---
@@ -153,54 +189,79 @@ export function upsample16kMonoTo48kStereo(mono16k: ArrayBuffer): Uint8Array {
 export interface SFUConfig {
   appId: string;
   apiToken: string;
+  apiBase?: string;
 }
 
-const SFU_API_BASE = "https://rtc.live.cloudflare.com/v1";
+const DEFAULT_SFU_API_BASE = "https://rtc.live.cloudflare.com/v1";
 
-export async function sfuFetch(
+type SFUMethod = "POST" | "PUT";
+
+async function requestSFU(
+  config: SFUConfig,
+  operation: string,
+  path: string,
+  method: SFUMethod,
+  body?: unknown
+): Promise<unknown> {
+  const response = await fetch(
+    `${config.apiBase ?? DEFAULT_SFU_API_BASE}/apps/${config.appId}${path}`,
+    {
+      method,
+      headers: {
+        Authorization: `Bearer ${config.apiToken}`,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" })
+      },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    }
+  );
+  if (!response.ok) {
+    throw new Error(
+      `SFU ${operation} failed (${response.status}): ${await response.text()}`
+    );
+  }
+  return response.json() as Promise<unknown>;
+}
+
+export function sfuFetch(
   config: SFUConfig,
   path: string,
   body: unknown
 ): Promise<unknown> {
-  const url = `${SFU_API_BASE}/apps/${config.appId}${path}`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.apiToken}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`SFU API error ${response.status}: ${text}`);
-  }
-  return response.json();
+  return requestSFU(config, "request", path, "POST", body);
 }
 
 export async function createSFUSession(
   config: SFUConfig
 ): Promise<{ sessionId: string }> {
-  const url = `${SFU_API_BASE}/apps/${config.appId}/sessions/new`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.apiToken}`
-    }
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`SFU API error ${response.status}: ${text}`);
+  const result = await requestSFU(
+    config,
+    "create session",
+    "/sessions/new",
+    "POST"
+  );
+  if (
+    typeof result !== "object" ||
+    result === null ||
+    !("sessionId" in result) ||
+    typeof result.sessionId !== "string"
+  ) {
+    throw new Error("SFU create session response missing sessionId");
   }
-  return response.json() as Promise<{ sessionId: string }>;
+  return { sessionId: result.sessionId };
 }
 
-export async function addSFUTracks(
+export function addSFUTracks(
   config: SFUConfig,
   sessionId: string,
   body: unknown
 ): Promise<unknown> {
-  return sfuFetch(config, `/sessions/${sessionId}/tracks/new`, body);
+  return requestSFU(
+    config,
+    "add tracks",
+    `/sessions/${sessionId}/tracks/new`,
+    "POST",
+    body
+  );
 }
 
 export async function renegotiateSFUSession(
@@ -208,27 +269,79 @@ export async function renegotiateSFUSession(
   sessionId: string,
   sdp: string
 ): Promise<unknown> {
-  const url = `${SFU_API_BASE}/apps/${config.appId}/sessions/${sessionId}/renegotiate`;
-  const response = await fetch(url, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${config.apiToken}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      sessionDescription: { type: "answer", sdp }
-    })
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`SFU renegotiate error ${response.status}: ${text}`);
+  const result = await requestSFU(
+    config,
+    "renegotiate session",
+    `/sessions/${sessionId}/renegotiate`,
+    "PUT",
+    { sessionDescription: { type: "offer", sdp } }
+  );
+  if (
+    typeof result !== "object" ||
+    result === null ||
+    !("sessionDescription" in result) ||
+    typeof result.sessionDescription !== "object" ||
+    result.sessionDescription === null ||
+    !("sdp" in result.sessionDescription) ||
+    typeof result.sessionDescription.sdp !== "string"
+  ) {
+    throw new Error(
+      "SFU renegotiate session response missing sessionDescription.sdp"
+    );
   }
-  return response.json();
+  return result;
 }
 
-export async function createSFUWebSocketAdapter(
+export function createSFUWebSocketAdapter(
   config: SFUConfig,
   tracks: unknown[]
 ): Promise<unknown> {
-  return sfuFetch(config, "/adapters/websocket/new", { tracks });
+  return requestSFU(
+    config,
+    "create WebSocket adapter",
+    "/adapters/websocket/new",
+    "POST",
+    { tracks }
+  );
+}
+
+export async function closeSFUWebSocketAdapter(
+  config: SFUConfig,
+  adapterId: string
+): Promise<{ alreadyClosed: boolean }> {
+  const response = await fetch(
+    `${config.apiBase ?? DEFAULT_SFU_API_BASE}/apps/${config.appId}/adapters/websocket/close`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.apiToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ tracks: [{ adapterId }] })
+    }
+  );
+  const text = await response.text();
+  if (response.ok) return { alreadyClosed: false };
+
+  if (response.status === 503) {
+    try {
+      const result: unknown = JSON.parse(text);
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        "tracks" in result &&
+        Array.isArray(result.tracks) &&
+        typeof result.tracks[0] === "object" &&
+        result.tracks[0] !== null &&
+        "errorCode" in result.tracks[0] &&
+        result.tracks[0].errorCode === "adapter_not_found"
+      ) {
+        return { alreadyClosed: true };
+      }
+    } catch {}
+  }
+
+  throw new Error(
+    `SFU close WebSocket adapter failed (${response.status}): ${text}`
+  );
 }

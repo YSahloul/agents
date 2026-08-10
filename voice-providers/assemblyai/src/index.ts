@@ -336,6 +336,7 @@ class AssemblyAISession implements TranscriberSession {
   #pendingChunks: ArrayBuffer[] = [];
   #pendingBytes = 0;
   #pendingOverflowLogged = false;
+  #audioSendLogged = false;
   // Sub-50ms audio accumulating toward MIN_CHUNK_BYTES (see #sendAudio).
   #coalesceChunks: Uint8Array[] = [];
   #coalesceBytes = 0;
@@ -369,6 +370,11 @@ class AssemblyAISession implements TranscriberSession {
       const url = _buildConnectionUrl(this.#providerOpts)
         .replace(/^wss:\/\//, "https://")
         .replace(/^ws:\/\//, "http://");
+      console.log("[VoiceTrace]", {
+        event: "stt_external_connecting",
+        provider: "assemblyai",
+        endpoint: new URL(url).hostname
+      });
       const resp = await fetch(url, {
         headers: {
           Upgrade: "websocket",
@@ -401,6 +407,10 @@ class AssemblyAISession implements TranscriberSession {
       ws.accept();
       this.#ws = ws;
       this.#connected = true;
+      console.log("[VoiceTrace]", {
+        event: "stt_external_connected",
+        provider: "assemblyai"
+      });
 
       ws.addEventListener("message", (event: MessageEvent) => {
         this.#handleMessage(event);
@@ -519,6 +529,14 @@ class AssemblyAISession implements TranscriberSession {
   #wsSend(data: ArrayBuffer | string): void {
     try {
       this.#ws?.send(data);
+      if (typeof data !== "string" && !this.#audioSendLogged) {
+        this.#audioSendLogged = true;
+        console.log("[VoiceTrace]", {
+          event: "stt_external_audio_sent",
+          provider: "assemblyai",
+          bytes: data.byteLength
+        });
+      }
     } catch (err) {
       if (!this.#closed) {
         console.error("[AssemblyAISTT] WebSocket send failed:", err);
@@ -625,6 +643,11 @@ class AssemblyAISession implements TranscriberSession {
 
       if (!transcript) return;
       if (data.end_of_turn === true) {
+        console.log("[VoiceTrace]", {
+          event: "stt_external_transcript_received",
+          provider: "assemblyai",
+          chars: transcript.length
+        });
         this.#sessionOpts?.onUtterance?.(transcript);
       } else {
         this.#sessionOpts?.onInterim?.(transcript);

@@ -178,6 +178,28 @@ class FakeAudioInput implements VoiceAudioInput {
   }
 }
 
+class PlaybackOwningAudioInput extends FakeAudioInput {
+  readonly handlesPlayback = true;
+  muted: boolean[] = [];
+  outputDeviceIds: string[] = [];
+  startError: Error | null = null;
+  outputDeviceError: Error | null = null;
+
+  override async start(): Promise<void> {
+    if (this.startError) throw this.startError;
+    await super.start();
+  }
+
+  setMuted(muted: boolean): void {
+    this.muted.push(muted);
+  }
+
+  async setOutputDevice(deviceId: string): Promise<void> {
+    this.outputDeviceIds.push(deviceId);
+    if (this.outputDeviceError) throw this.outputDeviceError;
+  }
+}
+
 class DeferredAudioInput implements VoiceAudioInput {
   onAudioLevel: ((rms: number) => void) | null = null;
   onAudioData: ((pcm: ArrayBuffer) => void) | null = null;
@@ -202,6 +224,10 @@ class DeferredAudioInput implements VoiceAudioInput {
   resolveStart(): void {
     this.#resolveStart?.();
   }
+}
+
+class DeferredPlaybackOwningAudioInput extends DeferredAudioInput {
+  readonly handlesPlayback = true;
 }
 
 let originalAudioContext: typeof AudioContext | undefined;
@@ -1026,5 +1052,95 @@ describe("VoiceClient playback bridge reuse", () => {
 
     expect(audioContext.mediaStreamDestinationCount).toBe(1);
     expect(audioElement.playCount).toBe(1);
+  });
+});
+
+describe("VoiceClient playback-owning audio inputs", () => {
+  it("skips binary playback and propagates mute and output device state", async () => {
+    const transport = new MockTransport();
+    const audioInput = new PlaybackOwningAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput,
+      outputDeviceId: "speaker-1"
+    });
+
+    client.toggleMute();
+    client.connect();
+    await client.startCall();
+    transport.receive(new ArrayBuffer(4));
+    await Promise.resolve();
+
+    expect(audioContext.mediaStreamDestinationCount).toBe(0);
+    expect(audioContext.source).toBeNull();
+    expect(audioInput.muted).toEqual([true, true]);
+    expect(audioInput.outputDeviceIds).toEqual(["speaker-1"]);
+
+    client.toggleMute();
+    await client.setOutputDevice("speaker-2");
+    expect(audioInput.muted.at(-1)).toBe(false);
+    expect(audioInput.outputDeviceIds.at(-1)).toBe("speaker-2");
+  });
+
+  it("sets up playback-owning input before starting the server call", async () => {
+    const transport = new MockTransport();
+    const audioInput = new DeferredPlaybackOwningAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+
+    client.connect();
+    const startCall = client.startCall();
+    await Promise.resolve();
+
+    expect(transport.sentJSON).not.toContainEqual({ type: "start_call" });
+
+    audioInput.resolveStart();
+    await startCall;
+
+    expect(transport.sentJSON).toContainEqual({ type: "start_call" });
+  });
+
+  it("restores idle when playback-owning input startup rejects", async () => {
+    const transport = new MockTransport();
+    const audioInput = new PlaybackOwningAudioInput();
+    audioInput.startError = new Error("SFU startup failed");
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+
+    client.connect();
+    await expect(client.startCall()).rejects.toThrow("SFU startup failed");
+
+    expect(transport.sentJSON).not.toContainEqual({ type: "start_call" });
+    expect(transport.sentJSON).not.toContainEqual({ type: "end_call" });
+    expect(client.status).toBe("idle");
+    expect(client.error).toBe("SFU startup failed");
+    expect(audioInput.stopped).toBe(true);
+    expect(audioInput.onAudioLevel).toBeNull();
+    expect(audioInput.onAudioData).toBeNull();
+  });
+
+  it("maps a named unsupported sink error to the existing client message", async () => {
+    const transport = new MockTransport();
+    const audioInput = new PlaybackOwningAudioInput();
+    const error = new Error("unsupported");
+    error.name = "NotSupportedError";
+    audioInput.outputDeviceError = error;
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+
+    await client.setOutputDevice("speaker-1");
+    expect(client.outputDeviceError).toBe(
+      "Audio output device selection is not supported in this browser."
+    );
   });
 });

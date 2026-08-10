@@ -127,6 +127,7 @@ export class TelnyxSTTSession implements TranscriberSession {
   private pendingChunks: ArrayBuffer[] = [];
   private closed = false;
   private sentWavHeader = false;
+  private audioSendLogged = false;
   private inputFormat: string;
   private onInterim?: (text: string) => void;
   private onUtterance?: (transcript: string) => void;
@@ -152,6 +153,11 @@ export class TelnyxSTTSession implements TranscriberSession {
   private async connect(wsUrl: string, apiKey: string): Promise<void> {
     try {
       // Use the Cloudflare Workers fetch-upgrade pattern.
+      console.log("[VoiceTrace]", {
+        event: "stt_external_connecting",
+        provider: "telnyx",
+        endpoint: new URL(wsUrl).hostname
+      });
       const resp = await fetch(wsUrl.replace("wss://", "https://"), {
         headers: {
           Upgrade: "websocket",
@@ -198,6 +204,10 @@ export class TelnyxSTTSession implements TranscriberSession {
       if (this.closed) return;
 
       this.ws = ws;
+      console.log("[VoiceTrace]", {
+        event: "stt_external_connected",
+        provider: "telnyx"
+      });
 
       // When using wav format, send the WAV header before any PCM data
       // so the API knows the sample rate, bit depth, and channel count.
@@ -208,7 +218,7 @@ export class TelnyxSTTSession implements TranscriberSession {
 
       // Flush any chunks buffered while the connection was being established.
       for (const chunk of this.pendingChunks) {
-        ws.send(chunk);
+        this.sendAudio(ws, chunk);
       }
       this.pendingChunks = [];
     } catch (error) {
@@ -228,9 +238,20 @@ export class TelnyxSTTSession implements TranscriberSession {
     if (this.closed) return;
 
     if (this.ws) {
-      this.ws.send(chunk);
+      this.sendAudio(this.ws, chunk);
     } else {
       this.pendingChunks.push(chunk);
+    }
+  }
+  private sendAudio(ws: WebSocket, chunk: ArrayBuffer): void {
+    ws.send(chunk);
+    if (!this.audioSendLogged) {
+      this.audioSendLogged = true;
+      console.log("[VoiceTrace]", {
+        event: "stt_external_audio_sent",
+        provider: "telnyx",
+        bytes: chunk.byteLength
+      });
     }
   }
 
@@ -253,6 +274,11 @@ export class TelnyxSTTSession implements TranscriberSession {
     if (typeof data.transcript !== "string" || data.transcript === "") return;
 
     if (data.is_final) {
+      console.log("[VoiceTrace]", {
+        event: "stt_external_transcript_received",
+        provider: "telnyx",
+        chars: data.transcript.length
+      });
       this.onUtterance?.(data.transcript);
     } else {
       this.onInterim?.(data.transcript);

@@ -223,6 +223,7 @@ class ElevenLabsSTTSession implements TranscriberSession {
   #pendingChunks: ArrayBuffer[] = [];
   #pendingBytes = 0;
   #pendingOverflowLogged = false;
+  #audioSendLogged = false;
   #speechStarted = false;
 
   constructor(
@@ -276,7 +277,13 @@ class ElevenLabsSTTSession implements TranscriberSession {
 
   async #connect(): Promise<void> {
     try {
-      const response = await fetch(this.#connectionUrl(), {
+      const url = this.#connectionUrl();
+      console.log("[VoiceTrace]", {
+        event: "stt_external_connecting",
+        provider: "elevenlabs",
+        endpoint: new URL(url).hostname
+      });
+      const response = await fetch(url, {
         headers: {
           Upgrade: "websocket",
           "xi-api-key": this.#providerOptions.apiKey
@@ -312,6 +319,10 @@ class ElevenLabsSTTSession implements TranscriberSession {
       }
 
       this.#ws = ws;
+      console.log("[VoiceTrace]", {
+        event: "stt_external_connected",
+        provider: "elevenlabs"
+      });
       for (const chunk of this.#pendingChunks) {
         this.#sendAudioChunk(chunk);
       }
@@ -411,6 +422,14 @@ class ElevenLabsSTTSession implements TranscriberSession {
             this.#providerOptions.sampleRate ?? DEFAULT_STT_SAMPLE_RATE
         })
       );
+      if (!this.#audioSendLogged) {
+        this.#audioSendLogged = true;
+        console.log("[VoiceTrace]", {
+          event: "stt_external_audio_sent",
+          provider: "elevenlabs",
+          bytes: chunk.byteLength
+        });
+      }
     } catch (error) {
       if (!this.#closed) {
         console.error("[ElevenLabsSTT] WebSocket send failed:", error);
@@ -454,6 +473,11 @@ class ElevenLabsSTTSession implements TranscriberSession {
       this.#speechStarted = false;
       const text = stringProp(data, "text");
       if (text) {
+        console.log("[VoiceTrace]", {
+          event: "stt_external_transcript_received",
+          provider: "elevenlabs",
+          chars: text.length
+        });
         this.#sessionOptions?.onUtterance?.(text);
       }
       return;

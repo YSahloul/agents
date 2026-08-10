@@ -7,12 +7,17 @@ import {
   type ToolSet
 } from "ai";
 import { z } from "zod";
-import { withVoice, type VoiceTurnContext } from "../../voice";
+import { withVoice, type TextSource, type VoiceTurnContext } from "../../voice";
 import type {
+  RealtimeTTSProvider,
+  RealtimeTTSSession,
+  RealtimeTTSSessionOptions,
   TTSProvider,
+  StreamingTTSProvider,
   Transcriber,
   TranscriberSession,
-  TranscriberSessionOptions
+  TranscriberSessionOptions,
+  VoiceServerAudioTransport
 } from "../../types";
 
 /** Deterministic TTS provider for tests — encodes text as bytes. */
@@ -24,6 +29,103 @@ class TestTTS implements TTSProvider {
       view[i] = text.charCodeAt(i) & 0xff;
     }
     return buffer;
+  }
+}
+
+class TestRealtimeTTS implements TTSProvider, RealtimeTTSProvider {
+  readonly audioFormat = "pcm16" as const;
+  readonly sampleRate = 24000;
+  events: string[] = [];
+
+  async synthesize(text: string): Promise<ArrayBuffer> {
+    return new TextEncoder().encode(text).buffer;
+  }
+
+  createSession(options: RealtimeTTSSessionOptions): RealtimeTTSSession {
+    this.events.push("start");
+    return new TestRealtimeTTSSession(this.events, options);
+  }
+}
+
+class TestRealtimeTTSSession implements RealtimeTTSSession {
+  constructor(
+    readonly events: string[],
+    readonly options: RealtimeTTSSessionOptions
+  ) {}
+
+  async speak(text: string): Promise<void> {
+    this.events.push(`speak:${text}`);
+    await this.options.onAudio(new TextEncoder().encode(text).buffer);
+  }
+
+  flush(): void {
+    this.events.push("flush");
+  }
+
+  clear(): void {
+    this.events.push("clear");
+  }
+
+  close(): void {
+    this.events.push("close");
+  }
+}
+
+/**
+ * Streaming TTS provider for tests — splits text into two chunks via
+ * synthesizeStream (exercising the restored StreamingTTSProvider branch).
+ */
+class TestStreamingTTS implements TTSProvider, StreamingTTSProvider {
+  /** Records how the audio was chunked per sentence, for assertions. */
+  chunks: string[] = [];
+
+  async synthesize(text: string): Promise<ArrayBuffer | null> {
+    const buffer = new ArrayBuffer(text.length);
+    const view = new Uint8Array(buffer);
+    for (let i = 0; i < text.length; i++) {
+      view[i] = text.charCodeAt(i) & 0xff;
+    }
+    return buffer;
+  }
+
+  async *synthesizeStream(text: string): AsyncGenerator<ArrayBuffer> {
+    const mid = Math.ceil(text.length / 2);
+    const parts = [text.slice(0, mid), text.slice(mid)];
+    for (const part of parts) {
+      this.chunks.push(part);
+      yield new TextEncoder().encode(part).buffer;
+    }
+  }
+}
+
+class TestAudioTransport implements VoiceServerAudioTransport {
+  events: string[] = [];
+  #onAudio: ((audio: ArrayBuffer) => void) | null = null;
+
+  start(connectionId: string, onAudio: (audio: ArrayBuffer) => void): void {
+    this.events.push(`start:${connectionId}`);
+    this.#onAudio = onAudio;
+  }
+
+  send(_connectionId: string, audio: ArrayBuffer): void {
+    this.events.push(`send:${audio.byteLength}`);
+  }
+
+  flush(_connectionId: string): void {
+    this.events.push("flush");
+  }
+
+  interrupt(_connectionId: string): void {
+    this.events.push("interrupt");
+  }
+
+  stop(_connectionId: string): void {
+    this.events.push("stop");
+    this.#onAudio = null;
+  }
+
+  emit(byteLength: number): void {
+    this.#onAudio?.(new ArrayBuffer(byteLength));
   }
 }
 
@@ -69,6 +171,9 @@ class TestTranscriberSession implements TranscriberSession {
     this.agentContexts.push(text);
   }
 
+  emitEnd(transcript: string): void {
+    if (!this.#closed) this.#onUtterance?.(transcript);
+  }
   close(): void {
     this.#closed = true;
   }
@@ -373,7 +478,7 @@ export class TestVoiceAgent extends VoiceBase {
   static options = { hibernate: false };
 
   transcriber: Transcriber | undefined = new TestTranscriber();
-  tts = new TestTTS();
+  tts: TTSProvider & Partial<RealtimeTTSProvider> = new TestTTS();
 
   #callStartCount = 0;
   #callEndCount = 0;
@@ -386,21 +491,29 @@ export class TestVoiceAgent extends VoiceBase {
   #readySessions: ControlledReadyTranscriberSession[] = [];
   #keepAliveAcquiredCount = 0;
   #keepAliveReleasedCount = 0;
+  #useAudioTransport = false;
+  #audioTransport = new TestAudioTransport();
+  #realtimeTTS = new TestRealtimeTTS();
+  #streamTurns = false;
 
   async keepAlive(): Promise<() => void> {
     if (this.#keepAliveShouldThrow) {
       throw new Error("keepAlive failed");
     }
 
-    const dispose = await super.keepAlive();
     this.#keepAliveAcquiredCount++;
     let released = false;
     return () => {
       if (released) return;
       released = true;
       this.#keepAliveReleasedCount++;
-      dispose();
     };
+  }
+
+  createAudioTransport(
+    _connection: Connection
+  ): VoiceServerAudioTransport | null {
+    return this.#useAudioTransport ? this.#audioTransport : null;
   }
 
   createTranscriber(_connection: Connection): Transcriber | null {
@@ -434,11 +547,15 @@ export class TestVoiceAgent extends VoiceBase {
   async onTurn(
     transcript: string,
     _context: VoiceTurnContext
-  ): Promise<string> {
+  ): Promise<TextSource> {
     if (this.#turnDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, this.#turnDelayMs));
     }
-    return `Echo: ${transcript}`;
+    if (!this.#streamTurns) return `Echo: ${transcript}`;
+    return (async function* () {
+      yield "Echo:";
+      yield ` ${transcript}`;
+    })();
   }
 
   beforeCallStart(_connection: Connection): boolean {
@@ -460,6 +577,8 @@ export class TestVoiceAgent extends VoiceBase {
   onInterrupt(_connection: Connection) {
     this.#interruptCount++;
   }
+
+  onClose(_connection: Connection): void {}
 
   onMessage(connection: Connection, message: WSMessage) {
     if (typeof message !== "string") return;
@@ -519,6 +638,29 @@ export class TestVoiceAgent extends VoiceBase {
             JSON.stringify({ type: "_ack", command: parsed.type })
           );
           break;
+        case "_set_audio_transport":
+          this.#useAudioTransport = parsed.value === true;
+          this.#audioTransport.events = [];
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_transport_ingress":
+          if (typeof parsed.byteLength === "number") {
+            this.#audioTransport.emit(parsed.byteLength);
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_get_transport_events":
+          connection.send(
+            JSON.stringify({
+              type: "_transport_events",
+              events: this.#audioTransport.events
+            })
+          );
+          break;
         case "_get_counts":
           connection.send(
             JSON.stringify({
@@ -551,6 +693,30 @@ export class TestVoiceAgent extends VoiceBase {
             })
           );
           break;
+        case "_use_realtime_tts":
+          this.#realtimeTTS.events = [];
+          this.tts = this.#realtimeTTS;
+          this.#streamTurns = true;
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_emit_end":
+          if (
+            typeof parsed.text === "string" &&
+            this.transcriber instanceof TestTranscriber
+          ) {
+            this.transcriber.lastSession?.emitEnd(parsed.text);
+          }
+          break;
+        case "_get_realtime_tts_events":
+          connection.send(
+            JSON.stringify({
+              type: "_realtime_tts_events",
+              events: this.#realtimeTTS.events
+            })
+          );
+          break;
         case "_force_end_call":
           this.forceEndCall(connection);
           break;
@@ -566,6 +732,47 @@ export class TestVoiceAgent extends VoiceBase {
       SELECT COUNT(*) as count FROM cf_voice_messages
     `[0]?.count ?? 0
     );
+  }
+
+  async exerciseAbruptTransportCloseForTest(): Promise<string[]> {
+    this.#useAudioTransport = true;
+    this.#audioTransport.events.length = 0;
+
+    const connection = {
+      id: "abrupt-test",
+      send() {}
+    } as unknown as Connection;
+
+    this.onMessage(connection, JSON.stringify({ type: "start_call" }));
+    for (let i = 0; i < 20 && this.#audioTransport.events.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await this.onClose(connection);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return [...this.#audioTransport.events];
+  }
+
+  async exerciseWebSocketPlaybackForTest(): Promise<boolean> {
+    this.#useAudioTransport = false;
+    let sentBinary = false;
+    const connection = {
+      id: "websocket-playback-test",
+      send(data: string | ArrayBuffer) {
+        if (data instanceof ArrayBuffer) sentBinary = true;
+      }
+    } as unknown as Connection;
+
+    this.onMessage(connection, JSON.stringify({ type: "start_call" }));
+    for (let i = 0; i < 20 && this.#callStartCount === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await this.speak(connection, "fallback");
+    await this.onClose(connection);
+    return sentBinary;
+  }
+
+  getAudioTransportEventsForTest(): string[] {
+    return [...this.#audioTransport.events];
   }
 }
 
@@ -749,5 +956,46 @@ export class TestPcm24kVoiceAgent extends Pcm24kVoiceBase {
     _context: VoiceTurnContext
   ): Promise<string> {
     return `Echo: ${transcript}`;
+  }
+}
+
+/**
+ * Test VoiceAgent whose TTS provider streams audio via synthesizeStream,
+ * exercising the restored StreamingTTSProvider branch in the TTS pipeline.
+ */
+export class TestStreamingTtsVoiceAgent extends VoiceBase {
+  static options = { hibernate: false };
+
+  transcriber = new TestTranscriber();
+  #streamingTTS = new TestStreamingTTS();
+  tts = this.#streamingTTS;
+
+  async onTurn(
+    transcript: string,
+    _context: VoiceTurnContext
+  ): Promise<AsyncIterable<string>> {
+    // A streamed (non-string) response is required to reach the
+    // #streamingTTSPipeline where synthesizeStream is invoked.
+    return (async function* () {
+      yield "Echo:";
+      yield ` ${transcript}`;
+    })();
+  }
+
+  onMessage(connection: Connection, message: WSMessage) {
+    if (typeof message !== "string") return;
+    try {
+      const parsed = JSON.parse(message) as Record<string, unknown>;
+      if (parsed.type === "_get_streaming_tts_chunks") {
+        connection.send(
+          JSON.stringify({
+            type: "_streaming_tts_chunks",
+            chunks: this.#streamingTTS.chunks
+          })
+        );
+      }
+    } catch {
+      // ignore
+    }
   }
 }

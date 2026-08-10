@@ -13,6 +13,7 @@ export type {
   VoiceRole,
   VoiceAudioFormat,
   VoiceAudioInput,
+  SFUVoiceAudioInputOptions,
   VoiceTransport,
   TranscriptMessage,
   VoicePipelineMetrics,
@@ -20,7 +21,7 @@ export type {
   VoiceClientEvent,
   VoiceClientEventMap
 } from "./voice-client";
-export { WebSocketVoiceTransport } from "./voice-client";
+export { WebSocketVoiceTransport, SFUVoiceAudioInput } from "./voice-client";
 
 /** Options accepted by useVoiceAgent. */
 export interface UseVoiceAgentOptions extends VoiceClientOptions {
