@@ -284,6 +284,20 @@ describe("WorkersAIFluxSTT", () => {
 });
 
 describe("WorkersAINova3STT", () => {
+  it("emits speech start from Nova VAD events", async () => {
+    const ai = new MockAi();
+    const speechStarts: Array<string | undefined> = [];
+
+    new WorkersAINova3STT(ai).createSession({
+      onSpeechStart: (text) => speechStarts.push(text)
+    });
+
+    const socket = await waitForConnect(ai);
+    socket.message(JSON.stringify({ type: "SpeechStarted" }));
+
+    expect(speechStarts).toEqual([undefined]);
+  });
+
   it("combines finalized segments and interim text without changing normal behavior", async () => {
     const ai = new MockAi();
     const utterances: string[] = [];

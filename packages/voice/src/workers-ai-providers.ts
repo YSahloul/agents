@@ -490,6 +490,7 @@ interface Nova3Result {
  * the accumulated finalized segments are emitted as an utterance.
  */
 class Nova3Session implements TranscriberSession {
+  #onSpeechStart: ((text?: string) => void) | undefined;
   #onInterim: ((text: string) => void) | undefined;
   #onUtterance: ((text: string) => void) | undefined;
 
@@ -506,6 +507,7 @@ class Nova3Session implements TranscriberSession {
     config: Nova3SessionConfig,
     options?: TranscriberSessionOptions
   ) {
+    this.#onSpeechStart = options?.onSpeechStart;
     this.#onInterim = options?.onInterim;
     this.#onUtterance = options?.onUtterance;
     this.#connect(ai, config);
@@ -604,6 +606,10 @@ class Nova3Session implements TranscriberSession {
         typeof event.data === "string" ? JSON.parse(event.data) : null;
 
       if (!data) return;
+      if (data.type === "SpeechStarted") {
+        this.#onSpeechStart?.();
+        return;
+      }
 
       if (data.type === "Results") {
         // Defensive re-init: stale messages after abnormal teardown can observe
