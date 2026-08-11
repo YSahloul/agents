@@ -20,14 +20,7 @@ import {
   MoonIcon,
   SunIcon
 } from "@phosphor-icons/react";
-import {
-  Button,
-  Input,
-  Select,
-  Surface,
-  Text,
-  PoweredByCloudflare
-} from "@cloudflare/kumo";
+import { Button, Input, Select, Surface, Text } from "@cloudflare/kumo";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -112,6 +105,7 @@ type ModelOption = {
 // Fallback shown before / if the /models endpoint is unreachable. The API is
 // the normal source; this just guarantees the picker is never empty.
 const BASELINE_MODELS: ModelOption[] = [
+  { id: "@cf/meta/llama-4-scout-17b-16e-instruct", reasoning: false },
   { id: "@cf/zai-org/glm-4.7-flash", reasoning: true },
   { id: "@cf/openai/gpt-oss-20b", reasoning: true },
   { id: "@cf/moonshotai/kimi-k2.7-code", reasoning: true }
@@ -130,7 +124,9 @@ function getAudioOutputLabel(device: MediaDeviceInfo, index: number) {
 function App() {
   const sessionId = useRef(getSessionId()).current;
   const [models, setModels] = useState<ModelOption[]>(BASELINE_MODELS);
-  const [llmModel, setLlmModel] = useState<string>("@cf/zai-org/glm-4.7-flash");
+  const [llmModel, setLlmModel] = useState<string>(
+    "@cf/meta/llama-4-scout-17b-16e-instruct"
+  );
   const [reasoning, setReasoning] = useState<ReasoningEffort>("off");
   const [outputDeviceId, setOutputDeviceId] = useState("default");
   const audioInput = useMemo(
@@ -279,7 +275,7 @@ function App() {
               className="text-kumo-brand"
             />
             <Text variant="heading1" as="h1">
-              Voice Agent
+              Talk Smack
             </Text>
           </div>
           <div className="flex items-center gap-3">
@@ -298,58 +294,11 @@ function App() {
           </div>
         </div>
 
-        {/* LLM model + reasoning controls */}
-        <div className="mb-4 flex flex-col gap-3">
-          <Select
-            aria-label="LLM model"
-            size="sm"
-            value={llmModel}
-            onValueChange={(v) => setLlmModel(v as string)}
-            renderValue={(v) => String(v)}
-            disabled={isInCall}
-          >
-            {models.some((m) => !m.reasoning) && (
-              <Select.Group>
-                <Select.GroupLabel>Fast (non-reasoning)</Select.GroupLabel>
-                {models
-                  .filter((m) => !m.reasoning)
-                  .map((m) => (
-                    <Select.Option key={m.id} value={m.id}>
-                      {m.id}
-                    </Select.Option>
-                  ))}
-              </Select.Group>
-            )}
-            {models.some((m) => m.reasoning) && (
-              <Select.Group>
-                <Select.GroupLabel>Reasoning</Select.GroupLabel>
-                {models
-                  .filter((m) => m.reasoning)
-                  .map((m) => (
-                    <Select.Option key={m.id} value={m.id}>
-                      {m.id}
-                    </Select.Option>
-                  ))}
-              </Select.Group>
-            )}
-          </Select>
-          <div className="flex items-center justify-center gap-2">
-            <span className="text-xs text-kumo-secondary">Reasoning:</span>
-            {(["off", "low", "medium", "high"] as const).map((effort) => (
-              <Button
-                key={effort}
-                variant={reasoning === effort ? "primary" : "ghost"}
-                size="sm"
-                disabled={isInCall}
-                onClick={() => setReasoning(effort)}
-              >
-                {effort === "off"
-                  ? "Off"
-                  : effort[0].toUpperCase() + effort.slice(1)}
-              </Button>
-            ))}
-          </div>
-        </div>
+        <Surface className="mb-4 rounded-xl bg-kumo-fill px-4 py-3">
+          <Text size="sm">
+            Say anything. Your new worst best friend will fire back.
+          </Text>
+        </Surface>
 
         {/* Toast notification */}
         {toast && (
@@ -418,26 +367,6 @@ function App() {
           )}
         </Surface>
 
-        {/* Latency metrics */}
-        {metrics && (
-          <div className="mb-4 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-kumo-secondary font-mono">
-            <span>
-              LLM <span className="text-kumo-default">{metrics.llm_ms}ms</span>
-            </span>
-            <span className="text-kumo-line">/</span>
-            <span>
-              TTS <span className="text-kumo-default">{metrics.tts_ms}ms</span>
-            </span>
-            <span className="text-kumo-line">/</span>
-            <span>
-              First audio{" "}
-              <span className="text-kumo-default">
-                {metrics.first_audio_ms}ms
-              </span>
-            </span>
-          </div>
-        )}
-
         {/* Transcript */}
         <Surface className="rounded-xl ring ring-kumo-line mb-6 h-72 overflow-y-auto">
           {transcript.length === 0 ? (
@@ -446,7 +375,7 @@ function App() {
                 {isInCall
                   ? "Start speaking..."
                   : connected
-                    ? "Click Call to start a conversation"
+                    ? "Start a roast when you're ready"
                     : "Connecting to agent..."}
               </Text>
             </div>
@@ -494,30 +423,8 @@ function App() {
           )}
         </Surface>
 
-        {/* Controls */}
-        <div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
-          <div className="flex flex-col items-center gap-1">
-            <select
-              aria-label="Audio output"
-              value={outputDeviceId}
-              onChange={(event) => setOutputDeviceId(event.target.value)}
-              className="min-w-0 rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-sm text-kumo-default"
-            >
-              <option value="default">System default</option>
-              {audioOutputDevices
-                .filter((device) => device.deviceId !== "default")
-                .map((device, index) => (
-                  <option key={device.deviceId} value={device.deviceId}>
-                    {getAudioOutputLabel(device, index)}
-                  </option>
-                ))}
-            </select>
-            {outputDeviceError && (
-              <span className="max-w-48 text-center text-xs text-kumo-warning">
-                {outputDeviceError}
-              </span>
-            )}
-          </div>
+        {/* Call controls */}
+        <div className="flex items-center justify-center gap-3">
           {!isInCall ? (
             <Button
               onClick={handleStartCall}
@@ -526,7 +433,7 @@ function App() {
               disabled={!connected || speakerConflict}
               icon={<PhoneIcon size={20} weight="fill" />}
             >
-              {connected ? "Start Call" : "Connecting..."}
+              {connected ? "Start roasting" : "Connecting..."}
             </Button>
           ) : (
             <>
@@ -582,15 +489,118 @@ function App() {
           </Button>
         </form>
 
-        {/* Session info */}
-        <div className="mt-4 text-center text-[10px] text-kumo-secondary font-mono">
-          Session: {sessionId.slice(0, 8)}...
-        </div>
+        <details hidden className="mt-6 border-t border-kumo-line pt-4">
+          <summary className="cursor-pointer select-none text-sm text-kumo-secondary">
+            Advanced settings
+          </summary>
+          <div className="mt-4 flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <span className="text-xs text-kumo-secondary">Model</span>
+              <Select
+                aria-label="LLM model"
+                size="sm"
+                value={llmModel}
+                onValueChange={(v) => setLlmModel(v as string)}
+                renderValue={(v) => String(v)}
+                disabled={isInCall}
+              >
+                {models.some((m) => !m.reasoning) && (
+                  <Select.Group>
+                    <Select.GroupLabel>Fast (non-reasoning)</Select.GroupLabel>
+                    {models
+                      .filter((m) => !m.reasoning)
+                      .map((m) => (
+                        <Select.Option key={m.id} value={m.id}>
+                          {m.id}
+                        </Select.Option>
+                      ))}
+                  </Select.Group>
+                )}
+                {models.some((m) => m.reasoning) && (
+                  <Select.Group>
+                    <Select.GroupLabel>Reasoning</Select.GroupLabel>
+                    {models
+                      .filter((m) => m.reasoning)
+                      .map((m) => (
+                        <Select.Option key={m.id} value={m.id}>
+                          {m.id}
+                        </Select.Option>
+                      ))}
+                  </Select.Group>
+                )}
+              </Select>
+            </div>
 
-        {/* Footer */}
-        <div className="mt-4 flex justify-center">
-          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
-        </div>
+            <div className="flex flex-col gap-2">
+              <span className="text-xs text-kumo-secondary">
+                Reasoning effort
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {(["off", "low", "medium", "high"] as const).map((effort) => (
+                  <Button
+                    key={effort}
+                    variant={reasoning === effort ? "primary" : "ghost"}
+                    size="sm"
+                    disabled={isInCall}
+                    onClick={() => setReasoning(effort)}
+                  >
+                    {effort === "off"
+                      ? "Off"
+                      : effort[0].toUpperCase() + effort.slice(1)}
+                  </Button>
+                ))}
+              </div>
+            </div>
+
+            <label className="flex flex-col gap-2">
+              <span className="text-xs text-kumo-secondary">Speaker</span>
+              <select
+                aria-label="Audio output"
+                value={outputDeviceId}
+                onChange={(event) => setOutputDeviceId(event.target.value)}
+                className="min-w-0 rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-sm text-kumo-default"
+              >
+                <option value="default">System default</option>
+                {audioOutputDevices
+                  .filter((device) => device.deviceId !== "default")
+                  .map((device, index) => (
+                    <option key={device.deviceId} value={device.deviceId}>
+                      {getAudioOutputLabel(device, index)}
+                    </option>
+                  ))}
+              </select>
+              {outputDeviceError && (
+                <span className="text-xs text-kumo-warning">
+                  {outputDeviceError}
+                </span>
+              )}
+            </label>
+
+            {metrics && (
+              <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-kumo-secondary font-mono">
+                <span>
+                  LLM{" "}
+                  <span className="text-kumo-default">{metrics.llm_ms}ms</span>
+                </span>
+                <span>
+                  TTS{" "}
+                  <span className="text-kumo-default">{metrics.tts_ms}ms</span>
+                </span>
+                <span>
+                  First audio{" "}
+                  <span className="text-kumo-default">
+                    {metrics.first_audio_ms}ms
+                  </span>
+                </span>
+              </div>
+            )}
+
+            <div className="text-[10px] text-kumo-secondary font-mono">
+              Session: {sessionId.slice(0, 8)}...
+            </div>
+          </div>
+        </details>
+
       </Surface>
     </div>
   );

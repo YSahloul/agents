@@ -1,0 +1,29 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 79fd805..58dfc64 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -702,7 +702,7 @@ function getMappedStream(response, salvageContext) {
+ 			const directFinishReason = chunk.finish_reason;
+ 			if (choiceFinishReason != null) finishReason = mapWorkersAIFinishReason(choiceFinishReason);
+ 			else if (directFinishReason != null) finishReason = mapWorkersAIFinishReason(directFinishReason);
+-			const nativeResponse = chunk.response;
++			const nativeResponse = choices?.[0]?.delta?.content ? void 0 : chunk.response;
+ 			if (nativeResponse != null && nativeResponse !== "") {
+ 				const responseText = String(nativeResponse);
+ 				if (responseText.length > 0) if (bufferContentForSalvage) contentBuffer += responseText;
+diff --git a/src/streaming.ts b/src/streaming.ts
+index 9e6748f..907299f 100644
+--- a/src/streaming.ts
++++ b/src/streaming.ts
+@@ -164,7 +164,10 @@ export function getMappedStream(
+ 				}
+ 
+ 				// --- Native format: top-level `response` field ---
+-				const nativeResponse = chunk.response;
++				// Some models send the same delta in both native and OpenAI fields.
++				const nativeResponse = choices?.[0]?.delta?.content
++					? undefined
++					: chunk.response;
+ 				if (nativeResponse != null && nativeResponse !== "") {
+ 					const responseText = String(nativeResponse);
+ 					if (responseText.length > 0) {
