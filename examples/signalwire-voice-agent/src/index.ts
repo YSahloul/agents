@@ -15,10 +15,8 @@ const VoiceAgent = withVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   transcriber = new WorkersAIFluxSTT(this.env.AI, {
-    // Speculative turns: an eager end-of-turn at 0.5 fires on a mid-sentence
-    // pause, runs the LLM + TTS, and plays the audio before the guess is
-    // confirmed. Restored to baseline so the echo gate is the only variable
-    // under test.
+    // Eager end-of-turn starts the LLM draft at 0.5, confirmed end-of-turn
+    // releases it at 0.7, and resumed speech cancels it before any output.
     eagerEotThreshold: 0.5,
     eotThreshold: 0.7
   });
@@ -49,7 +47,8 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
         })),
         { role: "user" as const, content: transcript }
       ],
-      maxOutputTokens: 300
+      maxOutputTokens: 300,
+      abortSignal: context.signal
     });
     return result.fullStream;
   }

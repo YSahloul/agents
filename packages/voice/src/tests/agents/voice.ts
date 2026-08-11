@@ -55,6 +55,48 @@ class TestStreamingTTS implements TTSProvider, StreamingTTSProvider {
     }
   }
 }
+class ControlledTestStreamingTTS
+  extends TestTTS
+  implements StreamingTTSProvider
+{
+  #getSignal: () => AbortSignal | null;
+  #releaseCurrent: (() => void) | null = null;
+
+  constructor(getSignal: () => AbortSignal | null) {
+    super();
+    this.#getSignal = getSignal;
+  }
+
+  release(): void {
+    this.#releaseCurrent?.();
+  }
+
+  async *synthesizeStream(text: string): AsyncGenerator<ArrayBuffer> {
+    const mid = Math.max(1, Math.ceil(text.length / 2));
+    yield new TextEncoder().encode(text.slice(0, mid)).buffer;
+
+    const signal = this.#getSignal();
+    if (signal?.aborted) return;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      if (this.#releaseCurrent === finish) this.#releaseCurrent = null;
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    this.#releaseCurrent = finish;
+    signal?.addEventListener("abort", finish, { once: true });
+    await promise;
+
+    if (signal?.aborted) return;
+    const remainder = text.slice(mid);
+    if (remainder) {
+      yield new TextEncoder().encode(remainder).buffer;
+    }
+  }
+}
 
 class TestAudioTransport implements VoiceServerAudioTransport {
   events: string[] = [];
@@ -98,6 +140,8 @@ class TestTranscriberSession implements TranscriberSession {
   #onInterim: ((text: string) => void) | undefined;
   #onSpeechStart: ((text?: string) => void) | undefined;
   #onUtterance: ((text: string) => void) | undefined;
+  #onEagerUtterance: ((text: string) => void) | undefined;
+  #onTurnResumed: ((text?: string) => void) | undefined;
   #utteranceThreshold: number;
 
   // Test introspection: agent_context values delivered mid-session.
@@ -107,6 +151,8 @@ class TestTranscriberSession implements TranscriberSession {
     this.#onInterim = options?.onInterim;
     this.#onSpeechStart = options?.onSpeechStart;
     this.#onUtterance = options?.onUtterance;
+    this.#onEagerUtterance = options?.onEagerUtterance;
+    this.#onTurnResumed = options?.onTurnResumed;
     this.#utteranceThreshold = utteranceThreshold;
   }
 
@@ -131,6 +177,12 @@ class TestTranscriberSession implements TranscriberSession {
 
   emitEnd(transcript: string): void {
     if (!this.#closed) this.#onUtterance?.(transcript);
+  }
+  emitEager(transcript: string): void {
+    if (!this.#closed) this.#onEagerUtterance?.(transcript);
+  }
+  emitTurnResumed(transcript?: string): void {
+    if (!this.#closed) this.#onTurnResumed?.(transcript);
   }
   close(): void {
     this.#closed = true;
@@ -432,6 +484,8 @@ const Pcm24kVoiceBase = withVoice(Agent, {
  * Test VoiceAgent with continuous transcriber.
  * Echoes back the transcript (no real AI).
  */
+type TestTurnMode = "normal" | "reject" | "until_abort";
+
 export class TestVoiceAgent extends VoiceBase {
   static options = { hibernate: false };
 
@@ -452,6 +506,13 @@ export class TestVoiceAgent extends VoiceBase {
   #useAudioTransport = false;
   #audioTransport = new TestAudioTransport();
   #streamTurns = false;
+  #turnMode: TestTurnMode = "normal";
+  #turnTranscripts: string[] = [];
+  #turnAbortCount = 0;
+  #currentTurnSignal: AbortSignal | null = null;
+  #controlledTTS = new ControlledTestStreamingTTS(
+    () => this.#currentTurnSignal
+  );
 
   async keepAlive(): Promise<() => void> {
     if (this.#keepAliveShouldThrow) {
@@ -503,10 +564,38 @@ export class TestVoiceAgent extends VoiceBase {
 
   async onTurn(
     transcript: string,
-    _context: VoiceTurnContext
+    context: VoiceTurnContext
   ): Promise<TextSource> {
+    this.#turnTranscripts.push(transcript);
+    this.#currentTurnSignal = context.signal;
+    if (context.signal.aborted) {
+      this.#turnAbortCount++;
+    } else {
+      context.signal.addEventListener(
+        "abort",
+        () => {
+          this.#turnAbortCount++;
+        },
+        { once: true }
+      );
+    }
+
+    if (this.#turnMode === "reject") {
+      throw new Error("test turn failure");
+    }
+    if (this.#turnMode === "until_abort") {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      if (context.signal.aborted) {
+        resolve();
+      } else {
+        context.signal.addEventListener("abort", resolve, { once: true });
+      }
+      await promise;
+    }
     if (this.#turnDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, this.#turnDelayMs));
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, this.#turnDelayMs);
+      await promise;
     }
     if (!this.#streamTurns) return `Echo: ${transcript}`;
     return (async function* () {
@@ -562,6 +651,45 @@ export class TestVoiceAgent extends VoiceBase {
           this.#turnDelayMs = parsed.value;
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_set_turn_mode":
+          if (
+            parsed.value === "normal" ||
+            parsed.value === "reject" ||
+            parsed.value === "until_abort"
+          ) {
+            this.#turnMode = parsed.value;
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_set_tts_mode":
+          if (parsed.value === "controlled") {
+            this.tts = this.#controlledTTS;
+            this.#streamTurns = true;
+          } else if (parsed.value === "normal") {
+            this.tts = new TestTTS();
+            this.#streamTurns = false;
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_release_tts":
+          this.#controlledTTS.release();
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_get_turn_state":
+          connection.send(
+            JSON.stringify({
+              type: "_turn_state",
+              transcripts: this.#turnTranscripts,
+              abortCount: this.#turnAbortCount
+            })
           );
           break;
         case "_set_transcriber_mode":
@@ -650,6 +778,21 @@ export class TestVoiceAgent extends VoiceBase {
             })
           );
           break;
+        case "_emit_eager":
+          if (
+            typeof parsed.text === "string" &&
+            this.transcriber instanceof TestTranscriber
+          ) {
+            this.transcriber.lastSession?.emitEager(parsed.text);
+          }
+          break;
+        case "_emit_turn_resumed":
+          if (this.transcriber instanceof TestTranscriber) {
+            this.transcriber.lastSession?.emitTurnResumed(
+              typeof parsed.text === "string" ? parsed.text : undefined
+            );
+          }
+          break;
         case "_emit_end":
           if (
             typeof parsed.text === "string" &&
@@ -673,6 +816,12 @@ export class TestVoiceAgent extends VoiceBase {
       SELECT COUNT(*) as count FROM cf_voice_messages
     `[0]?.count ?? 0
     );
+  }
+  getTurnStateForTest(): { transcripts: string[]; abortCount: number } {
+    return {
+      transcripts: [...this.#turnTranscripts],
+      abortCount: this.#turnAbortCount
+    };
   }
 
   async exerciseAbruptTransportCloseForTest(): Promise<string[]> {

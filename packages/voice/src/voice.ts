@@ -145,10 +145,18 @@ export interface VoiceAgentOptions {
 }
 
 interface SpeculativeTurn {
-  finalTranscript?: string;
+  provisionalTranscript: string;
+  startedAt: number;
   outcome: Promise<boolean>;
   settle(confirmed: boolean): void;
 }
+type SpeculativeCancelReason =
+  | "turn_resumed"
+  | "speech_start"
+  | "interrupt"
+  | "end_call"
+  | "connection_closed"
+  | "transcript_mismatch";
 
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
@@ -338,7 +346,7 @@ export function withVoice<TBase extends AgentLike>(
             transport.stop(connection.id)
           );
         }
-        this.#cancelSpeculativeTurn(connection.id);
+        this.#cancelSpeculativeTurn(connection.id, "connection_closed");
         this.#lastBargeInAt.delete(connection.id);
         return _onClose?.(connection, ...rest);
       };
@@ -545,22 +553,47 @@ export function withVoice<TBase extends AgentLike>(
 
     // --- Convenience methods ---
 
-    #cancelSpeculativeTurn(connectionId: string): boolean {
+    #cancelSpeculativeTurn(
+      connectionId: string,
+      reason: SpeculativeCancelReason
+    ): boolean {
       const turn = this.#speculativeTurns.get(connectionId);
       if (!turn) return false;
       this.#speculativeTurns.delete(connectionId);
+      console.log("[VoiceTrace]", {
+        event: "speculative_turn_cancelled",
+        connectionId,
+        elapsedMs: Date.now() - turn.startedAt,
+        reason
+      });
       turn.settle(false);
       return true;
     }
 
     #startSpeculativeTurn(connection: Connection, transcript: string): void {
       if (this.#speculativeTurns.has(connection.id)) return;
+      if (
+        this.#cm.hasActivePipeline(connection.id) &&
+        !this.#handleBargeIn(connection, true)
+      ) {
+        return;
+      }
       let settle: (confirmed: boolean) => void = () => {};
       const outcome = new Promise<boolean>((resolve) => {
         settle = resolve;
       });
-      const turn: SpeculativeTurn = { outcome, settle };
+      const turn: SpeculativeTurn = {
+        provisionalTranscript: transcript.trim(),
+        startedAt: Date.now(),
+        outcome,
+        settle
+      };
       this.#speculativeTurns.set(connection.id, turn);
+      console.log("[VoiceTrace]", {
+        event: "speculative_turn_started",
+        connectionId: connection.id,
+        elapsedMs: Date.now() - turn.startedAt
+      });
       this.#runPipeline(connection, transcript, turn);
     }
     forceEndCall(connection: Connection): void {
@@ -759,14 +792,20 @@ export function withVoice<TBase extends AgentLike>(
             });
           },
           onSpeechStart: () => {
+            if (this.#cancelSpeculativeTurn(connection.id, "speech_start")) {
+              this.#cm.abortPipeline(connection.id);
+              return;
+            }
             this.#handleBargeIn(connection);
           },
           onEagerUtterance: (transcript: string) => {
             this.#startSpeculativeTurn(connection, transcript);
           },
           onTurnResumed: () => {
-            if (!this.#cancelSpeculativeTurn(connection.id)) return;
-            this.#handleBargeIn(connection);
+            if (!this.#cancelSpeculativeTurn(connection.id, "turn_resumed")) {
+              return;
+            }
+            this.#cm.abortPipeline(connection.id);
           },
           onUtterance: (transcript: string) => {
             console.log("[VoiceTrace]", {
@@ -780,14 +819,30 @@ export function withVoice<TBase extends AgentLike>(
             });
             const speculative = this.#speculativeTurns.get(connection.id);
             if (speculative) {
-              this.#speculativeTurns.delete(connection.id);
-              speculative.finalTranscript = transcript;
-              this.#sendJSON(connection, {
-                type: "transcript",
-                role: "user",
-                text: transcript
+              const finalText = transcript.trim();
+              if (finalText === speculative.provisionalTranscript) {
+                this.#speculativeTurns.delete(connection.id);
+                console.log("[VoiceTrace]", {
+                  event: "speculative_turn_confirmed",
+                  connectionId: connection.id,
+                  elapsedMs: Date.now() - speculative.startedAt
+                });
+                speculative.settle(true);
+                return;
+              }
+
+              const eagerText = speculative.provisionalTranscript;
+              const startedAt = speculative.startedAt;
+              this.#cancelSpeculativeTurn(connection.id, "transcript_mismatch");
+              this.#cm.abortPipeline(connection.id);
+              console.log("[VoiceTrace]", {
+                event: "speculative_turn_restarted",
+                connectionId: connection.id,
+                elapsedMs: Date.now() - startedAt,
+                eagerText,
+                finalText
               });
-              speculative.settle(true);
+              this.#runPipeline(connection, transcript);
               return;
             }
             this.#runPipeline(connection, transcript);
@@ -869,7 +924,8 @@ export function withVoice<TBase extends AgentLike>(
 
     async #handleEndCall(connection: Connection): Promise<void> {
       this.#startupTokens.delete(connection.id);
-      this.#cancelSpeculativeTurn(connection.id);
+      this.#cm.abortPipeline(connection.id);
+      this.#cancelSpeculativeTurn(connection.id, "end_call");
       this.#lastBargeInAt.delete(connection.id);
       try {
         await this.#stopAudioTransport(connection.id);
@@ -886,8 +942,8 @@ export function withVoice<TBase extends AgentLike>(
         event: "interrupt",
         connectionId: connection.id
       });
-      this.#cancelSpeculativeTurn(connection.id);
       this.#cm.abortPipeline(connection.id);
+      this.#cancelSpeculativeTurn(connection.id, "interrupt");
       this.#cm.clearAudioBuffer(connection.id);
       this.#sendJSON(connection, { type: "status", status: "listening" });
       try {
@@ -899,12 +955,14 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
-    #handleBargeIn(connection: Connection) {
+    #handleBargeIn(connection: Connection, bypassCooldown = false): boolean {
       const now = Date.now();
       const lastBargeInAt = this.#lastBargeInAt.get(connection.id) ?? 0;
-      if (now - lastBargeInAt < BARGE_IN_COOLDOWN_MS) return;
-      if (!this.#cm.abortPipeline(connection.id)) return;
-      this.#cancelSpeculativeTurn(connection.id);
+      if (!bypassCooldown && now - lastBargeInAt < BARGE_IN_COOLDOWN_MS) {
+        return false;
+      }
+      if (!this.#cm.abortPipeline(connection.id)) return false;
+      this.#cancelSpeculativeTurn(connection.id, "speech_start");
       this.#lastBargeInAt.set(connection.id, now);
       console.log("[VoiceTrace]", {
         event: "barge_in",
@@ -921,6 +979,7 @@ export function withVoice<TBase extends AgentLike>(
           await this.onInterrupt(connection);
         }
       });
+      return true;
     }
 
     // --- Internal: text message handling ---
@@ -1051,9 +1110,22 @@ export function withVoice<TBase extends AgentLike>(
       const pipelineStart = Date.now();
 
       try {
-        const userText = await this.afterTranscribe(transcript, connection);
+        let userText: string | null;
+        try {
+          userText = await this.afterTranscribe(transcript, connection);
+        } catch (error) {
+          if (!speculative) throw error;
+          const confirmed = await speculative.outcome;
+          if (!confirmed || signal.aborted) return;
+          throw error;
+        }
+
         if (signal.aborted) return;
         if (!userText) {
+          if (speculative) {
+            const confirmed = await speculative.outcome;
+            if (!confirmed || signal.aborted) return;
+          }
           this.#sendJSON(connection, { type: "status", status: "listening" });
           return;
         }
@@ -1066,9 +1138,8 @@ export function withVoice<TBase extends AgentLike>(
             role: "user",
             text: userText
           });
+          this.#sendJSON(connection, { type: "status", status: "thinking" });
         }
-
-        this.#sendJSON(connection, { type: "status", status: "thinking" });
 
         const context: VoiceTurnContext = {
           connection,
@@ -1077,7 +1148,21 @@ export function withVoice<TBase extends AgentLike>(
         };
 
         const llmStart = Date.now();
-        const turnResult = await this.onTurn(userText, context);
+        let turnResult: TextSource;
+        try {
+          turnResult = await this.onTurn(userText, context);
+        } catch (error) {
+          if (!speculative) throw error;
+          const confirmed = await speculative.outcome;
+          if (!confirmed || signal.aborted) return;
+          this.saveMessage("user", userText);
+          this.#sendJSON(connection, {
+            type: "transcript",
+            role: "user",
+            text: userText
+          });
+          throw error;
+        }
 
         console.log("[VoiceTrace]", {
           event: "onTurn_call",
@@ -1087,6 +1172,18 @@ export function withVoice<TBase extends AgentLike>(
         });
 
         if (signal.aborted) return;
+
+        if (speculative) {
+          const confirmed = await speculative.outcome;
+          if (!confirmed || signal.aborted) return;
+          this.saveMessage("user", userText);
+          this.#sendJSON(connection, {
+            type: "transcript",
+            role: "user",
+            text: userText
+          });
+          this.#sendJSON(connection, { type: "status", status: "thinking" });
+        }
 
         this.#sendJSON(connection, { type: "status", status: "speaking" });
 
@@ -1107,11 +1204,6 @@ export function withVoice<TBase extends AgentLike>(
 
         if (signal.aborted) {
           if (!fullText || fullText.trim().length === 0) return;
-          if (speculative) {
-            const confirmed = await speculative.outcome;
-            if (!confirmed) return;
-            this.saveMessage("user", speculative.finalTranscript ?? userText);
-          }
           this.#cm.updateAgentContext(connection.id, fullText);
           this.saveMessage("assistant", fullText);
           return;
@@ -1135,12 +1227,6 @@ export function withVoice<TBase extends AgentLike>(
         }
 
         const totalMs = Date.now() - pipelineStart;
-
-        if (speculative) {
-          const confirmed = await speculative.outcome;
-          if (!confirmed || signal.aborted) return;
-          this.saveMessage("user", speculative.finalTranscript ?? userText);
-        }
 
         this.#sendJSON(connection, {
           type: "metrics",
