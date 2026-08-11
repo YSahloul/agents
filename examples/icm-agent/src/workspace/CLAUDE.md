@@ -36,10 +36,10 @@ script-to-animation/
 
 ## Triggers
 
-| Keyword | Action |
-|---------|--------|
-| `setup` | Run onboarding questionnaire -- configures brand, voice, audience, platform |
-| `status` | Show pipeline completion for all three stages |
+| Keyword  | Action                                                                      |
+| -------- | --------------------------------------------------------------------------- |
+| `setup`  | Run onboarding questionnaire -- configures brand, voice, audience, platform |
+| `status` | Show pipeline completion for all three stages                               |
 
 ### How `status` works
 
@@ -55,20 +55,20 @@ Pipeline Status: script-to-animation
 
 ## Routing
 
-| Task | Go To |
-|------|-------|
-| Write a script | `stages/01-script/CONTEXT.md` |
-| Create an animation spec | `stages/02-spec/CONTEXT.md` |
-| Build Remotion code | `stages/03-build/CONTEXT.md` |
-| Configure this workspace | `setup/questionnaire.md` |
+| Task                     | Go To                         |
+| ------------------------ | ----------------------------- |
+| Write a script           | `stages/01-script/CONTEXT.md` |
+| Create an animation spec | `stages/02-spec/CONTEXT.md`   |
+| Build Remotion code      | `stages/03-build/CONTEXT.md`  |
+| Configure this workspace | `setup/questionnaire.md`      |
 
 ## What to Load
 
-| Task | Load These | Do NOT Load |
-|------|-----------|-------------|
-| Write a script | `brand-vault/voice-rules.md`, `brand-vault/identity.md`, `stages/01-script/references/*`, `shared/platform-specs.md` | `skills/remotion-best-practices/`, `stages/02-spec/references/`, `stages/03-build/references/` |
-| Create animation spec | `stages/01-script/output/`, `stages/02-spec/references/*`, `skills/frontend-design/SKILL.md` | `brand-vault/`, `stages/01-script/references/`, `stages/03-build/references/`, `skills/remotion-best-practices/` |
-| Build Remotion code | `stages/02-spec/output/`, `stages/03-build/references/*`, `skills/remotion-best-practices/SKILL.md`, `stages/02-spec/references/design-system.md` | `brand-vault/`, `stages/01-script/`, `stages/02-spec/references/spec-format.md`, `stages/02-spec/references/animation-guide.md` |
+| Task                  | Load These                                                                                                                                        | Do NOT Load                                                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Write a script        | `brand-vault/voice-rules.md`, `brand-vault/identity.md`, `stages/01-script/references/*`, `shared/platform-specs.md`                              | `skills/remotion-best-practices/`, `stages/02-spec/references/`, `stages/03-build/references/`                                  |
+| Create animation spec | `stages/01-script/output/`, `stages/02-spec/references/*`, `skills/frontend-design/SKILL.md`                                                      | `brand-vault/`, `stages/01-script/references/`, `stages/03-build/references/`, `skills/remotion-best-practices/`                |
+| Build Remotion code   | `stages/02-spec/output/`, `stages/03-build/references/*`, `skills/remotion-best-practices/SKILL.md`, `stages/02-spec/references/design-system.md` | `brand-vault/`, `stages/01-script/`, `stages/02-spec/references/spec-format.md`, `stages/02-spec/references/animation-guide.md` |
 
 ## Stage Handoffs
 

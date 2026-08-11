@@ -1,4 +1,11 @@
-import { d as VoiceAudioFormat, f as VoiceAudioInput, l as TranscriptMessage, m as VoicePipelineMetrics, v as VoiceStatus, y as VoiceTransport } from "./types-D6c11Ivd.js";
+import {
+  d as VoiceAudioFormat,
+  f as VoiceAudioInput,
+  l as TranscriptMessage,
+  m as VoicePipelineMetrics,
+  v as VoiceStatus,
+  y as VoiceTransport
+} from "./types-D6c11Ivd.js";
 
 //#region src/sfu-voice-client.d.ts
 interface SFUVoiceAudioInputOptions {
@@ -131,8 +138,14 @@ declare class VoiceClient {
    * null until the server sends its welcome message.
    */
   get serverProtocolVersion(): number | null;
-  addEventListener<K extends VoiceClientEvent>(event: K, listener: (data: VoiceClientEventMap[K]) => void): void;
-  removeEventListener<K extends VoiceClientEvent>(event: K, listener: (data: VoiceClientEventMap[K]) => void): void;
+  addEventListener<K extends VoiceClientEvent>(
+    event: K,
+    listener: (data: VoiceClientEventMap[K]) => void
+  ): void;
+  removeEventListener<K extends VoiceClientEvent>(
+    event: K,
+    listener: (data: VoiceClientEventMap[K]) => void
+  ): void;
   connect(): void;
   disconnect(): void;
   startCall(): Promise<void>;
@@ -172,5 +185,13 @@ declare class VoiceClient {
   get sampleRate(): number;
 }
 //#endregion
-export { WebSocketVoiceTransport as a, VoiceClientOptions as i, VoiceClientEvent as n, SFUVoiceAudioInput as o, VoiceClientEventMap as r, SFUVoiceAudioInputOptions as s, VoiceClient as t };
+export {
+  WebSocketVoiceTransport as a,
+  VoiceClientOptions as i,
+  VoiceClientEvent as n,
+  SFUVoiceAudioInput as o,
+  VoiceClientEventMap as r,
+  SFUVoiceAudioInputOptions as s,
+  VoiceClient as t
+};
 //# sourceMappingURL=voice-client-BcRDjsuM.d.ts.map

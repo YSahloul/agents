@@ -21,5 +21,14 @@
   },
   "[jsonc]": {
     "editor.defaultFormatter": "oxc.oxc-vscode"
+  },
+  "files.exclude": {
+    "node_modules": true,
+    ".vscode": true,
+    ".husky": true,
+    ".nx": true,
+    ".github": true,
+    "packages/voice/dist": true,
+    "packages/voice/node_modules": true
   }
 }

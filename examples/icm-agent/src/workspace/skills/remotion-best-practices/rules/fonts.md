@@ -40,7 +40,7 @@ import { loadFont } from "@remotion/google-fonts/Roboto";
 
 const { fontFamily } = loadFont("normal", {
   weights: ["400", "700"],
-  subsets: ["latin"],
+  subsets: ["latin"]
 });
 ```
 
@@ -81,7 +81,7 @@ import { staticFile } from "remotion";
 
 await loadFont({
   family: "MyFont",
-  url: staticFile("MyFont-Regular.woff2"),
+  url: staticFile("MyFont-Regular.woff2")
 });
 
 export const MyComposition = () => {
@@ -101,13 +101,13 @@ await Promise.all([
   loadFont({
     family: "Inter",
     url: staticFile("Inter-Regular.woff2"),
-    weight: "400",
+    weight: "400"
   }),
   loadFont({
     family: "Inter",
     url: staticFile("Inter-Bold.woff2"),
-    weight: "700",
-  }),
+    weight: "700"
+  })
 ]);
 ```
 
@@ -120,7 +120,7 @@ loadFont({
   format: "woff2", // Optional: auto-detected from extension
   weight: "400", // Optional: font weight
   style: "normal", // Optional: normal or italic
-  display: "block", // Optional: font-display behavior
+  display: "block" // Optional: font-display behavior
 });
 ```
 
@@ -133,7 +133,7 @@ import { loadFont } from "@remotion/google-fonts/Montserrat";
 
 const { fontFamily } = loadFont("normal", {
   weights: ["400", "700"],
-  subsets: ["latin"],
+  subsets: ["latin"]
 });
 
 export const Title: React.FC<{ text: string }> = ({ text }) => {
@@ -142,7 +142,7 @@ export const Title: React.FC<{ text: string }> = ({ text }) => {
       style={{
         fontFamily,
         fontSize: 80,
-        fontWeight: "bold",
+        fontWeight: "bold"
       }}
     >
       {text}

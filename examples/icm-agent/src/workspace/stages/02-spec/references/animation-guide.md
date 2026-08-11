@@ -30,6 +30,7 @@ Elements earn attention arriving. They should not demand attention leaving. A 20
 Linear motion (constant speed start to finish) looks robotic. Spring-based motion (fast start, gentle overshoot, settle) looks physical and alive.
 
 When speccing motion, prefer:
+
 - `spring` with moderate damping (10-15) for entrances
 - `ease-out` for slides and position changes
 - `ease-in` for exits (accelerate away)
@@ -53,6 +54,7 @@ Elements entering from the left suggest "coming next." Elements entering from th
 If every beat uses the same animation (slide in from left, text appears, fade out), the sequence becomes predictable. Once the viewer can predict what is next, they lose the urgency to stay.
 
 For each beat, vary at least one of:
+
 - Entry direction (left, right, top, bottom, scale up, fade in)
 - Color (alternate between primary and secondary)
 - Visual element type (diagram, then text, then illustration, then diagram)

@@ -27,6 +27,7 @@ The body follows the template structure below.
 Take something familiar and reveal the hidden complexity beneath it. Build understanding beat by beat until the viewer sees a system they never knew existed.
 
 **Structure:**
+
 1. **Hook** (2-3 seconds) -- The entry point. One action, one absurd number.
 2. **Layer 1** (5-8 seconds) -- The first thing that happens. Name it, show it.
 3. **Layer 2** (5-8 seconds) -- The next layer down. Name it, show it.
@@ -45,6 +46,7 @@ Take something familiar and reveal the hidden complexity beneath it. Build under
 Take a concept and make it click through a single, well-chosen analogy or example.
 
 **Structure:**
+
 1. **Hook** (2-3 seconds) -- Why should the viewer care about this concept?
 2. **Setup** (10-15 seconds) -- The familiar thing they already understand.
 3. **Bridge** (5-10 seconds) -- How the familiar thing maps to the unfamiliar concept.
@@ -61,6 +63,7 @@ Take a concept and make it click through a single, well-chosen analogy or exampl
 Tell a real story where the outcome reveals something about how systems work.
 
 **Structure:**
+
 1. **Hook** (2-3 seconds) -- A surprising outcome or decision.
 2. **Setup** (10-15 seconds) -- Who, what, why. The situation before.
 3. **Tension** (15-20 seconds) -- What went wrong, what was at stake.
@@ -76,6 +79,7 @@ Tell a real story where the outcome reveals something about how systems work.
 Put two approaches side by side. Let the contrast make the argument.
 
 **Structure:**
+
 1. **Hook** (2-3 seconds) -- The choice or contrast, stated sharply.
 2. **Option A** (15-20 seconds) -- How the first approach works.
 3. **Option B** (15-20 seconds) -- How the second approach works.
@@ -89,6 +93,7 @@ Put two approaches side by side. Let the contrast make the argument.
 ## Choosing a Template
 
 Match the template to the topic's natural shape:
+
 - Everyday action hides complex system? **Layered Reveal.**
 - Abstract concept needs a concrete entry? **Explainer.**
 - Real event reveals how something works? **Story Arc.**

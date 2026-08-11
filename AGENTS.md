@@ -10,8 +10,15 @@ Cloudflare Agents SDK — a framework for building stateful AI agents on Cloudfl
 packages/          # Published npm packages (need changesets for changes)
   agents/          # Core SDK (see packages/agents/AGENTS.md)
   ai-chat/         # @cloudflare/ai-chat — higher-level AI chat agent
-  hono-agents/     # Hono framework integration
   codemode/        # @cloudflare/codemode — experimental code generation
+  create-think/    # @cloudflare/create-think — scaffolding CLI for Think agents
+  hono-agents/     # Hono framework integration
+  shell/           # @cloudflare/shell — sandboxed JS execution & filesystem
+  think/           # @cloudflare/think — Think agent framework
+  voice/           # @cloudflare/voice — server-side voice pipeline (see packages/voice/AGENTS.md)
+  worker-bundler/  # @cloudflare/worker-bundler — Worker bundler
+
+agent-think/       # @agent-think bot — reproduces & fixes GitHub issues in containers (see agent-think/AGENTS.md)
 
 examples/          # Self-contained demo apps (see examples/AGENTS.md)
   playground/      # Main showcase app — all SDK features in one UI (uses Kumo design system)
@@ -20,6 +27,8 @@ examples/          # Self-contained demo apps (see examples/AGENTS.md)
   ...              # ~20 examples total
 
 experimental/      # Work-in-progress experiments (not published, no stability guarantees)
+
+wip/               # Work-in-progress notes, sketches, temporary plans (see wip/AGENTS.md)
 
 site/              # Deployed websites
   agents/          # agents.cloudflare.com (Astro)
@@ -41,13 +50,16 @@ scripts/           # Repo-wide tooling (typecheck, export checks, update checks)
 
 Some directories have their own AGENTS.md with deeper guidance:
 
-| File                        | Scope                                                                     |
-| --------------------------- | ------------------------------------------------------------------------- |
-| `packages/agents/AGENTS.md` | Core SDK internals — exports, source layout, build, testing, architecture |
-| `examples/AGENTS.md`        | Example conventions — required structure, consistency rules, known issues |
-| `guides/AGENTS.md`          | Guide conventions — how guides differ from examples, README expectations  |
-| `docs/AGENTS.md`            | Writing user-facing docs — Diátaxis framework, upstream sync, style       |
-| `design/AGENTS.md`          | Design records and RFCs — format, workflow, relationship to docs          |
+| File                        | Scope                                                                                               |
+| --------------------------- | --------------------------------------------------------------------------------------------------- |
+| `packages/agents/AGENTS.md` | Core SDK internals — exports, source layout, build, testing, architecture                           |
+| `packages/voice/AGENTS.md`  | Voice pipeline — STT/TTS providers, WebSocket protocol, SFU/WebRTC transport, interruption handling |
+| `examples/AGENTS.md`        | Example conventions — required structure, consistency rules, known issues                           |
+| `guides/AGENTS.md`          | Guide conventions — how guides differ from examples, README expectations                            |
+| `docs/AGENTS.md`            | Writing user-facing docs — Diátaxis framework, upstream sync, style                                 |
+| `design/AGENTS.md`          | Design records and RFCs — format, workflow, relationship to docs                                    |
+| `wip/AGENTS.md`             | Work-in-progress conventions — what belongs, how to maintain, when to promote to design/            |
+| `agent-think/AGENTS.md`     | @agent-think bot architecture — DO topology, container lifecycle, development workflow              |
 
 ## Setup
 
@@ -61,18 +73,24 @@ Node 24+ required. Uses pnpm workspaces with [Nx](https://nx.dev) for task orche
 
 Run from the repo root:
 
-| Command                            | What it does                                                       |
-| ---------------------------------- | ------------------------------------------------------------------ |
-| `pnpm run build`                   | Builds all packages via Nx (cached, dependency-ordered)            |
-| `pnpm run check`                   | Full CI check: sherif + export checks + oxfmt + oxlint + typecheck |
-| `pnpm run test`                    | Runs all tests via Nx (cached)                                     |
-| `pnpm run test:react`              | Runs Playwright-based React hook tests for agents                  |
-| `pnpm run typecheck`               | TypeScript type checking across the repo (custom script)           |
-| `pnpm run format`                  | Oxfmt format all files                                             |
-| `pnpm run check:exports`           | Verifies package.json exports match actual build output            |
-| `pnpm exec nx affected -t build`   | Build only packages affected by current changes                    |
-| `pnpm exec nx affected -t test`    | Test only packages affected by current changes                     |
-| `pnpm exec nx run <project>:build` | Build a single project (and its dependencies)                      |
+| Command                            | What it does                                                              |
+| ---------------------------------- | ------------------------------------------------------------------------- |
+| `pnpm run build`                   | Builds all packages via Nx (cached, dependency-ordered)                   |
+| `pnpm run check`                   | Full CI check: sherif + export checks + oxfmt + oxlint + typecheck        |
+| `pnpm run lint`                    | Run oxlint only (no formatting, typecheck, or export checks)              |
+| `pnpm run format`                  | Oxfmt format all files                                                    |
+| `pnpm run format:check`            | Check formatting without applying changes                                 |
+| `pnpm run typecheck`               | TypeScript type checking across the repo (custom script)                  |
+| `pnpm run check:exports`           | Verifies package.json exports match actual build output                   |
+| `pnpm run test`                    | Runs all tests via Nx (cached)                                            |
+| `pnpm run test:react`              | Playwright-based React hook tests for agents                              |
+| `pnpm run test:e2e`                | End-to-end tests (serial execution)                                       |
+| `pnpm run ci`                      | Full local CI: format, build, test, check — what CI does in one command   |
+| `pnpm run prepare:playwright`      | Install Playwright browsers (required before first `test:react` run)      |
+| `pnpm exec nx affected -t build`   | Build only packages affected by current changes                           |
+| `pnpm exec nx affected -t test`    | Test only packages affected by current changes                            |
+| `pnpm exec nx run <project>:build` | Build a single project (and its dependencies)                             |
+| `pnpm --filter <pkg> <script>`     | Run a script in a specific workspace package (e.g. `--filter voice test`) |
 
 Run an example locally:
 
@@ -87,7 +105,7 @@ Example apps will normally hot reload when the dev server is running. When the d
 
 ### TypeScript
 
-- Strict mode enabled (`agents/tsconfig`)
+- Strict mode enabled (`tsconfig.json` in each package)
 - Target: ES2021, module: ES2022, moduleResolution: bundler
 - `verbatimModuleSyntax: true` — use explicit `import type` for type-only imports
 - JSX: `react-jsx`
@@ -136,6 +154,49 @@ Test locations:
 Each test directory has its own `vitest.config.ts` and (for Workers tests) a `wrangler.jsonc`.
 
 For a repo-wide rollup of **what proves feature X works, at which layer, and which CI run guards it** — plus the tracked skip/quarantine debt — see [`design/test-coverage-matrix.md`](design/test-coverage-matrix.md).
+
+## Debugging and troubleshooting
+
+### Common issues
+
+- **"Cannot find module" after adding a new package** — run `pnpm install` from the root to update the workspace symlinks.
+- **Example doesn't pick up package changes** — rebuild the changed package with `pnpm run build` (or `pnpm exec nx run <pkg>:build`). The example's dev server watches source but resolves packages from their `dist/`.
+- **TypeScript errors in a package you didn't touch** — likely a dependency's types changed. Run `pnpm run typecheck` from the root; if it passes in isolation, run `pnpm exec nx affected -t build` to rebuild dependents.
+- **`wrangler types` is out of date** — regenerate with `pnpm exec wrangler types` inside the relevant example/package. Do not hand-edit `env.d.ts`.
+- **Oxlint false positive** — config lives in `.oxlintrc.json`. Never add inline `eslint-disable` comments; fix the root cause or update the config.
+
+### Running a single test
+
+```bash
+# From the package directory
+pnpm vitest run -t "<test name pattern>"
+
+# From the repo root, targeting a specific package
+pnpm --filter @cloudflare/agents vitest run -t "<pattern>"
+```
+
+### Debugging Workers
+
+- Use `wrangler dev` with `--remote` to debug against the real Workers runtime.
+- For Durable Object state inspection, add logging or use the thread UI (agent-think pattern).
+- `wrangler tail` streams live logs but is lossy; don't rely on it for critical diagnostics.
+
+## Security considerations
+
+### Secrets management
+
+- **Never** hardcode API keys, tokens, or credentials in source files.
+- Use `wrangler secret put <NAME>` for production secrets (set per-worker).
+- Use `.env` files for local development (gitignored — `.env` and `.env.*` are in `.gitignore`).
+- `.dev.vars` is also gitignored and auto-loaded by `wrangler dev` — use it for local-only bindings.
+- The `.env_example` / `.env.example` pattern documents required variables without exposing values.
+- In CI, secrets are injected via GitHub Actions secrets.
+
+### Authentication patterns
+
+- Service bindings (DO → DO) use Workers RPC — no shared secrets, automatically scoped.
+- GitHub integration (agent-think) mints short-lived installation tokens; credentials never appear in prompts or logs.
+- External API keys should go through AI Gateway (`CLOUDFLARE_AIG_TOKEN`) rather than direct provider keys.
 
 ## Contributing
 

@@ -1,4 +1,24 @@
-import { _ as VoiceServerMessage, a as TTSProvider, c as TranscriberSessionOptions, d as VoiceAudioFormat, f as VoiceAudioInput, g as VoiceServerAudioTransport, h as VoiceRole, i as StreamingTTSProvider, l as TranscriptMessage, m as VoicePipelineMetrics, n as RealtimeTTSSession, o as Transcriber, p as VoiceClientMessage, r as RealtimeTTSSessionOptions, s as TranscriberSession, t as RealtimeTTSProvider, u as VOICE_PROTOCOL_VERSION, v as VoiceStatus, y as VoiceTransport } from "./types-D6c11Ivd.js";
+import {
+  _ as VoiceServerMessage,
+  a as TTSProvider,
+  c as TranscriberSessionOptions,
+  d as VoiceAudioFormat,
+  f as VoiceAudioInput,
+  g as VoiceServerAudioTransport,
+  h as VoiceRole,
+  i as StreamingTTSProvider,
+  l as TranscriptMessage,
+  m as VoicePipelineMetrics,
+  n as RealtimeTTSSession,
+  o as Transcriber,
+  p as VoiceClientMessage,
+  r as RealtimeTTSSessionOptions,
+  s as TranscriberSession,
+  t as RealtimeTTSProvider,
+  u as VOICE_PROTOCOL_VERSION,
+  v as VoiceStatus,
+  y as VoiceTransport
+} from "./types-D6c11Ivd.js";
 import { Agent, Connection } from "agents";
 
 //#region src/sentence-chunker.d.ts
@@ -45,9 +65,13 @@ interface VoiceInputMixinMembers {
   onCallStart(connection: Connection): void | Promise<void>;
   onCallEnd(connection: Connection): void | Promise<void>;
   onInterrupt(connection: Connection): void | Promise<void>;
-  afterTranscribe(transcript: string, connection: Connection): string | null | Promise<string | null>;
+  afterTranscribe(
+    transcript: string,
+    connection: Connection
+  ): string | null | Promise<string | null>;
 }
-type VoiceInputMixinReturn<TBase extends AgentLike$2> = TBase & (new (...args: any[]) => VoiceInputMixinMembers);
+type VoiceInputMixinReturn<TBase extends AgentLike$2> = TBase &
+  (new (...args: any[]) => VoiceInputMixinMembers);
 /**
  * Voice-to-text input mixin. Adds STT-only voice input to an Agent class.
  *
@@ -74,7 +98,9 @@ type VoiceInputMixinReturn<TBase extends AgentLike$2> = TBase & (new (...args: a
  * }
  * ```
  */
-declare function withVoiceInput<TBase extends AgentLike$2>(Base: TBase): VoiceInputMixinReturn<TBase>;
+declare function withVoiceInput<TBase extends AgentLike$2>(
+  Base: TBase
+): VoiceInputMixinReturn<TBase>;
 //#endregion
 //#region src/text-stream.d.ts
 /**
@@ -119,19 +145,29 @@ declare function iterateText(source: TextSource): AsyncGenerator<string>;
  * - SFU WebSocket adapter protobuf packet encoding/decoding
  * - Audio format conversion (48kHz stereo ↔ 16kHz mono)
  */
-declare function decodeVarint(buf: Uint8Array, offset: number): {
+declare function decodeVarint(
+  buf: Uint8Array,
+  offset: number
+): {
   value: number;
   bytesRead: number;
 };
 declare function encodeVarint(value: number): Uint8Array;
 /** Extract the PCM payload from a protobuf Packet message. */
-declare function extractPayloadFromProtobuf(data: ArrayBuffer): Uint8Array | null;
+declare function extractPayloadFromProtobuf(
+  data: ArrayBuffer
+): Uint8Array | null;
 /** Encode PCM payload into a protobuf Packet message (for ingest/buffer mode — just payload). */
 declare function encodePayloadToProtobuf(payload: Uint8Array): ArrayBuffer;
 /** Convert mono PCM16 at an arbitrary sample rate to 48kHz stereo PCM16. */
-declare function resampleMonoTo48kStereo(input: ArrayBuffer, inputSampleRate: number): Uint8Array;
+declare function resampleMonoTo48kStereo(
+  input: ArrayBuffer,
+  inputSampleRate: number
+): Uint8Array;
 /** Downsample 48kHz stereo interleaved PCM to 16kHz mono PCM (both 16-bit LE). */
-declare function downsample48kStereoTo16kMono(stereo48k: Uint8Array): ArrayBuffer;
+declare function downsample48kStereoTo16kMono(
+  stereo48k: Uint8Array
+): ArrayBuffer;
 /** Upsample 16kHz mono PCM to 48kHz stereo interleaved PCM (both 16-bit LE). */
 declare function upsample16kMonoTo48kStereo(mono16k: ArrayBuffer): Uint8Array;
 /** Resample 24kHz mono PCM to 48kHz stereo interleaved PCM (both 16-bit LE). */
@@ -141,14 +177,32 @@ interface SFUConfig {
   apiToken: string;
   apiBase?: string;
 }
-declare function sfuFetch(config: SFUConfig, path: string, body: unknown): Promise<unknown>;
+declare function sfuFetch(
+  config: SFUConfig,
+  path: string,
+  body: unknown
+): Promise<unknown>;
 declare function createSFUSession(config: SFUConfig): Promise<{
   sessionId: string;
 }>;
-declare function addSFUTracks(config: SFUConfig, sessionId: string, body: unknown): Promise<unknown>;
-declare function renegotiateSFUSession(config: SFUConfig, sessionId: string, sdp: string): Promise<unknown>;
-declare function createSFUWebSocketAdapter(config: SFUConfig, tracks: unknown[]): Promise<unknown>;
-declare function closeSFUWebSocketAdapter(config: SFUConfig, adapterId: string): Promise<{
+declare function addSFUTracks(
+  config: SFUConfig,
+  sessionId: string,
+  body: unknown
+): Promise<unknown>;
+declare function renegotiateSFUSession(
+  config: SFUConfig,
+  sessionId: string,
+  sdp: string
+): Promise<unknown>;
+declare function createSFUWebSocketAdapter(
+  config: SFUConfig,
+  tracks: unknown[]
+): Promise<unknown>;
+declare function closeSFUWebSocketAdapter(
+  config: SFUConfig,
+  adapterId: string
+): Promise<{
   alreadyClosed: boolean;
 }>;
 //#endregion
@@ -177,7 +231,10 @@ interface SFUVoiceTransportOptions {
 declare class SFUVoiceTransport implements VoiceServerAudioTransport {
   #private;
   constructor(options: SFUVoiceTransportOptions);
-  start(connectionId: string, onAudio: (audio: ArrayBuffer) => void): Promise<void>;
+  start(
+    connectionId: string,
+    onAudio: (audio: ArrayBuffer) => void
+  ): Promise<void>;
   send(connectionId: string, audio: ArrayBuffer): void;
   flush(connectionId: string): Promise<void>;
   interrupt(connectionId: string): void;
@@ -195,13 +252,21 @@ type AgentLike$1 = Constructor$1<Agent>;
 interface SFUVoiceAgentMixinMembers extends VoiceAgentMixinMembers {
   getSFUConfig(): SFUConfig;
 }
-type SFUVoiceAgentMixinReturn<TBase extends AgentLike$1> = TBase & (new (...args: any[]) => SFUVoiceAgentMixinMembers);
-declare function withSFUVoice<TBase extends AgentLike$1>(Base: TBase, options?: SFUVoiceAgentOptions): SFUVoiceAgentMixinReturn<TBase>;
+type SFUVoiceAgentMixinReturn<TBase extends AgentLike$1> = TBase &
+  (new (...args: any[]) => SFUVoiceAgentMixinMembers);
+declare function withSFUVoice<TBase extends AgentLike$1>(
+  Base: TBase,
+  options?: SFUVoiceAgentOptions
+): SFUVoiceAgentMixinReturn<TBase>;
 //#endregion
 //#region src/workers-ai-providers.d.ts
 /** Loose type for the Workers AI binding — avoids hard dependency on @cloudflare/workers-types. */
 interface AiLike {
-  run(model: string, input: Record<string, unknown>, options?: Record<string, unknown>): Promise<unknown>;
+  run(
+    model: string,
+    input: Record<string, unknown>,
+    options?: Record<string, unknown>
+  ): Promise<unknown>;
 }
 interface WorkersAITTSOptions {
   /** TTS model name. @default "@cf/deepgram/aura-1" */
@@ -258,7 +323,10 @@ interface WorkersAIMulawRealtimeTTSOptions {
  * }
  * ```
  */
-declare class WorkersAIMulawRealtimeTTS extends WorkersAITTS implements RealtimeTTSProvider {
+declare class WorkersAIMulawRealtimeTTS
+  extends WorkersAITTS
+  implements RealtimeTTSProvider
+{
   #private;
   readonly audioFormat: VoiceAudioFormat;
   readonly sampleRate = 8000;
@@ -388,17 +456,36 @@ type AgentLike = Constructor<Agent<Cloudflare.Env>>;
 /** Public surface of the voice mixin, used as an explicit return type to satisfy TS6 declaration emit. */
 interface VoiceAgentMixinMembers {
   transcriber?: Transcriber;
-  tts?: (TTSProvider & Partial<RealtimeTTSProvider> & Partial<StreamingTTSProvider>) | undefined;
+  tts?:
+    | (TTSProvider &
+        Partial<RealtimeTTSProvider> &
+        Partial<StreamingTTSProvider>)
+    | undefined;
   createTranscriber(connection: Connection): Transcriber | null;
-  createAudioTransport(connection: Connection): VoiceServerAudioTransport | null | Promise<VoiceServerAudioTransport | null>;
+  createAudioTransport(
+    connection: Connection
+  ):
+    | VoiceServerAudioTransport
+    | null
+    | Promise<VoiceServerAudioTransport | null>;
   receiveAudio(connectionId: string, audio: ArrayBuffer): void;
   beforeCallStart(connection: Connection): boolean | Promise<boolean>;
   onCallStart(connection: Connection): void | Promise<void>;
   onCallEnd(connection: Connection): void | Promise<void>;
   onInterrupt(connection: Connection): void | Promise<void>;
-  afterTranscribe(transcript: string, connection: Connection): string | null | Promise<string | null>;
-  beforeSynthesize(text: string, connection: Connection): string | null | Promise<string | null>;
-  afterSynthesize(audio: ArrayBuffer | null, text: string, connection: Connection): ArrayBuffer | null | Promise<ArrayBuffer | null>;
+  afterTranscribe(
+    transcript: string,
+    connection: Connection
+  ): string | null | Promise<string | null>;
+  beforeSynthesize(
+    text: string,
+    connection: Connection
+  ): string | null | Promise<string | null>;
+  afterSynthesize(
+    audio: ArrayBuffer | null,
+    text: string,
+    connection: Connection
+  ): ArrayBuffer | null | Promise<ArrayBuffer | null>;
   saveMessage(role: "user" | "assistant", text: string): void;
   getConversationHistory(limit?: number): Array<{
     role: VoiceRole;
@@ -408,7 +495,8 @@ interface VoiceAgentMixinMembers {
   speak(connection: Connection, text: string): Promise<void>;
   speakAll(text: string): Promise<void>;
 }
-type VoiceAgentMixinReturn<TBase extends AgentLike> = TBase & (new (...args: any[]) => VoiceAgentMixinMembers);
+type VoiceAgentMixinReturn<TBase extends AgentLike> = TBase &
+  (new (...args: any[]) => VoiceAgentMixinMembers);
 /**
  * Voice pipeline mixin. Adds the full voice pipeline to an Agent class.
  *
@@ -436,7 +524,66 @@ type VoiceAgentMixinReturn<TBase extends AgentLike> = TBase & (new (...args: any
  * }
  * ```
  */
-declare function withVoice<TBase extends AgentLike>(Base: TBase, voiceOptions?: VoiceAgentOptions): VoiceAgentMixinReturn<TBase>;
+declare function withVoice<TBase extends AgentLike>(
+  Base: TBase,
+  voiceOptions?: VoiceAgentOptions
+): VoiceAgentMixinReturn<TBase>;
 //#endregion
-export { type RealtimeTTSProvider, type RealtimeTTSSession, type RealtimeTTSSessionOptions, type SFUConfig, type SFUVoiceAgentOptions, type SFUVoiceState, SFUVoiceTransport, type SFUVoiceTransportOptions, SentenceChunker, type StreamingTTSProvider, type TTSProvider, type TextSource, type Transcriber, type TranscriberSession, type TranscriberSessionOptions, type TranscriptMessage, VOICE_PROTOCOL_VERSION, VoiceAgentMixinMembers, VoiceAgentOptions, type VoiceAudioFormat, type VoiceAudioInput, type VoiceClientMessage, type VoicePipelineMetrics, type VoiceRole, type VoiceServerAudioTransport, type VoiceServerMessage, type VoiceStatus, type VoiceTransport, VoiceTurnContext, WorkersAIFluxSTT, type WorkersAIFluxSTTOptions, WorkersAIMulawRealtimeTTS, type WorkersAIMulawRealtimeTTSOptions, WorkersAINova3STT, type WorkersAINova3STTOptions, WorkersAITTS, type WorkersAITTSOptions, addSFUTracks, closeSFUWebSocketAdapter, createSFUSession, createSFUWebSocketAdapter, decodeVarint, downsample48kStereoTo16kMono, encodePayloadToProtobuf, encodeVarint, extractPayloadFromProtobuf, iterateText, renegotiateSFUSession, resample24kMonoTo48kStereo, resampleMonoTo48kStereo, sfuFetch, upsample16kMonoTo48kStereo, withSFUVoice, withVoice, withVoiceInput };
+export {
+  type RealtimeTTSProvider,
+  type RealtimeTTSSession,
+  type RealtimeTTSSessionOptions,
+  type SFUConfig,
+  type SFUVoiceAgentOptions,
+  type SFUVoiceState,
+  SFUVoiceTransport,
+  type SFUVoiceTransportOptions,
+  SentenceChunker,
+  type StreamingTTSProvider,
+  type TTSProvider,
+  type TextSource,
+  type Transcriber,
+  type TranscriberSession,
+  type TranscriberSessionOptions,
+  type TranscriptMessage,
+  VOICE_PROTOCOL_VERSION,
+  VoiceAgentMixinMembers,
+  VoiceAgentOptions,
+  type VoiceAudioFormat,
+  type VoiceAudioInput,
+  type VoiceClientMessage,
+  type VoicePipelineMetrics,
+  type VoiceRole,
+  type VoiceServerAudioTransport,
+  type VoiceServerMessage,
+  type VoiceStatus,
+  type VoiceTransport,
+  VoiceTurnContext,
+  WorkersAIFluxSTT,
+  type WorkersAIFluxSTTOptions,
+  WorkersAIMulawRealtimeTTS,
+  type WorkersAIMulawRealtimeTTSOptions,
+  WorkersAINova3STT,
+  type WorkersAINova3STTOptions,
+  WorkersAITTS,
+  type WorkersAITTSOptions,
+  addSFUTracks,
+  closeSFUWebSocketAdapter,
+  createSFUSession,
+  createSFUWebSocketAdapter,
+  decodeVarint,
+  downsample48kStereoTo16kMono,
+  encodePayloadToProtobuf,
+  encodeVarint,
+  extractPayloadFromProtobuf,
+  iterateText,
+  renegotiateSFUSession,
+  resample24kMonoTo48kStereo,
+  resampleMonoTo48kStereo,
+  sfuFetch,
+  upsample16kMonoTo48kStereo,
+  withSFUVoice,
+  withVoice,
+  withVoiceInput
+};
 //# sourceMappingURL=voice.d.ts.map

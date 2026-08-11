@@ -18,8 +18,8 @@ export const getAudioDuration = async (src: string) => {
   const input = new Input({
     formats: ALL_FORMATS,
     source: new UrlSource(src, {
-      getRetryDelay: () => null,
-    }),
+      getRetryDelay: () => null
+    })
   });
 
   const durationInSeconds = await input.computeDuration();
@@ -43,7 +43,7 @@ import { Input, ALL_FORMATS, FileSource } from "mediabunny";
 
 const input = new Input({
   formats: ALL_FORMATS,
-  source: new FileSource(file), // File object from input or drag-drop
+  source: new FileSource(file) // File object from input or drag-drop
 });
 
 const durationInSeconds = await input.computeDuration();

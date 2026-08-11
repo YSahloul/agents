@@ -1,5 +1,20 @@
-import { d as VoiceAudioFormat, f as VoiceAudioInput, h as VoiceRole, l as TranscriptMessage, m as VoicePipelineMetrics, v as VoiceStatus, y as VoiceTransport } from "./types-D6c11Ivd.js";
-import { a as WebSocketVoiceTransport, i as VoiceClientOptions, n as VoiceClientEvent, o as SFUVoiceAudioInput, r as VoiceClientEventMap, s as SFUVoiceAudioInputOptions } from "./voice-client-BcRDjsuM.js";
+import {
+  d as VoiceAudioFormat,
+  f as VoiceAudioInput,
+  h as VoiceRole,
+  l as TranscriptMessage,
+  m as VoicePipelineMetrics,
+  v as VoiceStatus,
+  y as VoiceTransport
+} from "./types-D6c11Ivd.js";
+import {
+  a as WebSocketVoiceTransport,
+  i as VoiceClientOptions,
+  n as VoiceClientEvent,
+  o as SFUVoiceAudioInput,
+  r as VoiceClientEventMap,
+  s as SFUVoiceAudioInputOptions
+} from "./voice-client-BcRDjsuM.js";
 
 //#region src/voice-react.d.ts
 /** Options accepted by useVoiceAgent. */
@@ -96,7 +111,9 @@ interface UseVoiceInputReturn {
  * </button>
  * ```
  */
-declare function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputReturn;
+declare function useVoiceInput(
+  options: UseVoiceInputOptions
+): UseVoiceInputReturn;
 /**
  * React hook that wraps VoiceClient, syncing its state into React state.
  * All audio infrastructure (mic capture, playback, silence/interrupt detection,
@@ -106,7 +123,29 @@ declare function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputRetu
  * automatically disconnects the old client, creates a new one, and reconnects.
  * The `onReconnect` callback fires when this happens.
  */
-declare function useVoiceAgent(options: UseVoiceAgentOptions): UseVoiceAgentReturn;
+declare function useVoiceAgent(
+  options: UseVoiceAgentOptions
+): UseVoiceAgentReturn;
 //#endregion
-export { SFUVoiceAudioInput, type SFUVoiceAudioInputOptions, type TranscriptMessage, UseVoiceAgentOptions, UseVoiceAgentReturn, UseVoiceInputOptions, UseVoiceInputReturn, type VoiceAudioFormat, type VoiceAudioInput, type VoiceClientEvent, type VoiceClientEventMap, type VoiceClientOptions, type VoicePipelineMetrics, type VoiceRole, type VoiceStatus, type VoiceTransport, WebSocketVoiceTransport, useVoiceAgent, useVoiceInput };
+export {
+  SFUVoiceAudioInput,
+  type SFUVoiceAudioInputOptions,
+  type TranscriptMessage,
+  UseVoiceAgentOptions,
+  UseVoiceAgentReturn,
+  UseVoiceInputOptions,
+  UseVoiceInputReturn,
+  type VoiceAudioFormat,
+  type VoiceAudioInput,
+  type VoiceClientEvent,
+  type VoiceClientEventMap,
+  type VoiceClientOptions,
+  type VoicePipelineMetrics,
+  type VoiceRole,
+  type VoiceStatus,
+  type VoiceTransport,
+  WebSocketVoiceTransport,
+  useVoiceAgent,
+  useVoiceInput
+};
 //# sourceMappingURL=voice-react.d.ts.map

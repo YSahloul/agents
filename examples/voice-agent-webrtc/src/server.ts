@@ -293,19 +293,6 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   // interjected into in-flight turns. The agent only speaks in response to
   // the user now.
   async onCallStart(_connection: Connection) {}
-
-  override afterTranscribe(transcript: string): string | null {
-    const history = this.getConversationHistory();
-    let lastAssistant = "";
-    for (let i = history.length - 1; i >= 0; i--) {
-      if (history[i].role === "assistant") {
-        lastAssistant = history[i].content;
-        break;
-      }
-    }
-    if (isEchoOf(transcript, lastAssistant)) return null;
-    return transcript;
-  }
 }
 
 export default {

@@ -79,18 +79,15 @@ export const Beat01: React.FC<Beat01Props> = ({ startFrame, endFrame }) => {
   const duration = endFrame - startFrame;
 
   const opacity = interpolate(localFrame, [0, 20], [0, 1], {
-    extrapolateRight: "clamp",
+    extrapolateRight: "clamp"
   });
 
-  return (
-    <div style={{ opacity }}>
-      {/* Beat content */}
-    </div>
-  );
+  return <div style={{ opacity }}>{/* Beat content */}</div>;
 };
 ```
 
 Key patterns:
+
 - Every beat receives `startFrame` and `endFrame` as props
 - Calculate `localFrame` by subtracting `startFrame` from the global frame
 - Use `interpolate()` for all animated values
@@ -110,7 +107,7 @@ import { Beat02 } from "./beats/Beat02";
 // Calculated from spec beat map (~3s hook, ~8s build at 30fps)
 const BEATS = {
   HOOK: { start: 0, end: 89 },
-  BUILD: { start: 90, end: 329 },
+  BUILD: { start: 90, end: 329 }
 };
 
 export const MainComposition: React.FC = () => {
@@ -137,6 +134,7 @@ export const MainComposition: React.FC = () => {
 ## Remotion API Reference
 
 For all Remotion APIs, see the bundled skill:
+
 - `../../skills/remotion-best-practices/SKILL.md` -- index of all rule files
 - Load `rules/timing.md`, `rules/sequencing.md`, `rules/transitions.md` for every build
 - Load other rule files as needed (fonts, audio, charts, text animations, light leaks)

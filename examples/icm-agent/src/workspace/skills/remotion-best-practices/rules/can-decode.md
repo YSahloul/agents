@@ -20,8 +20,8 @@ export const canDecode = async (src: string) => {
   const input = new Input({
     formats: ALL_FORMATS,
     source: new UrlSource(src, {
-      getRetryDelay: () => null,
-    }),
+      getRetryDelay: () => null
+    })
   });
 
   try {
@@ -67,7 +67,7 @@ import { Input, ALL_FORMATS, BlobSource } from "mediabunny";
 export const canDecodeBlob = async (blob: Blob) => {
   const input = new Input({
     formats: ALL_FORMATS,
-    source: new BlobSource(blob),
+    source: new BlobSource(blob)
   });
 
   // Same validation logic as above

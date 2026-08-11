@@ -16,62 +16,80 @@ type VoiceStatus = "idle" | "listening" | "thinking" | "speaking";
 /** Audio format the server uses for binary audio payloads. */
 type VoiceAudioFormat = "mp3" | "pcm16" | "wav" | "opus" | "mulaw";
 type VoiceRole = "user" | "assistant";
-type VoiceClientMessage = {
-  type: "hello";
-  protocol_version?: number;
-} | {
-  type: "start_call";
-  preferred_format?: VoiceAudioFormat;
-} | {
-  type: "end_call";
-} | {
-  type: "start_of_speech";
-} | {
-  type: "end_of_speech";
-} | {
-  type: "interrupt";
-} | {
-  type: "text_message";
-  text: string;
-};
-type VoiceServerMessage = {
-  type: "welcome";
-  protocol_version: number;
-} | {
-  type: "status";
-  status: VoiceStatus;
-} | {
-  type: "audio_config";
-  format: VoiceAudioFormat;
-  sampleRate?: number;
-} | {
-  type: "transcript";
-  role: VoiceRole;
-  text: string;
-} | {
-  type: "transcript_start";
-  role: VoiceRole;
-} | {
-  type: "transcript_delta";
-  text: string;
-} | {
-  type: "transcript_end";
-  text: string;
-} | {
-  type: "transcript_interim";
-  text: string;
-} | {
-  type: "playback_interrupt";
-} | {
-  type: "metrics";
-  llm_ms: number;
-  tts_ms: number;
-  first_audio_ms: number;
-  total_ms: number;
-} | {
-  type: "error";
-  message: string;
-};
+type VoiceClientMessage =
+  | {
+      type: "hello";
+      protocol_version?: number;
+    }
+  | {
+      type: "start_call";
+      preferred_format?: VoiceAudioFormat;
+    }
+  | {
+      type: "end_call";
+    }
+  | {
+      type: "start_of_speech";
+    }
+  | {
+      type: "end_of_speech";
+    }
+  | {
+      type: "interrupt";
+    }
+  | {
+      type: "text_message";
+      text: string;
+    };
+type VoiceServerMessage =
+  | {
+      type: "welcome";
+      protocol_version: number;
+    }
+  | {
+      type: "status";
+      status: VoiceStatus;
+    }
+  | {
+      type: "audio_config";
+      format: VoiceAudioFormat;
+      sampleRate?: number;
+    }
+  | {
+      type: "transcript";
+      role: VoiceRole;
+      text: string;
+    }
+  | {
+      type: "transcript_start";
+      role: VoiceRole;
+    }
+  | {
+      type: "transcript_delta";
+      text: string;
+    }
+  | {
+      type: "transcript_end";
+      text: string;
+    }
+  | {
+      type: "transcript_interim";
+      text: string;
+    }
+  | {
+      type: "playback_interrupt";
+    }
+  | {
+      type: "metrics";
+      llm_ms: number;
+      tts_ms: number;
+      first_audio_ms: number;
+      total_ms: number;
+    }
+  | {
+      type: "error";
+      message: string;
+    };
 interface VoicePipelineMetrics {
   llm_ms: number;
   tts_ms: number;
@@ -98,7 +116,10 @@ interface TTSProvider {
  * token-granular session.
  */
 interface StreamingTTSProvider {
-  synthesizeStream(text: string, signal?: AbortSignal): AsyncGenerator<ArrayBuffer>;
+  synthesizeStream(
+    text: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer>;
 }
 /**
  * A text-to-speech provider that holds one bidirectional synthesis session,
@@ -273,7 +294,10 @@ interface VoiceAudioInput {
   setOutputDevice?(deviceId: string): void | Promise<void>;
 }
 interface VoiceServerAudioTransport {
-  start(connectionId: string, onAudio: (audio: ArrayBuffer) => void): void | Promise<void>;
+  start(
+    connectionId: string,
+    onAudio: (audio: ArrayBuffer) => void
+  ): void | Promise<void>;
   send(connectionId: string, audio: ArrayBuffer): void | Promise<void>;
   flush(connectionId: string): void | Promise<void>;
   interrupt(connectionId: string): void | Promise<void>;
@@ -302,5 +326,25 @@ interface VoiceTransport {
   onmessage: ((data: string | ArrayBuffer | Blob) => void) | null;
 }
 //#endregion
-export { VoiceServerMessage as _, TTSProvider as a, TranscriberSessionOptions as c, VoiceAudioFormat as d, VoiceAudioInput as f, VoiceServerAudioTransport as g, VoiceRole as h, StreamingTTSProvider as i, TranscriptMessage as l, VoicePipelineMetrics as m, RealtimeTTSSession as n, Transcriber as o, VoiceClientMessage as p, RealtimeTTSSessionOptions as r, TranscriberSession as s, RealtimeTTSProvider as t, VOICE_PROTOCOL_VERSION as u, VoiceStatus as v, VoiceTransport as y };
+export {
+  VoiceServerMessage as _,
+  TTSProvider as a,
+  TranscriberSessionOptions as c,
+  VoiceAudioFormat as d,
+  VoiceAudioInput as f,
+  VoiceServerAudioTransport as g,
+  VoiceRole as h,
+  StreamingTTSProvider as i,
+  TranscriptMessage as l,
+  VoicePipelineMetrics as m,
+  RealtimeTTSSession as n,
+  Transcriber as o,
+  VoiceClientMessage as p,
+  RealtimeTTSSessionOptions as r,
+  TranscriberSession as s,
+  RealtimeTTSProvider as t,
+  VOICE_PROTOCOL_VERSION as u,
+  VoiceStatus as v,
+  VoiceTransport as y
+};
 //# sourceMappingURL=types-D6c11Ivd.d.ts.map

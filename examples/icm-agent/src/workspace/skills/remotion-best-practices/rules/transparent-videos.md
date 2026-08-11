@@ -37,13 +37,13 @@ Config.setProResProfile("4444");
 import { CalculateMetadataFunction } from "remotion";
 
 const calculateMetadata: CalculateMetadataFunction<Props> = async ({
-  props,
+  props
 }) => {
   return {
     defaultCodec: "prores",
     defaultVideoImageFormat: "png",
     defaultPixelFormat: "yuva444p10le",
-    defaultProResProfile: "4444",
+    defaultProResProfile: "4444"
   };
 };
 
@@ -85,12 +85,12 @@ Config.setCodec("vp9");
 import { CalculateMetadataFunction } from "remotion";
 
 const calculateMetadata: CalculateMetadataFunction<Props> = async ({
-  props,
+  props
 }) => {
   return {
     defaultCodec: "vp8",
     defaultVideoImageFormat: "png",
-    defaultPixelFormat: "yuva420p",
+    defaultPixelFormat: "yuva420p"
   };
 };
 

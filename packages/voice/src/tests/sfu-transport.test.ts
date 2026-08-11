@@ -280,9 +280,7 @@ describe("SFUVoiceTransport", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         if (
-          new URL(String(input)).pathname.endsWith(
-            "/adapters/websocket/close"
-          )
+          new URL(String(input)).pathname.endsWith("/adapters/websocket/close")
         ) {
           return new Response("Backend error", { status: 503 });
         }

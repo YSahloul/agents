@@ -21,12 +21,12 @@ These are errors. If the output contains any of these, rewrite.
 
 Do/Don't pairs with verbatim examples. The right column is the target. The wrong column is the pattern to catch and rewrite.
 
-| Wrong | Right |
-|-------|-------|
-| {{VOICE_WRONG_EXAMPLE_1}} | {{VOICE_RIGHT_EXAMPLE_1}} |
-| {{VOICE_WRONG_EXAMPLE_2}} | {{VOICE_RIGHT_EXAMPLE_2}} |
+| Wrong                                                           | Right                                               |
+| --------------------------------------------------------------- | --------------------------------------------------- |
+| {{VOICE_WRONG_EXAMPLE_1}}                                       | {{VOICE_RIGHT_EXAMPLE_1}}                           |
+| {{VOICE_WRONG_EXAMPLE_2}}                                       | {{VOICE_RIGHT_EXAMPLE_2}}                           |
 | "They invested significant time in infrastructure development." | "They spent six months building a custom pipeline." |
-| "The commoditization of basic services has accelerated." | Use a specific example instead of the abstraction. |
+| "The commoditization of basic services has accelerated."        | Use a specific example instead of the abstraction.  |
 
 **Default structure:** Short declarative sentences. Fragments are fine. Longer sentences show up when walking through a thought. They should feel like someone talking, not someone writing.
 

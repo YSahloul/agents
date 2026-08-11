@@ -18,8 +18,8 @@ export const getVideoDimensions = async (src: string) => {
   const input = new Input({
     formats: ALL_FORMATS,
     source: new UrlSource(src, {
-      getRetryDelay: () => null,
-    }),
+      getRetryDelay: () => null
+    })
   });
 
   const videoTrack = await input.getPrimaryVideoTrack();
@@ -29,7 +29,7 @@ export const getVideoDimensions = async (src: string) => {
 
   return {
     width: videoTrack.displayWidth,
-    height: videoTrack.displayHeight,
+    height: videoTrack.displayHeight
   };
 };
 ```
@@ -38,7 +38,7 @@ export const getVideoDimensions = async (src: string) => {
 
 ```tsx
 const dimensions = await getVideoDimensions("https://remotion.media/video.mp4");
-console.log(dimensions.width);  // e.g. 1920
+console.log(dimensions.width); // e.g. 1920
 console.log(dimensions.height); // e.g. 1080
 ```
 
@@ -51,7 +51,7 @@ import { Input, ALL_FORMATS, FileSource } from "mediabunny";
 
 const input = new Input({
   formats: ALL_FORMATS,
-  source: new FileSource(file), // File object from input or drag-drop
+  source: new FileSource(file) // File object from input or drag-drop
 });
 
 const videoTrack = await input.getPrimaryVideoTrack();

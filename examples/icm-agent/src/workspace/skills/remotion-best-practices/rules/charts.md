@@ -24,7 +24,7 @@ const bars = data.map((item, i) => {
     frame,
     fps,
     delay: i * STAGGER_DELAY,
-    config: { damping: 200 },
+    config: { damping: 200 }
   });
   return <div style={{ height: height * item.value }} />;
 });
@@ -80,7 +80,7 @@ const path = "M 100 200 L 200 150 L 300 180 L 400 100";
 const progress = interpolate(frame, [0, 2 * fps], [0, 1], {
   extrapolateLeft: "clamp",
   extrapolateRight: "clamp",
-  easing: Easing.out(Easing.quad),
+  easing: Easing.out(Easing.quad)
 });
 
 const { strokeDasharray, strokeDashoffset } = evolvePath(progress, path);
@@ -101,7 +101,7 @@ const { strokeDasharray, strokeDashoffset } = evolvePath(progress, path);
 import {
   getLength,
   getPointAtLength,
-  getTangentAtLength,
+  getTangentAtLength
 } from "@remotion/paths";
 
 const pathLength = getLength(path);
@@ -112,7 +112,7 @@ const angle = Math.atan2(tangent.y, tangent.x);
 <g
   style={{
     transform: `translate(${point.x}px, ${point.y}px) rotate(${angle}rad)`,
-    transformOrigin: "0 0",
+    transformOrigin: "0 0"
   }}
 >
   <polygon points="0,0 -20,-10 -20,10" fill="#FF3232" />

@@ -75,7 +75,7 @@ const SWITCH_CAPTIONS_EVERY_MS = 1200;
 const { pages } = useMemo(() => {
   return createTikTokStyleCaptions({
     captions,
-    combineTokensWithinMilliseconds: SWITCH_CAPTIONS_EVERY_MS,
+    combineTokensWithinMilliseconds: SWITCH_CAPTIONS_EVERY_MS
   });
 }, [captions]);
 ```
@@ -98,7 +98,7 @@ const CaptionedContent: React.FC = () => {
         const startFrame = (page.startMs / 1000) * fps;
         const endFrame = Math.min(
           nextPage ? (nextPage.startMs / 1000) * fps : Infinity,
-          startFrame + (SWITCH_CAPTIONS_EVERY_MS / 1000) * fps,
+          startFrame + (SWITCH_CAPTIONS_EVERY_MS / 1000) * fps
         );
         const durationInFrames = endFrame - startFrame;
 

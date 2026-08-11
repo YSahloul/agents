@@ -28,7 +28,7 @@ import {
   downloadWhisperModel,
   installWhisperCpp,
   transcribe,
-  toCaptions,
+  toCaptions
 } from "@remotion/install-whisper-cpp";
 import fs from "fs";
 
@@ -36,12 +36,12 @@ const to = path.join(process.cwd(), "whisper.cpp");
 
 await installWhisperCpp({
   to,
-  version: "1.5.5",
+  version: "1.5.5"
 });
 
 await downloadWhisperModel({
   model: "medium.en",
-  folder: to,
+  folder: to
 });
 
 // Convert the audio to a 16KHz wav file first if needed:
@@ -53,12 +53,12 @@ const whisperCppOutput = await transcribe({
   whisperPath: to,
   whisperCppVersion: "1.5.5",
   inputPath: "/path/to/audio123.wav",
-  tokenLevelTimestamps: true,
+  tokenLevelTimestamps: true
 });
 
 // Optional: Apply our recommended postprocessing
 const { captions } = toCaptions({
-  whisperCppOutput,
+  whisperCppOutput
 });
 
 // Write it to the public/ folder so it can be fetched from Remotion

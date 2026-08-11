@@ -105,7 +105,8 @@ export class ICMAgent extends AIChatAgent<Env, ICMState> {
       "",
       "# CLAUDE.md (project instructions)",
       "",
-      claudeMd ?? "(no CLAUDE.md found — list the workspace and read what is there)"
+      claudeMd ??
+        "(no CLAUDE.md found — list the workspace and read what is there)"
     ].join("\n");
 
     const result = streamText({
@@ -187,7 +188,8 @@ export class ICMAgent extends AIChatAgent<Env, ICMState> {
             const content = await this.workspace.readFile(resolved);
             if (content === null) return { error: `Not found: ${resolved}` };
             const count = content.split(oldText).length - 1;
-            if (count === 0) return { error: `oldText not found in ${resolved}` };
+            if (count === 0)
+              return { error: `oldText not found in ${resolved}` };
             const updated = content.split(oldText).join(newText);
             await this.workspace.writeFile(resolved, updated);
             return { edited: resolved, replacements: count };

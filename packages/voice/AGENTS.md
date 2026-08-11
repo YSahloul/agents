@@ -25,11 +25,11 @@ ONE job (text → audio), THREE provider interfaces, each a different
 **capability**. A class implements whichever its engine can do; the framework
 auto-selects the best path.
 
-| Interface | Method | What it is | Built-in implementor |
-|---|---|---|---|
-| `TTSProvider` | `synthesize(text)` | **batch** — whole-sentence blob | `WorkersAITTS` |
-| `StreamingTTSProvider` | `synthesizeStream(text)` | **per-sentence stream** — stateless async generator (HTTP-style) | (elevenlabs, telnyx) |
-| `RealtimeTTSProvider` | `createSession(opts)` | **live session** — stateful, bidirectional, `speak`/`flush`/`clear`/`close` | `WorkersAIMulawRealtimeTTS` |
+| Interface              | Method                   | What it is                                                                  | Built-in implementor        |
+| ---------------------- | ------------------------ | --------------------------------------------------------------------------- | --------------------------- |
+| `TTSProvider`          | `synthesize(text)`       | **batch** — whole-sentence blob                                             | `WorkersAITTS`              |
+| `StreamingTTSProvider` | `synthesizeStream(text)` | **per-sentence stream** — stateless async generator (HTTP-style)            | (elevenlabs, telnyx)        |
+| `RealtimeTTSProvider`  | `createSession(opts)`    | **live session** — stateful, bidirectional, `speak`/`flush`/`clear`/`close` | `WorkersAIMulawRealtimeTTS` |
 
 ### Dispatcher precedence (auto-selected from what the provider implements)
 

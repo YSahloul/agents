@@ -21,6 +21,7 @@ npx create-video@latest
 ```
 
 When prompted:
+
 - **Template:** Select "Blank"
 - **TailwindCSS:** Say yes
 - **Install Skills:** Say yes (gives Claude Code animation-specific knowledge)

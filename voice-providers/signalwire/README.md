@@ -73,13 +73,17 @@ class MyAgent extends VoiceAgent<Env> {
 }
 ```
 
-## Barge-in
+## Barge-in and echo suppression
 
-After three consecutive caller-speech frames while agent audio is active, the
-adapter sends SignalWire's `clear` event to stop buffered playback. Agent-side
-STT/VAD remains responsible for aborting generation.
+The adapter uses an energy-based gate to prevent the agent from hearing its
+own TTS looped back through the phone trunk. When the agent is playing audio
+and the inbound energy exceeds the speech threshold for three consecutive
+frames, the adapter sends SignalWire's `clear` event and gates outbound agent
+audio until the next turn boundary. This also handles caller barge-in — the
+gate cannot distinguish echo from real caller speech, and doesn't need to.
 
-## Authentication
+Agent-side STT/VAD drives `playback_interrupt` as a secondary path for speech
+that falls below the local energy threshold.
 
 SignalWire stream URLs do not support query parameters. Use the `<Stream
  authBearerToken="...">` attribute when creating cXML and validate its

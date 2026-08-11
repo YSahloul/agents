@@ -11,7 +11,11 @@ function encodeMulawReference(sample: number): number {
   const sign = sample < 0 ? 0x80 : 0;
   const magnitude = Math.min(Math.abs(sample), CLIP) + BIAS;
   let exponent = 7;
-  for (let mask = 0x4000; (magnitude & mask) === 0 && exponent > 0; mask >>= 1) {
+  for (
+    let mask = 0x4000;
+    (magnitude & mask) === 0 && exponent > 0;
+    mask >>= 1
+  ) {
     exponent--;
   }
   const mantissa = (magnitude >> (exponent + 3)) & 0x0f;
@@ -198,7 +202,11 @@ describe("SignalWireAdapter", () => {
     // audio_config it would assume 16000 and emit 12 bytes instead of 8.
     agentSocket.emit(
       "message",
-      JSON.stringify({ type: "audio_config", format: "pcm16", sampleRate: 24000 })
+      JSON.stringify({
+        type: "audio_config",
+        format: "pcm16",
+        sampleRate: 24000
+      })
     );
     agentSocket.emit("message", new Int16Array(24).buffer);
     const sent = carrierSocket.json.find((m) => m.event === "media") as {

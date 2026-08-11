@@ -1,5 +1,6 @@
 import {
   arrayBufferToBase64,
+  meanSquaredEnergy,
   pcm16ToSignalWireMulaw,
   signalWireMulawToPcm16
 } from "./audio/utils.js";
@@ -46,11 +47,38 @@ export interface SignalWireAdapterOptions {
    * @default 16000
    */
   sttSampleRate?: number;
+  /**
+   * Log a line for every inbound 20 ms frame while the agent is speaking
+   * (energy, gate state, playback countdown). That is ~50 lines/second —
+   * it buries every useful log in a call. Off by default; turn it on only
+   * when tuning the echo gate itself.
+   * @default false
+   */
+  debugAudio?: boolean;
 }
 
 /** Fallback until the agent's `audio_config` announces the real TTS rate. */
-const DEFAULT_AGENT_SAMPLE_RATE = 16000;
 
+// Energy threshold for speech detection — filters ambient mic noise.
+// Mean squared amplitude > 250,000 ≈ RMS > 500 out of ±32,767.
+const SPEECH_ENERGY_THRESHOLD = 250_000;
+
+// Consecutive loud frames required before treating inbound audio as real
+// caller speech (≈60ms at 8kHz/20ms frames) — debounces transient noise.
+const SPEECH_DEBOUNCE_FRAMES = 3;
+
+// Keep a small allowance after estimated playback ends for network and
+// SignalWire queue latency before considering the agent silent.
+const PLAYBACK_GRACE_MS = 1000;
+
+// EXPERIMENT — echo gate off. When false, inbound caller audio is forwarded
+// to the agent unconditionally: no ducking while the agent speaks, no
+// energy/debounce barge-in, no PLAYBACK_GRACE_MS dead window after playback.
+// Barge-in then relies solely on the STT's own speech detection. Expect the
+// agent to hear itself on a speakerphone/trunk with echo. Flip back to true
+// to restore the gate.
+const ECHO_GATE_ENABLED = false;
+const DEFAULT_AGENT_SAMPLE_RATE = 16000;
 
 /** Bridges a SignalWire bidirectional cXML Stream to a VoiceAgent. */
 export class SignalWireAdapter {
@@ -72,6 +100,32 @@ export class SignalWireAdapter {
     // Set from the agent's `audio_config`, which the voice runtime derives
     // from the TTS provider's declared rate. Never guessed here.
     let agentSampleRate = DEFAULT_AGENT_SAMPLE_RATE;
+
+    // audioGated suppresses stale agent audio after local speech detection.
+    // The gate remains raised until the agent confirms interruption or starts
+    // the next turn.
+    let audioGated = false;
+
+    // Barge-in is only armed while SignalWire is estimated to still be
+    // playing queued audio and only fires after a few consecutive loud
+    // frames, so line noise, caller backchannels, and echo do not spuriously
+    // cut playback.
+    let estimatedPlaybackEndAt = 0;
+    let loudFrames = 0;
+
+    // Bytes per second of agent audio — depends on format and sample rate.
+    // mulaw passthrough: 8000 bytes/sec. PCM16: sampleRate * 2 bytes/sec.
+    let agentBytesPerSec =
+      options?.agentAudioFormat === "mulaw"
+        ? 8000
+        : DEFAULT_AGENT_SAMPLE_RATE * 2;
+
+    const sendClearAudio = () => {
+      estimatedPlaybackEndAt = 0;
+      if (serverSocket.readyState === WebSocket.OPEN) {
+        serverSocket.send(JSON.stringify({ event: "clear", streamSid }));
+      }
+    };
 
     const endAgentCall = () => {
       if (agentSocket?.readyState !== WebSocket.OPEN) return;
@@ -127,15 +181,41 @@ export class SignalWireAdapter {
               message.sampleRate > 0
             ) {
               agentSampleRate = message.sampleRate;
-              return;
+              if (options?.agentAudioFormat !== "mulaw") {
+                agentBytesPerSec = agentSampleRate * 2;
+              }
             }
             if (message.type === "playback_interrupt") {
-              if (serverSocket.readyState === WebSocket.OPEN) {
-                serverSocket.send(
-                  JSON.stringify({ event: "clear", streamSid })
-                );
-              }
+              // The agent's transcriber can detect speech that the local
+              // energy heuristic misses. Clear SignalWire unless the local
+              // path already did, then release the gate at this ordered
+              // boundary.
+              console.log(
+                "[SignalWireAdapter] GATE RELEASED — playback_interrupt (wasGated:",
+                audioGated,
+                ")"
+              );
+              if (!audioGated) sendClearAudio();
+              audioGated = false;
+              loudFrames = 0;
               return;
+            }
+            if (
+              message.type === "status" &&
+              (message.status === "listening" ||
+                message.status === "thinking" ||
+                message.status === "speaking")
+            ) {
+              // Status transitions are ordered after the previous pipeline's
+              // audio, so no stale chunk can follow this boundary.
+              console.log(
+                "[SignalWireAdapter] GATE RELEASED — status:",
+                message.status,
+                "(wasGated:",
+                audioGated,
+                ")"
+              );
+              audioGated = false;
             }
             if (
               serverSocket.readyState === WebSocket.OPEN &&
@@ -156,14 +236,30 @@ export class SignalWireAdapter {
           }
           return;
         }
-
         if (!(event.data instanceof ArrayBuffer)) return;
+        if (audioGated) {
+          if (options?.debugAudio) {
+            console.log(
+              "[SignalWireAdapter] gated — dropping",
+              event.data.byteLength,
+              "bytes of agent audio"
+            );
+          }
+          return;
+        }
         if (serverSocket.readyState !== WebSocket.OPEN) return;
 
+        const now = Date.now();
+        const durationMs = (event.data.byteLength / agentBytesPerSec) * 1000;
+        estimatedPlaybackEndAt =
+          Math.max(now, estimatedPlaybackEndAt) + durationMs;
         const payload =
           options?.agentAudioFormat === "mulaw"
             ? arrayBufferToBase64(event.data)
-            : pcm16ToSignalWireMulaw(new Int16Array(event.data), agentSampleRate);
+            : pcm16ToSignalWireMulaw(
+                new Int16Array(event.data),
+                agentSampleRate
+              );
         serverSocket.send(
           JSON.stringify({ event: "media", streamSid, media: { payload } })
         );
@@ -211,9 +307,57 @@ export class SignalWireAdapter {
             media.media.payload,
             options?.sttSampleRate ?? 16000
           );
+
+          // Preemptive duck: gate inbound audio while the agent is playing
+          // TTS, so the agent never hears its own voice looping back. Only
+          // let audio through if the caller is loud enough to barge in.
+          const agentSpeaking =
+            ECHO_GATE_ENABLED &&
+            Date.now() < estimatedPlaybackEndAt + PLAYBACK_GRACE_MS;
+
+          if (agentSpeaking) {
+            const energy = meanSquaredEnergy(pcm16);
+            const loud = energy > SPEECH_ENERGY_THRESHOLD;
+            if (options?.debugAudio) {
+              console.log("[SignalWireAdapter] duck — agentSpeaking, energy:", {
+                energy: Math.round(energy),
+                loud,
+                loudFrames: loud ? loudFrames + 1 : 0,
+                audioGated,
+                playbackRemainingMs: Math.max(
+                  0,
+                  estimatedPlaybackEndAt + PLAYBACK_GRACE_MS - Date.now()
+                )
+              });
+            }
+
+            // Detect caller barge-in: sustained loud energy during playback
+            // means the caller is actually speaking, not just echo.
+            loudFrames = loud ? loudFrames + 1 : 0;
+            if (loudFrames >= SPEECH_DEBOUNCE_FRAMES) {
+              console.log("[SignalWireAdapter] BARGE-IN — caller speaking");
+              audioGated = true;
+              loudFrames = 0;
+              sendClearAudio();
+              // Forward this frame — caller is barging in
+              if (agentSocket?.readyState === WebSocket.OPEN) {
+                agentSocket.send(pcm16.buffer as ArrayBuffer);
+              }
+              return;
+            }
+
+            // No barge-in — drop this frame (echo suppression)
+            return;
+          }
+
+          // Agent is silent — forward audio normally.
           if (agentSocket?.readyState === WebSocket.OPEN) {
             agentSocket.send(pcm16.buffer as ArrayBuffer);
           }
+          // Without this the case falls through to `dtmf` and re-sends every
+          // audio frame as a JSON media event — doubling the agent's inbound
+          // WebSocket message rate (one extra Durable Object invocation per
+          // 20 ms frame) for payloads it then ignores.
           return;
         }
         case "dtmf": {

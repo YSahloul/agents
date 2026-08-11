@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
-# Filtered wrangler tail — drops the bidirectional-stream "Unknown Event" spam
-# (every cXML media frame logs as one), keeps console.log / request / error
-# lines. Mirrors voice-app's scripts/capture-logs.sh noise filtering.
+# Capture worker logs as JSON to a stable path, and echo the lines that matter.
+#
+#   scripts/tail.sh            # capture + live view
+#   node scripts/calls.mjs     # per-turn timeline of the last call
+#
+# The full JSON (including media frames) lands in $CAPTURE so calls.mjs can
+# reconstruct exact timings after the fact. The live view here is only a
+# convenience — it drops the per-frame media spam.
 cd "$(dirname "$0")/.." || exit 1
-exec ../../node_modules/.bin/wrangler tail --format pretty | grep -v "Unknown Event"
+CAPTURE="${CAPTURE:-/tmp/signalwire-calls.json}"
+: >"$CAPTURE"
+echo "capturing to $CAPTURE — read it with: node scripts/calls.mjs"
+exec ../../node_modules/.bin/wrangler tail --format json \
+  | tee -a "$CAPTURE" \
+  | grep -E '"(event|message)"' \
+  | grep -Ev 'duck|Unknown Event|getWebSocketEvent'

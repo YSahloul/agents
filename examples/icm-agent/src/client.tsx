@@ -127,8 +127,7 @@ function Studio() {
               {messages.map((message, index) => {
                 const isUser = message.role === "user";
                 const isLastAssistant =
-                  message.role === "assistant" &&
-                  index === messages.length - 1;
+                  message.role === "assistant" && index === messages.length - 1;
 
                 if (isUser) {
                   return (

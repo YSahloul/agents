@@ -11,6 +11,7 @@ The available animation components. Specs and builds should only reference compo
 Animates text appearing on screen, character by character or word by word.
 
 **Props:**
+
 - `text` (string) -- The text to display
 - `position` (string) -- Where on screen: "center", "bottom-third", "top-third", "left", "right"
 - `style` (string) -- "heading" uses {{HEADING_FONT}}, "body" uses {{BODY_FONT}}
@@ -22,6 +23,7 @@ Animates text appearing on screen, character by character or word by word.
 Static text block. No animation.
 
 **Props:**
+
 - `text` (string) -- The text to display
 - `position` (string) -- Screen position
 - `style` (string) -- "heading" or "body"
@@ -33,6 +35,7 @@ Static text block. No animation.
 Lower-third caption with background bar.
 
 **Props:**
+
 - `text` (string) -- Caption text
 - `background` (string) -- Bar color (default: {{PRIMARY_COLOR}})
 - `textColor` (string) -- Text color (default: white)
@@ -46,6 +49,7 @@ Lower-third caption with background bar.
 Full-frame gradient background.
 
 **Props:**
+
 - `from` (string) -- Start color, hex
 - `to` (string) -- End color, hex
 - `direction` (string) -- "top-to-bottom", "left-to-right", "radial"
@@ -55,6 +59,7 @@ Full-frame gradient background.
 Cross-section diagram showing stacked layers. Core component for Layered Reveal format.
 
 **Props:**
+
 - `layers` (array) -- List of layer objects: { name, color, icon }
 - `activeLayer` (number) -- Which layer is currently highlighted (0-indexed)
 - `revealMode` (string) -- "stack-down" (layers appear top to bottom) or "stack-up"
@@ -65,6 +70,7 @@ Cross-section diagram showing stacked layers. Core component for Layered Reveal 
 A single icon or small illustration.
 
 **Props:**
+
 - `icon` (string) -- Icon name from the icon set
 - `position` (string) -- Screen position
 - `size` (number) -- Size in pixels
@@ -75,6 +81,7 @@ A single icon or small illustration.
 Display an image with optional framing.
 
 **Props:**
+
 - `src` (string) -- Path to image file
 - `frame` (string) -- "none", "phone", "browser", "monitor"
 - `position` (string) -- Screen position
@@ -89,6 +96,7 @@ Display an image with optional framing.
 Slides an element into frame from outside.
 
 **Props:**
+
 - `direction` (string) -- "left", "right", "top", "bottom"
 - `duration` (number) -- Frames to complete the slide
 - `easing` (string) -- Easing function (default: "ease-out")
@@ -98,6 +106,7 @@ Slides an element into frame from outside.
 Fades between two states or elements.
 
 **Props:**
+
 - `duration` (number) -- Frames for the fade
 - `from` (number) -- Starting opacity (0-1)
 - `to` (number) -- Ending opacity (0-1)
@@ -107,6 +116,7 @@ Fades between two states or elements.
 Scales an element from small to full size (or vice versa).
 
 **Props:**
+
 - `from` (number) -- Starting scale (e.g., 0.5)
 - `to` (number) -- Ending scale (e.g., 1.0)
 - `duration` (number) -- Frames
@@ -117,6 +127,7 @@ Scales an element from small to full size (or vice versa).
 Expanding circle from a touch point. Used for "user taps something" moments.
 
 **Props:**
+
 - `origin` (string) -- Where the tap occurs
 - `color` (string) -- Ripple color
 - `expandTo` (number) -- How large the ripple grows (multiplier)
@@ -131,6 +142,7 @@ Expanding circle from a touch point. Used for "user taps something" moments.
 Divides the frame into two panels.
 
 **Props:**
+
 - `split` (string) -- "vertical" or "horizontal"
 - `ratio` (string) -- "50-50", "60-40", "70-30"
 - `gap` (number) -- Pixels between panels
@@ -140,6 +152,7 @@ Divides the frame into two panels.
 Element fills the entire frame edge to edge.
 
 **Props:**
+
 - `padding` (number) -- Inner padding in pixels (default: 0)
 
 ### Overlay
@@ -147,6 +160,7 @@ Element fills the entire frame edge to edge.
 Positions an element on top of existing content.
 
 **Props:**
+
 - `position` (string) -- "center", "top-left", "bottom-right", etc.
 - `opacity` (number) -- Background overlay opacity (0-1)
 - `blur` (number) -- Background blur in pixels (default: 0)

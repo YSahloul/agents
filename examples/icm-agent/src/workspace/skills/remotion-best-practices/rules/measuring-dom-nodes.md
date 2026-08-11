@@ -25,11 +25,10 @@ export const MyComponent = () => {
     const rect = ref.current.getBoundingClientRect();
     setDimensions({
       width: rect.width / scale,
-      height: rect.height / scale,
+      height: rect.height / scale
     });
   }, [scale]);
 
   return <div ref={ref}>Content to measure</div>;
 };
 ```
-

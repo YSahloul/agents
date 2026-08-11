@@ -15,7 +15,12 @@ format: short-form | long-form
 resolution: 1080x1920 | 1920x1080
 fps: 30
 core-metaphor: [One sentence -- the visual idea the whole video is built around]
-color-arc: [Scene-by-scene color/mood progression, e.g., "Blue (revelation) > Amber (comparison) > Red (concession) > Blue (mirror)"]
+color-arc:
+  [
+    Scene-by-scene color/mood progression,
+    e.g.,
+    "Blue (revelation) > Amber (comparison) > Red (concession) > Blue (mirror)"
+  ]
 source-script: [filename from 01-script/output/]
 ---
 ```
@@ -29,15 +34,16 @@ source-script: [filename from 01-script/output/]
 The timing contract. Each beat has a name, approximate duration, the narration text, and the mood. Durations are approximate. The builder calculates exact frames.
 
 ```markdown
-| Beat | ~Duration | Narration (key lines) | Mood |
-|------|-----------|----------------------|------|
-| Hook | ~3s | "You tapped send." | Tension, intrigue |
-| Build | ~8s | "That triggered 12,000 operations..." | Escalation, revelation |
-| Core | ~12s | "Here is what actually happens." | Clarity, density |
-| Close | ~4s | "The question was never..." | Resolution, compression |
+| Beat  | ~Duration | Narration (key lines)                 | Mood                    |
+| ----- | --------- | ------------------------------------- | ----------------------- |
+| Hook  | ~3s       | "You tapped send."                    | Tension, intrigue       |
+| Build | ~8s       | "That triggered 12,000 operations..." | Escalation, revelation  |
+| Core  | ~12s      | "Here is what actually happens."      | Clarity, density        |
+| Close | ~4s       | "The question was never..."           | Resolution, compression |
 ```
 
 **Timing reference at 30fps:**
+
 - Short beat (label, transition): ~2-3 seconds
 - Standard beat (one concept): ~5-8 seconds
 - Long beat (complex visual): ~8-12 seconds
@@ -77,11 +83,11 @@ Specific narration words or phrases mapped to visual events. This is the fine-gr
 Scene-by-scene color and mood. Dominant color and emotional register per beat. Not hex codes for every element.
 
 ```markdown
-| Scene | Dominant Color | Mood |
-|-------|---------------|------|
-| Hook | Blue | Tension, mystery |
-| Build | Amber | Escalation |
-| Close | Blue | Mirror, resolution |
+| Scene | Dominant Color | Mood               |
+| ----- | -------------- | ------------------ |
+| Hook  | Blue           | Tension, mystery   |
+| Build | Amber          | Escalation         |
+| Close | Blue           | Mirror, resolution |
 ```
 
 ---
@@ -114,8 +120,10 @@ Compare with what NOT to write:
 
 ```markdown
 ### Beat 1 [0-90]
+
 Components: PhoneFrame, TapRipple, TextReveal
 Props:
+
 - PhoneFrame: { screen: "message-app", scale: 0.8 }
 - TapRipple: { origin: "send-button", color: "#3B82F6", expandTo: 1.5 }
 ```

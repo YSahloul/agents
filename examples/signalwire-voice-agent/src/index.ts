@@ -2,29 +2,12 @@ import { Agent, routeAgentRequest, type Connection } from "agents";
 import {
   withVoice,
   WorkersAIFluxSTT,
-  WorkersAIMulawRealtimeTTS,
+  WorkersAITTS,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
-import { streamText, tool } from "ai";
+import { streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
-import { z } from "zod";
-
-/** Stops the agent answering its own TTS, which the phone trunk loops back
- * into the mic. Local to this example — not a library concern. */
-function isEchoOf(transcript: string, assistantText: string): boolean {
-  if (!assistantText) return false;
-  const a =
-    assistantText
-      .toLowerCase()
-      .match(/[\p{L}\p{N}]+/gu)
-      ?.join(" ") ?? "";
-  const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-  if (heard.length >= 3 && a.includes(heard.join(" "))) return true;
-  const aWords = new Set(a.split(" "));
-  const hits = heard.filter((w) => aWords.has(w)).length;
-  return hits >= 4 && hits / heard.length >= 0.6;
-}
 
 const SYSTEM_PROMPT = `You are a phone voice assistant. Respond in 1-2 short sentences. Be direct and natural. Never exceed 30 words unless asked for detail.`;
 
@@ -32,10 +15,22 @@ const VoiceAgent = withVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   transcriber = new WorkersAIFluxSTT(this.env.AI, {
+    // Speculative turns: an eager end-of-turn at 0.5 fires on a mid-sentence
+    // pause, runs the LLM + TTS, and plays the audio before the guess is
+    // confirmed. Restored to baseline so the echo gate is the only variable
+    // under test.
     eagerEotThreshold: 0.5,
     eotThreshold: 0.7
   });
-  tts = new WorkersAIMulawRealtimeTTS(this.env.AI);
+  // Batch HTTP TTS (Plivo-style) for A/B latency test vs the realtime WS
+  // class. Linear16/16k PCM; the SignalWire adapter encodes mulaw itself in
+  // pcm16 mode.
+  tts = new WorkersAITTS(this.env.AI, {
+    model: "@cf/deepgram/aura-2-en",
+    encoding: "linear16",
+    sampleRate: 16000,
+    container: "none"
+  });
   #workersAi = createWorkersAI({ binding: this.env.AI });
 
   async onCallStart(connection: Connection) {
@@ -44,7 +39,11 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
 
   async onTurn(transcript: string, context: VoiceTurnContext) {
     const result = streamText({
-      model: this.#workersAi("@cf/openai/gpt-oss-20b", {
+      // llama-3.3-70b-fp8-fast / llama-4-scout / llama-3.2-3b stutter via the
+      // AI binding: binding returns non-streaming JSON, workers-ai-provider's
+      // fallback emits every word twice ("YesYes, I can, I can hear you. hear
+      // you."). 3.2-1b streams cleanly + is non-reasoning + fast (~180ms).
+      model: this.#workersAi("@cf/meta/llama-3.2-1b-instruct", {
         sessionAffinity: this.sessionAffinity
       }),
       system: SYSTEM_PROMPT,
@@ -55,44 +54,9 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
         })),
         { role: "user" as const, content: transcript }
       ],
-      maxOutputTokens: 150,
-      tools: {
-        get_current_time: tool({
-          description: "Get the current date and time.",
-          inputSchema: z.object({}),
-          execute: async () => {
-            const now = new Date();
-            return {
-              time: now.toLocaleTimeString("en-US", {
-                hour: "2-digit",
-                minute: "2-digit",
-                timeZoneName: "short"
-              }),
-              date: now.toLocaleDateString("en-US", {
-                weekday: "long",
-                year: "numeric",
-                month: "long",
-                day: "numeric"
-              })
-            };
-          }
-        })
-      }
+      maxOutputTokens: 300
     });
-
     return result.fullStream;
-  }
-  override afterTranscribe(transcript: string): string | null {
-    const history = this.getConversationHistory();
-    let lastAssistant = "";
-    for (let i = history.length - 1; i >= 0; i--) {
-      if (history[i].role === "assistant") {
-        lastAssistant = history[i].content;
-        break;
-      }
-    }
-    if (isEchoOf(transcript, lastAssistant)) return null;
-    return transcript;
   }
 }
 
@@ -115,7 +79,7 @@ export default {
         request,
         env as unknown as Record<string, unknown>,
         "MyVoiceAgent",
-        { agentAudioFormat: "mulaw" }
+        { agentAudioFormat: "pcm16" }
       );
     }
 

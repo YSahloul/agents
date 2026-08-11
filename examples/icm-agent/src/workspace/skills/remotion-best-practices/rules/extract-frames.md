@@ -19,7 +19,7 @@ import {
   Input,
   UrlSource,
   VideoSample,
-  VideoSampleSink,
+  VideoSampleSink
 } from "mediabunny";
 
 type Options = {
@@ -43,17 +43,17 @@ export async function extractFrames({
   src,
   timestampsInSeconds,
   onVideoSample,
-  signal,
+  signal
 }: ExtractFramesProps): Promise<void> {
   using input = new Input({
     formats: ALL_FORMATS,
-    source: new UrlSource(src),
+    source: new UrlSource(src)
   });
 
   const [durationInSeconds, format, videoTrack] = await Promise.all([
     input.computeDuration(),
     input.getFormat(),
-    input.getPrimaryVideoTrack(),
+    input.getPrimaryVideoTrack()
   ]);
 
   if (!videoTrack) {
@@ -69,10 +69,10 @@ export async function extractFrames({
       ? await timestampsInSeconds({
           track: {
             width: videoTrack.displayWidth,
-            height: videoTrack.displayHeight,
+            height: videoTrack.displayHeight
           },
           container: format.name,
-          durationInSeconds,
+          durationInSeconds
         })
       : timestampsInSeconds;
 
@@ -114,7 +114,7 @@ await extractFrames({
     canvas.height = sample.displayHeight;
     const ctx = canvas.getContext("2d");
     sample.draw(ctx!, 0, 0);
-  },
+  }
 });
 ```
 
@@ -154,7 +154,7 @@ await extractFrames({
     canvas.height = sample.displayHeight;
     const ctx = canvas.getContext("2d");
     sample.draw(ctx!, 0, 0);
-  },
+  }
 });
 ```
 
@@ -179,7 +179,7 @@ try {
       const ctx = canvas.getContext("2d");
       frame.draw(ctx!, 0, 0);
     },
-    signal: controller.signal,
+    signal: controller.signal
   });
 
   console.log("Frame extraction complete!");
@@ -200,7 +200,7 @@ const timeoutPromise = new Promise<never>((_, reject) => {
   }, 10000);
 
   controller.signal.addEventListener("abort", () => clearTimeout(timeoutId), {
-    once: true,
+    once: true
   });
 });
 
@@ -217,9 +217,9 @@ try {
         const ctx = canvas.getContext("2d");
         frame.draw(ctx!, 0, 0);
       },
-      signal: controller.signal,
+      signal: controller.signal
     }),
-    timeoutPromise,
+    timeoutPromise
   ]);
 
   console.log("Frame extraction complete!");

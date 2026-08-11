@@ -1557,10 +1557,16 @@ var WorkersAIMulawRealtimeTTSSession = class {
 		ws.addEventListener("message", (event) => {
 			this.#handleMessage(event);
 		});
-		ws.addEventListener("close", () => {
+		ws.addEventListener("close", (event) => {
+			console.log("[WorkersAIMulawTTS] WebSocket closed — code:", event.code, "reason:", event.reason, "wasClean:", event.wasClean);
 			if (this.#ws === ws) this.#ws = null;
 		});
 		ws.addEventListener("error", (event) => {
+			console.error("[WorkersAIMulawTTS] WebSocket error:", {
+				type: event.type,
+				message: event.message,
+				error: event.error
+			});
 			if (this.#ws === ws) this.#ws = null;
 			this.options.onError?.(event);
 		});
@@ -2191,6 +2197,15 @@ function withVoice(Base, voiceOptions) {
 		onCallEnd(_connection) {}
 		onInterrupt(_connection) {}
 		afterTranscribe(transcript, _connection) {
+			const lastAssistant = this.getConversationHistory(1).find((m) => m.role === "assistant");
+			if (!lastAssistant) return transcript;
+			const a = lastAssistant.content.toLowerCase().match(/[\p{L}\p{N}]+/gu)?.join(" ") ?? "";
+			if (!a) return transcript;
+			const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+			if (heard.length >= 3 && a.includes(heard.join(" "))) return null;
+			const aWords = new Set(a.split(" "));
+			const hits = heard.filter((w) => aWords.has(w)).length;
+			if (hits >= 4 && hits / heard.length >= .6) return null;
 			return transcript;
 		}
 		beforeSynthesize(text, _connection) {
@@ -2258,7 +2273,13 @@ function withVoice(Base, voiceOptions) {
 				},
 				onError: (error) => {
 					if (this.#realtimeTTSSessions.get(connection.id) !== session) return;
-					console.error("[VoiceAgent] Realtime TTS error:", error);
+					const err = error;
+					console.error("[VoiceAgent] Realtime TTS error:", {
+						message: err.message,
+						type: err.type,
+						error: err.error,
+						source: typeof error
+					});
 				}
 			});
 			this.#realtimeTTSSessions.set(connection.id, session);
@@ -2745,6 +2766,14 @@ function withVoice(Base, voiceOptions) {
 					return;
 				}
 				if (!fullText || fullText.trim().length === 0) {
+					console.log("[VoiceTrace]", {
+						event: "turn_empty",
+						connectionId: connection.id,
+						llmMs,
+						firstModelDeltaMs,
+						totalMs: Date.now() - pipelineStart,
+						reason: "model produced no text"
+					});
 					this.#sendJSON(connection, {
 						type: "error",
 						message: "No response generated"
@@ -2768,6 +2797,18 @@ function withVoice(Base, voiceOptions) {
 					first_sentence_ms: firstSentenceMs,
 					first_audio_ms: firstAudioMs,
 					total_ms: totalMs
+				});
+				console.log("[VoiceTrace]", {
+					event: "turn_complete",
+					connectionId: connection.id,
+					llmMs,
+					ttsMs,
+					firstModelDeltaMs,
+					firstSentenceMs,
+					firstAudioMs,
+					totalMs,
+					chars: fullText.length,
+					text: fullText
 				});
 				this.#cm.updateAgentContext(connection.id, fullText);
 				this.saveMessage("assistant", fullText);
@@ -2934,6 +2975,14 @@ function withVoice(Base, voiceOptions) {
 			let firstModelDeltaAt = null;
 			let firstSentenceAt = null;
 			let cumulativeTtsMs = 0;
+			const trace = (event, details = {}) => {
+				console.log("[VoiceTrace]", {
+					event,
+					connectionId: connection.id,
+					elapsedMs: Date.now() - pipelineStart,
+					...details
+				});
+			};
 			let streamComplete = false;
 			let drainNotify = null;
 			let drainPending = false;
@@ -2981,7 +3030,10 @@ function withVoice(Base, voiceOptions) {
 						for await (const chunk of ttsQueue[i]) {
 							if (signal.aborted) return;
 							await this.#sendAudio(connection, chunk);
-							if (!firstAudioSentAt) firstAudioSentAt = Date.now();
+							if (!firstAudioSentAt) {
+								firstAudioSentAt = Date.now();
+								trace("tts_first_audio", { bytes: chunk.byteLength });
+							}
 						}
 					} catch (err) {
 						if (signal.aborted) return;
@@ -3011,7 +3063,13 @@ function withVoice(Base, voiceOptions) {
 						const processed = await self.afterSynthesize(rawAudio, text, connection);
 						if (processed) yield processed;
 					}
-					cumulativeTtsMs += Date.now() - ttsStart;
+					const synthMs = Date.now() - ttsStart;
+					cumulativeTtsMs += synthMs;
+					trace("tts_sentence", {
+						chars: text.length,
+						synthMs,
+						text
+					});
 				}
 				return eagerAsyncIterable(generate());
 			};
@@ -3045,6 +3103,10 @@ function withVoice(Base, voiceOptions) {
 					continue;
 				}
 				if (event.type === "error") {
+					trace("model_stream_error", {
+						error: event.error instanceof Error ? event.error.message : String(event.error),
+						generatedChars: fullText.length
+					});
 					for (const sentence of chunker.flush()) enqueueSentence(sentence);
 					await waitForDrained(ttsQueue.length);
 					if (transcriptStarted) this.#sendJSON(connection, {
@@ -3057,13 +3119,21 @@ function withVoice(Base, voiceOptions) {
 					throw event.error;
 				}
 				const token = event.text;
-				firstModelDeltaAt ??= Date.now();
+				if (firstModelDeltaAt === null) {
+					firstModelDeltaAt = Date.now();
+					trace("model_first_delta");
+				}
 				fullText += token;
 				sendAssistantDelta(token);
 				const sentences = chunker.add(token);
 				for (const sentence of sentences) enqueueSentence(sentence);
 			}
 			const llmMs = Date.now() - llmStart;
+			trace("model_stream_complete", {
+				generatedChars: fullText.length,
+				aborted: signal.aborted,
+				text: fullText
+			});
 			const remaining = chunker.flush();
 			for (const sentence of remaining) enqueueSentence(sentence);
 			streamComplete = true;

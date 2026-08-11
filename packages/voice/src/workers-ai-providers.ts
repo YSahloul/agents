@@ -285,10 +285,23 @@ class WorkersAIMulawRealtimeTTSSession implements RealtimeTTSSession {
     ws.addEventListener("message", (event: MessageEvent) => {
       this.#handleMessage(event);
     });
-    ws.addEventListener("close", () => {
+    ws.addEventListener("close", (event: CloseEvent) => {
+      console.log(
+        "[WorkersAIMulawTTS] WebSocket closed — code:",
+        event.code,
+        "reason:",
+        event.reason,
+        "wasClean:",
+        event.wasClean
+      );
       if (this.#ws === ws) this.#ws = null;
     });
     ws.addEventListener("error", (event: Event) => {
+      console.error("[WorkersAIMulawTTS] WebSocket error:", {
+        type: (event as ErrorEvent).type,
+        message: (event as ErrorEvent).message,
+        error: (event as ErrorEvent).error
+      });
       if (this.#ws === ws) this.#ws = null;
       this.options.onError?.(event);
     });

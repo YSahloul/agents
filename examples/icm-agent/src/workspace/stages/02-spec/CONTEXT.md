@@ -4,13 +4,13 @@ Take a finished script and produce a spec that defines visual concepts and timin
 
 ## Inputs
 
-| Source | File/Location | Section/Scope | Why |
-|--------|--------------|---------------|-----|
-| Previous stage | `../01-script/output/` | Most recent script file (full) | The script to spec |
-| Reference | `references/spec-format.md` | Full file | Contract format, required sections, rules |
-| Reference | `references/design-system.md` | "Colors" and "Typography" sections | Visual values for color flow |
-| Reference | `references/animation-guide.md` | Full file | Motion principles, visual rhythm |
-| Skill | `../../skills/frontend-design/SKILL.md` | Full file | Design thinking, aesthetics, visual direction |
+| Source         | File/Location                           | Section/Scope                      | Why                                           |
+| -------------- | --------------------------------------- | ---------------------------------- | --------------------------------------------- |
+| Previous stage | `../01-script/output/`                  | Most recent script file (full)     | The script to spec                            |
+| Reference      | `references/spec-format.md`             | Full file                          | Contract format, required sections, rules     |
+| Reference      | `references/design-system.md`           | "Colors" and "Typography" sections | Visual values for color flow                  |
+| Reference      | `references/animation-guide.md`         | Full file                          | Motion principles, visual rhythm              |
+| Skill          | `../../skills/frontend-design/SKILL.md` | Full file                          | Design thinking, aesthetics, visual direction |
 
 ## Process
 
@@ -27,19 +27,19 @@ Take a finished script and produce a spec that defines visual concepts and timin
 
 ## Audit
 
-| Check | Pass Condition |
-|-------|---------------|
-| Mute test | Visual concepts create curiosity without audio |
-| One concept per beat | No beat explains two things |
-| Contract purity | Spec contains zero component names, frame numbers, or prop definitions |
-| Key moments | 2-3 non-negotiable animations identified with clear rationale |
-| Audio sync | At least 3 specific narration words mapped to visual events |
-| Color flow | Every scene has a dominant color and mood assigned |
+| Check                | Pass Condition                                                         |
+| -------------------- | ---------------------------------------------------------------------- |
+| Mute test            | Visual concepts create curiosity without audio                         |
+| One concept per beat | No beat explains two things                                            |
+| Contract purity      | Spec contains zero component names, frame numbers, or prop definitions |
+| Key moments          | 2-3 non-negotiable animations identified with clear rationale          |
+| Audio sync           | At least 3 specific narration words mapped to visual events            |
+| Color flow           | Every scene has a dominant color and mood assigned                     |
 
 ## Outputs
 
-| Artifact | Location | Format |
-|----------|----------|--------|
+| Artifact       | Location                      | Format                                                                                       |
+| -------------- | ----------------------------- | -------------------------------------------------------------------------------------------- |
 | Animation spec | `output/[topic-slug]-spec.md` | Contract-format markdown (beat map, visual philosophy, key moments, sync points, color flow) |
 
 The spec file in `output/` is the human edit surface. Adjust timing, change visual concepts, refine the color arc. Stage 03 reads whatever is in that file.

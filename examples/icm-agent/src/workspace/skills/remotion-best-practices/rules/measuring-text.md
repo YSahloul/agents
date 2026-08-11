@@ -29,7 +29,7 @@ const { width, height } = measureText({
   text: "Hello World",
   fontFamily: "Arial",
   fontSize: 32,
-  fontWeight: "bold",
+  fontWeight: "bold"
 });
 ```
 
@@ -46,7 +46,7 @@ const { fontSize } = fitText({
   text: "Hello World",
   withinWidth: 600,
   fontFamily: "Inter",
-  fontWeight: "bold",
+  fontWeight: "bold"
 });
 
 return (
@@ -54,7 +54,7 @@ return (
     style={{
       fontSize: Math.min(fontSize, 80), // Cap at 80px
       fontFamily: "Inter",
-      fontWeight: "bold",
+      fontWeight: "bold"
     }}
   >
     Hello World
@@ -76,7 +76,7 @@ for (const word of words) {
   const { exceedsBox } = box.add({
     text: word + " ",
     fontFamily: "Arial",
-    fontSize: 24,
+    fontSize: 24
   });
   if (exceedsBox) {
     // Text would overflow, handle accordingly
@@ -94,7 +94,7 @@ import { loadFont } from "@remotion/google-fonts/Inter";
 
 const { fontFamily, waitUntilDone } = loadFont("normal", {
   weights: ["400"],
-  subsets: ["latin"],
+  subsets: ["latin"]
 });
 
 waitUntilDone().then(() => {
@@ -102,9 +102,9 @@ waitUntilDone().then(() => {
   const { width } = measureText({
     text: "Hello",
     fontFamily,
-    fontSize: 32,
+    fontSize: 32
   });
-})
+});
 ```
 
 **Use validateFontIsLoaded:** Catch font loading issues early:
@@ -114,7 +114,7 @@ measureText({
   text: "Hello",
   fontFamily: "MyCustomFont",
   fontSize: 32,
-  validateFontIsLoaded: true, // Throws if font not loaded
+  validateFontIsLoaded: true // Throws if font not loaded
 });
 ```
 
@@ -125,12 +125,12 @@ const fontStyle = {
   fontFamily: "Inter",
   fontSize: 32,
   fontWeight: "bold" as const,
-  letterSpacing: "0.5px",
+  letterSpacing: "0.5px"
 };
 
 const { width } = measureText({
   text: "Hello",
-  ...fontStyle,
+  ...fontStyle
 });
 
 return <div style={fontStyle}>Hello</div>;

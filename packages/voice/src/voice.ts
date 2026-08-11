@@ -149,7 +149,6 @@ export interface VoiceAgentOptions {
   maxMessageCount?: number;
 }
 
-
 interface SpeculativeTurn {
   finalTranscript?: string;
   outcome: Promise<boolean>;
@@ -472,6 +471,25 @@ export function withVoice<TBase extends AgentLike>(
       transcript: string,
       _connection: Connection
     ): string | null | Promise<string | null> {
+      const history = this.getConversationHistory(1);
+      const lastAssistant = history.find((m) => m.role === "assistant");
+      if (!lastAssistant) return transcript;
+
+      // Check if the transcript is the agent's own TTS looping back.
+      // 1. ≥3 consecutive words match the assistant's last response → echo.
+      // 2. ≥4 words match and ≥60% of heard words are assistant words → echo.
+      const a =
+        lastAssistant.content
+          .toLowerCase()
+          .match(/[\p{L}\p{N}]+/gu)
+          ?.join(" ") ?? "";
+      if (!a) return transcript;
+      const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+      if (heard.length >= 3 && a.includes(heard.join(" "))) return null;
+      const aWords = new Set(a.split(" "));
+      const hits = heard.filter((w) => aWords.has(w)).length;
+      if (hits >= 4 && hits / heard.length >= 0.6) return null;
+
       return transcript;
     }
 
@@ -567,7 +585,13 @@ export function withVoice<TBase extends AgentLike>(
         },
         onError: (error) => {
           if (this.#realtimeTTSSessions.get(connection.id) !== session) return;
-          console.error("[VoiceAgent] Realtime TTS error:", error);
+          const err = error as ErrorEvent;
+          console.error("[VoiceAgent] Realtime TTS error:", {
+            message: err.message,
+            type: err.type,
+            error: err.error,
+            source: typeof error
+          });
         }
       });
       this.#realtimeTTSSessions.set(connection.id, session);
@@ -590,7 +614,6 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     // --- Convenience methods ---
-
 
     #cancelSpeculativeTurn(connectionId: string): boolean {
       const turn = this.#speculativeTurns.get(connectionId);
@@ -1095,7 +1118,11 @@ export function withVoice<TBase extends AgentLike>(
 
     // --- Internal: voice pipeline ---
 
-    async #runPipeline(connection: Connection, transcript: string, speculative?: SpeculativeTurn) {
+    async #runPipeline(
+      connection: Connection,
+      transcript: string,
+      speculative?: SpeculativeTurn
+    ) {
       const signal = this.#cm.createPipelineAbort(connection.id);
       const pipelineStart = Date.now();
 
@@ -1167,6 +1194,14 @@ export function withVoice<TBase extends AgentLike>(
         }
 
         if (!fullText || fullText.trim().length === 0) {
+          console.log("[VoiceTrace]", {
+            event: "turn_empty",
+            connectionId: connection.id,
+            llmMs,
+            firstModelDeltaMs,
+            totalMs: Date.now() - pipelineStart,
+            reason: "model produced no text"
+          });
           this.#sendJSON(connection, {
             type: "error",
             message: "No response generated"
@@ -1191,6 +1226,22 @@ export function withVoice<TBase extends AgentLike>(
           first_sentence_ms: firstSentenceMs,
           first_audio_ms: firstAudioMs,
           total_ms: totalMs
+        });
+
+        // The metrics above only reach the client socket. Log them too —
+        // this single line is what answers "why was the reply slow?" for
+        // every transport and both TTS paths.
+        console.log("[VoiceTrace]", {
+          event: "turn_complete",
+          connectionId: connection.id,
+          llmMs,
+          ttsMs,
+          firstModelDeltaMs,
+          firstSentenceMs,
+          firstAudioMs,
+          totalMs,
+          chars: fullText.length,
+          text: fullText
         });
 
         // Feed the agent's spoken reply back to the transcriber as context for
@@ -1437,6 +1488,17 @@ export function withVoice<TBase extends AgentLike>(
       let firstSentenceAt: number | null = null;
       let cumulativeTtsMs = 0;
 
+      // Same trace vocabulary the realtime pipeline emits, so a call can be
+      // read the same way regardless of which TTS path served it.
+      const trace = (event: string, details: Record<string, unknown> = {}) => {
+        console.log("[VoiceTrace]", {
+          event,
+          connectionId: connection.id,
+          elapsedMs: Date.now() - pipelineStart,
+          ...details
+        });
+      };
+
       let streamComplete = false;
       let drainNotify: (() => void) | null = null;
       let drainPending = false;
@@ -1496,6 +1558,7 @@ export function withVoice<TBase extends AgentLike>(
               await this.#sendAudio(connection, chunk);
               if (!firstAudioSentAt) {
                 firstAudioSentAt = Date.now();
+                trace("tts_first_audio", { bytes: chunk.byteLength });
               }
             }
           } catch (err) {
@@ -1541,7 +1604,9 @@ export function withVoice<TBase extends AgentLike>(
             );
             if (processed) yield processed;
           }
-          cumulativeTtsMs += Date.now() - ttsStart;
+          const synthMs = Date.now() - ttsStart;
+          cumulativeTtsMs += synthMs;
+          trace("tts_sentence", { chars: text.length, synthMs, text });
         }
 
         return eagerAsyncIterable(generate());
@@ -1582,6 +1647,13 @@ export function withVoice<TBase extends AgentLike>(
         }
 
         if (event.type === "error") {
+          trace("model_stream_error", {
+            error:
+              event.error instanceof Error
+                ? event.error.message
+                : String(event.error),
+            generatedChars: fullText.length
+          });
           for (const sentence of chunker.flush()) {
             enqueueSentence(sentence);
           }
@@ -1599,7 +1671,10 @@ export function withVoice<TBase extends AgentLike>(
         }
 
         const token = event.text;
-        firstModelDeltaAt ??= Date.now();
+        if (firstModelDeltaAt === null) {
+          firstModelDeltaAt = Date.now();
+          trace("model_first_delta");
+        }
 
         fullText += token;
         sendAssistantDelta(token);
@@ -1611,6 +1686,11 @@ export function withVoice<TBase extends AgentLike>(
       }
 
       const llmMs = Date.now() - llmStart;
+      trace("model_stream_complete", {
+        generatedChars: fullText.length,
+        aborted: signal.aborted,
+        text: fullText
+      });
 
       const remaining = chunker.flush();
       for (const sentence of remaining) {
