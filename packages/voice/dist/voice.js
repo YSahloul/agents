@@ -348,6 +348,9 @@ var AudioConnectionManager = class {
 	updateAgentContext(connectionId, text) {
 		this.#transcriberSessions.get(connectionId)?.updateAgentContext?.(text);
 	}
+	hasActivePipeline(connectionId) {
+		return this.#activePipeline.has(connectionId);
+	}
 	/**
 	* Abort any in-flight pipeline and create a new AbortController.
 	* Returns the new AbortSignal.
@@ -2032,7 +2035,9 @@ function withVoice(Base, voiceOptions) {
 		#cm = new AudioConnectionManager("VoiceAgent");
 		#keepAliveDispose = /* @__PURE__ */ new Map();
 		#audioTransports = /* @__PURE__ */ new Map();
+		#conversationHistory = [];
 		#speculativeTurns = /* @__PURE__ */ new Map();
+		#assistantEchoText = /* @__PURE__ */ new Map();
 		#lastBargeInAt = /* @__PURE__ */ new Map();
 		#startupTokens = /* @__PURE__ */ new Map();
 		static #VOICE_MESSAGES = /* @__PURE__ */ new Set([
@@ -2045,7 +2050,7 @@ function withVoice(Base, voiceOptions) {
 			"text_message"
 		]);
 		#schemaReady = false;
-		#ensureSchema() {
+		#ensureMessageSchema() {
 			if (this.#schemaReady) return;
 			this.sql`
         CREATE TABLE IF NOT EXISTS cf_voice_messages (
@@ -2076,13 +2081,14 @@ function withVoice(Base, voiceOptions) {
 			this.onClose = (connection, ...rest) => {
 				this.#startupTokens.delete(connection.id);
 				this.#releaseKeepAlive(connection.id);
+				this.#assistantEchoText.delete(connection.id);
 				this.#cm.cleanup(connection.id);
 				const transport = this.#audioTransports.get(connection.id);
 				if (transport) {
 					this.#audioTransports.delete(connection.id);
 					runBackground("audio_transport_stop", () => transport.stop(connection.id));
 				}
-				this.#cancelSpeculativeTurn(connection.id);
+				this.#cancelSpeculativeTurn(connection.id, "connection_closed");
 				this.#lastBargeInAt.delete(connection.id);
 				return _onClose?.(connection, ...rest);
 			};
@@ -2146,16 +2152,18 @@ function withVoice(Base, voiceOptions) {
 		onCallStart(_connection) {}
 		onCallEnd(_connection) {}
 		onInterrupt(_connection) {}
-		afterTranscribe(transcript, _connection) {
-			const lastAssistant = this.getConversationHistory(1).find((m) => m.role === "assistant");
-			if (!lastAssistant) return transcript;
-			const a = lastAssistant.content.toLowerCase().match(/[\p{L}\p{N}]+/gu)?.join(" ") ?? "";
-			if (!a) return transcript;
+		afterTranscribe(transcript, connection) {
+			const lastAssistant = this.getConversationHistory(1).find((message) => message.role === "assistant");
+			const assistantTexts = [this.#assistantEchoText.get(connection.id), lastAssistant?.content];
 			const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-			if (heard.length >= 3 && a.includes(heard.join(" "))) return null;
-			const aWords = new Set(a.split(" "));
-			const hits = heard.filter((w) => aWords.has(w)).length;
-			if (hits >= 4 && hits / heard.length >= .6) return null;
+			for (const text of assistantTexts) {
+				const assistant = text?.toLowerCase().match(/[\p{L}\p{N}]+/gu)?.join(" ") ?? "";
+				if (!assistant) continue;
+				if (heard.length >= 3 && assistant.includes(heard.join(" "))) return null;
+				const assistantWords = new Set(assistant.split(" "));
+				const hits = heard.filter((word) => assistantWords.has(word)).length;
+				if (hits >= 4 && hits / heard.length >= .6) return null;
+			}
 			return transcript;
 		}
 		beforeSynthesize(text, _connection) {
@@ -2165,12 +2173,21 @@ function withVoice(Base, voiceOptions) {
 			return audio;
 		}
 		saveMessage(role, text) {
-			this.#ensureSchema();
+			const maxMessages = opt("maxMessageCount", DEFAULT_MAX_MESSAGE_COUNT);
+			if (!opt("persistMessages", false)) {
+				this.#conversationHistory.push({
+					role,
+					content: text
+				});
+				const excess = this.#conversationHistory.length - maxMessages;
+				if (excess > 0) this.#conversationHistory.splice(0, excess);
+				return;
+			}
+			this.#ensureMessageSchema();
 			this.sql`
         INSERT INTO cf_voice_messages (role, text, timestamp)
         VALUES (${role}, ${text}, ${Date.now()})
       `;
-			const maxMessages = opt("maxMessageCount", DEFAULT_MAX_MESSAGE_COUNT);
 			this.sql`
         DELETE FROM cf_voice_messages
         WHERE id NOT IN (
@@ -2180,8 +2197,10 @@ function withVoice(Base, voiceOptions) {
       `;
 		}
 		getConversationHistory(limit) {
-			this.#ensureSchema();
 			const historyLimit = limit ?? opt("historyLimit", DEFAULT_HISTORY_LIMIT);
+			if (historyLimit <= 0) return [];
+			if (!opt("persistMessages", false)) return this.#conversationHistory.slice(-historyLimit).map((message) => ({ ...message }));
+			this.#ensureMessageSchema();
 			return this.sql`
         SELECT role, text FROM cf_voice_messages
         ORDER BY id DESC LIMIT ${historyLimit}
@@ -2204,23 +2223,38 @@ function withVoice(Base, voiceOptions) {
 			this.#audioTransports.delete(connectionId);
 			await transport.stop(connectionId);
 		}
-		#cancelSpeculativeTurn(connectionId) {
+		#cancelSpeculativeTurn(connectionId, reason) {
 			const turn = this.#speculativeTurns.get(connectionId);
 			if (!turn) return false;
 			this.#speculativeTurns.delete(connectionId);
+			console.log("[VoiceTrace]", {
+				event: "speculative_turn_cancelled",
+				connectionId,
+				elapsedMs: Date.now() - turn.startedAt,
+				reason
+			});
 			turn.settle(false);
 			return true;
 		}
 		#startSpeculativeTurn(connection, transcript) {
 			if (this.#speculativeTurns.has(connection.id)) return;
+			if (this.#cm.hasActivePipeline(connection.id) && !this.#handleBargeIn(connection, true)) return;
 			let settle = () => {};
+			const outcome = new Promise((resolve) => {
+				settle = resolve;
+			});
 			const turn = {
-				outcome: new Promise((resolve) => {
-					settle = resolve;
-				}),
+				provisionalTranscript: transcript.trim(),
+				startedAt: Date.now(),
+				outcome,
 				settle
 			};
 			this.#speculativeTurns.set(connection.id, turn);
+			console.log("[VoiceTrace]", {
+				event: "speculative_turn_started",
+				connectionId: connection.id,
+				elapsedMs: Date.now() - turn.startedAt
+			});
 			this.#runPipeline(connection, transcript, turn);
 		}
 		forceEndCall(connection) {
@@ -2369,14 +2403,18 @@ function withVoice(Base, voiceOptions) {
 						});
 					},
 					onSpeechStart: () => {
+						if (this.#cancelSpeculativeTurn(connection.id, "speech_start")) {
+							this.#cm.abortPipeline(connection.id);
+							return;
+						}
 						this.#handleBargeIn(connection);
 					},
 					onEagerUtterance: (transcript) => {
 						this.#startSpeculativeTurn(connection, transcript);
 					},
 					onTurnResumed: () => {
-						if (!this.#cancelSpeculativeTurn(connection.id)) return;
-						this.#handleBargeIn(connection);
+						if (!this.#cancelSpeculativeTurn(connection.id, "turn_resumed")) return;
+						this.#cm.abortPipeline(connection.id);
 					},
 					onUtterance: (transcript) => {
 						console.log("[VoiceTrace]", {
@@ -2390,14 +2428,29 @@ function withVoice(Base, voiceOptions) {
 						});
 						const speculative = this.#speculativeTurns.get(connection.id);
 						if (speculative) {
-							this.#speculativeTurns.delete(connection.id);
-							speculative.finalTranscript = transcript;
-							this.#sendJSON(connection, {
-								type: "transcript",
-								role: "user",
-								text: transcript
+							const finalText = transcript.trim();
+							if (finalText === speculative.provisionalTranscript) {
+								this.#speculativeTurns.delete(connection.id);
+								console.log("[VoiceTrace]", {
+									event: "speculative_turn_confirmed",
+									connectionId: connection.id,
+									elapsedMs: Date.now() - speculative.startedAt
+								});
+								speculative.settle(true);
+								return;
+							}
+							const eagerText = speculative.provisionalTranscript;
+							const startedAt = speculative.startedAt;
+							this.#cancelSpeculativeTurn(connection.id, "transcript_mismatch");
+							this.#cm.abortPipeline(connection.id);
+							console.log("[VoiceTrace]", {
+								event: "speculative_turn_restarted",
+								connectionId: connection.id,
+								elapsedMs: Date.now() - startedAt,
+								eagerText,
+								finalText
 							});
-							speculative.settle(true);
+							this.#runPipeline(connection, transcript);
 							return;
 						}
 						this.#runPipeline(connection, transcript);
@@ -2451,8 +2504,10 @@ function withVoice(Base, voiceOptions) {
 		}
 		async #handleEndCall(connection) {
 			this.#startupTokens.delete(connection.id);
-			this.#cancelSpeculativeTurn(connection.id);
+			this.#cm.abortPipeline(connection.id);
+			this.#cancelSpeculativeTurn(connection.id, "end_call");
 			this.#lastBargeInAt.delete(connection.id);
+			this.#assistantEchoText.delete(connection.id);
 			try {
 				await this.#stopAudioTransport(connection.id);
 			} finally {
@@ -2470,8 +2525,8 @@ function withVoice(Base, voiceOptions) {
 				event: "interrupt",
 				connectionId: connection.id
 			});
-			this.#cancelSpeculativeTurn(connection.id);
 			this.#cm.abortPipeline(connection.id);
+			this.#cancelSpeculativeTurn(connection.id, "interrupt");
 			this.#cm.clearAudioBuffer(connection.id);
 			this.#sendJSON(connection, {
 				type: "status",
@@ -2483,11 +2538,12 @@ function withVoice(Base, voiceOptions) {
 				await this.onInterrupt(connection);
 			}
 		}
-		#handleBargeIn(connection) {
+		#handleBargeIn(connection, bypassCooldown = false) {
 			const now = Date.now();
-			if (now - (this.#lastBargeInAt.get(connection.id) ?? 0) < BARGE_IN_COOLDOWN_MS) return;
-			if (!this.#cm.abortPipeline(connection.id)) return;
-			this.#cancelSpeculativeTurn(connection.id);
+			const lastBargeInAt = this.#lastBargeInAt.get(connection.id) ?? 0;
+			if (!bypassCooldown && now - lastBargeInAt < BARGE_IN_COOLDOWN_MS) return false;
+			if (!this.#cm.abortPipeline(connection.id)) return false;
+			this.#cancelSpeculativeTurn(connection.id, "speech_start");
 			this.#lastBargeInAt.set(connection.id, now);
 			console.log("[VoiceTrace]", {
 				event: "barge_in",
@@ -2505,6 +2561,7 @@ function withVoice(Base, voiceOptions) {
 					await this.onInterrupt(connection);
 				}
 			});
+			return true;
 		}
 		async #handleTextMessage(connection, text) {
 			if (!text || text.trim().length === 0) return;
@@ -2609,9 +2666,19 @@ function withVoice(Base, voiceOptions) {
 			const signal = this.#cm.createPipelineAbort(connection.id);
 			const pipelineStart = Date.now();
 			try {
-				const userText = await this.afterTranscribe(transcript, connection);
+				let userText;
+				try {
+					userText = await this.afterTranscribe(transcript, connection);
+				} catch (error) {
+					if (!speculative) throw error;
+					if (!await speculative.outcome || signal.aborted) return;
+					throw error;
+				}
 				if (signal.aborted) return;
 				if (!userText) {
+					if (speculative) {
+						if (!await speculative.outcome || signal.aborted) return;
+					}
 					this.#sendJSON(connection, {
 						type: "status",
 						status: "listening"
@@ -2626,18 +2693,31 @@ function withVoice(Base, voiceOptions) {
 						role: "user",
 						text: userText
 					});
+					this.#sendJSON(connection, {
+						type: "status",
+						status: "thinking"
+					});
 				}
-				this.#sendJSON(connection, {
-					type: "status",
-					status: "thinking"
-				});
 				const context = {
 					connection,
 					messages: priorMessages,
 					signal
 				};
 				const llmStart = Date.now();
-				const turnResult = await this.onTurn(userText, context);
+				let turnResult;
+				try {
+					turnResult = await this.onTurn(userText, context);
+				} catch (error) {
+					if (!speculative) throw error;
+					if (!await speculative.outcome || signal.aborted) return;
+					this.saveMessage("user", userText);
+					this.#sendJSON(connection, {
+						type: "transcript",
+						role: "user",
+						text: userText
+					});
+					throw error;
+				}
 				console.log("[VoiceTrace]", {
 					event: "onTurn_call",
 					connectionId: connection.id,
@@ -2645,6 +2725,19 @@ function withVoice(Base, voiceOptions) {
 					history: context.messages
 				});
 				if (signal.aborted) return;
+				if (speculative) {
+					if (!await speculative.outcome || signal.aborted) return;
+					this.saveMessage("user", userText);
+					this.#sendJSON(connection, {
+						type: "transcript",
+						role: "user",
+						text: userText
+					});
+					this.#sendJSON(connection, {
+						type: "status",
+						status: "thinking"
+					});
+				}
 				this.#sendJSON(connection, {
 					type: "status",
 					status: "speaking"
@@ -2652,10 +2745,6 @@ function withVoice(Base, voiceOptions) {
 				const { text: fullText, llmMs, ttsMs, firstModelDeltaMs, firstSentenceMs, firstAudioMs } = await this.#streamResponse(connection, turnResult, llmStart, pipelineStart, signal);
 				if (signal.aborted) {
 					if (!fullText || fullText.trim().length === 0) return;
-					if (speculative) {
-						if (!await speculative.outcome) return;
-						this.saveMessage("user", speculative.finalTranscript ?? userText);
-					}
 					this.#cm.updateAgentContext(connection.id, fullText);
 					this.saveMessage("assistant", fullText);
 					return;
@@ -2680,10 +2769,6 @@ function withVoice(Base, voiceOptions) {
 					return;
 				}
 				const totalMs = Date.now() - pipelineStart;
-				if (speculative) {
-					if (!await speculative.outcome || signal.aborted) return;
-					this.saveMessage("user", speculative.finalTranscript ?? userText);
-				}
 				this.#sendJSON(connection, {
 					type: "metrics",
 					llm_ms: llmMs,
@@ -2727,6 +2812,7 @@ function withVoice(Base, voiceOptions) {
 			}
 		}
 		async #streamResponse(connection, response, llmStart, pipelineStart, signal) {
+			this.#assistantEchoText.set(connection.id, "");
 			if (typeof response === "string") {
 				const llmMs = Date.now() - llmStart;
 				if (response.trim().length === 0) return {
@@ -2737,6 +2823,7 @@ function withVoice(Base, voiceOptions) {
 					firstSentenceMs: llmMs,
 					firstAudioMs: 0
 				};
+				this.#assistantEchoText.set(connection.id, response);
 				this.#sendJSON(connection, {
 					type: "transcript_start",
 					role: "assistant"
@@ -2920,6 +3007,7 @@ function withVoice(Base, voiceOptions) {
 					trace("model_first_delta");
 				}
 				fullText += token;
+				this.#assistantEchoText.set(connection.id, fullText);
 				sendAssistantDelta(token);
 				const sentences = chunker.add(token);
 				for (const sentence of sentences) enqueueSentence(sentence);

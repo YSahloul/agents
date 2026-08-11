@@ -960,6 +960,30 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     ws.close();
   });
 
+  it("suppresses first-response echo while audio is still playing", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    await setTtsMode(ws, "controlled");
+    await startCall(ws);
+
+    const assistantResponse = waitForType(ws, "transcript_end");
+    sendJSON(ws, { type: "_emit_end", text: "first input" });
+    const assistant = (await assistantResponse) as Record<string, unknown>;
+    expect(assistant.text).toBe("Echo: first input");
+    await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
+
+    const listening = waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "_emit_end", text: "Echo: first input" });
+    await listening;
+
+    expect(await getTurnState(ws)).toEqual({
+      transcripts: ["first input"],
+      abortCount: 1
+    });
+
+    ws.close();
+  });
+
   it("sends interim transcripts during audio streaming", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");

@@ -283,6 +283,9 @@ export function withVoice<TBase extends AgentLike>(
     #conversationHistory: Array<{ role: VoiceRole; content: string }> = [];
     // Speculative Flux responses wait for EndOfTurn before entering history.
     #speculativeTurns = new Map<string, SpeculativeTurn>();
+    // Latest generated assistant text per connection, available before the
+    // response reaches conversation history while audio is still playing.
+    #assistantEchoText = new Map<string, string>();
 
     // Debounces barge-in: see BARGE_IN_COOLDOWN_MS.
     #lastBargeInAt = new Map<string, number>();
@@ -345,6 +348,7 @@ export function withVoice<TBase extends AgentLike>(
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
         this.#startupTokens.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
+        this.#assistantEchoText.delete(connection.id);
         this.#cm.cleanup(connection.id);
         const transport = this.#audioTransports.get(connection.id);
         if (transport) {
@@ -462,26 +466,33 @@ export function withVoice<TBase extends AgentLike>(
 
     afterTranscribe(
       transcript: string,
-      _connection: Connection
+      connection: Connection
     ): string | null | Promise<string | null> {
-      const history = this.getConversationHistory(1);
-      const lastAssistant = history.find((m) => m.role === "assistant");
-      if (!lastAssistant) return transcript;
+      const lastAssistant = this.getConversationHistory(1).find(
+        (message) => message.role === "assistant"
+      );
+      const assistantTexts = [
+        this.#assistantEchoText.get(connection.id),
+        lastAssistant?.content
+      ];
 
       // Check if the transcript is the agent's own TTS looping back.
-      // 1. ≥3 consecutive words match the assistant's last response → echo.
+      // 1. ≥3 consecutive words match an assistant response → echo.
       // 2. ≥4 words match and ≥60% of heard words are assistant words → echo.
-      const a =
-        lastAssistant.content
-          .toLowerCase()
-          .match(/[\p{L}\p{N}]+/gu)
-          ?.join(" ") ?? "";
-      if (!a) return transcript;
       const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-      if (heard.length >= 3 && a.includes(heard.join(" "))) return null;
-      const aWords = new Set(a.split(" "));
-      const hits = heard.filter((w) => aWords.has(w)).length;
-      if (hits >= 4 && hits / heard.length >= 0.6) return null;
+      for (const text of assistantTexts) {
+        const assistant =
+          text
+            ?.toLowerCase()
+            .match(/[\p{L}\p{N}]+/gu)
+            ?.join(" ") ?? "";
+        if (!assistant) continue;
+        if (heard.length >= 3 && assistant.includes(heard.join(" ")))
+          return null;
+        const assistantWords = new Set(assistant.split(" "));
+        const hits = heard.filter((word) => assistantWords.has(word)).length;
+        if (hits >= 4 && hits / heard.length >= 0.6) return null;
+      }
 
       return transcript;
     }
@@ -949,6 +960,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#cm.abortPipeline(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "end_call");
       this.#lastBargeInAt.delete(connection.id);
+      this.#assistantEchoText.delete(connection.id);
       try {
         await this.#stopAudioTransport(connection.id);
       } finally {
@@ -1311,6 +1323,7 @@ export function withVoice<TBase extends AgentLike>(
       firstSentenceMs: number;
       firstAudioMs: number;
     }> {
+      this.#assistantEchoText.set(connection.id, "");
       if (typeof response === "string") {
         const llmMs = Date.now() - llmStart;
 
@@ -1324,6 +1337,7 @@ export function withVoice<TBase extends AgentLike>(
             firstAudioMs: 0
           };
         }
+        this.#assistantEchoText.set(connection.id, response);
 
         this.#sendJSON(connection, {
           type: "transcript_start",
@@ -1576,6 +1590,7 @@ export function withVoice<TBase extends AgentLike>(
         }
 
         fullText += token;
+        this.#assistantEchoText.set(connection.id, fullText);
         sendAssistantDelta(token);
 
         const sentences = chunker.add(token);

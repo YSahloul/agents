@@ -448,7 +448,13 @@ interface VoiceAgentOptions {
    * @default 16000
    */
   sampleRate?: number;
-  /** Max conversation messages to keep in SQLite. Oldest are pruned. @default 1000 */
+  /**
+   * Persist conversation messages in Durable Object SQLite so they survive
+   * eviction and restart. When false, messages exist only for the current
+   * Durable Object instance. @default false
+   */
+  persistMessages?: boolean;
+  /** Max conversation messages to retain. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
 }
 type Constructor<T = object> = new (...args: any[]) => T;
