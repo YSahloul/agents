@@ -3,7 +3,7 @@
  *
  * Tests cover: voice protocol, continuous STT pipeline flow,
  * multi-turn conversation, interruption handling (session survives),
- * text messages, conversation persistence, and the beforeCallStart hook.
+ * text messages, in-memory conversation history, and beforeCallStart.
  */
 import { env } from "cloudflare:workers";
 import { createExecutionContext, runInDurableObject } from "cloudflare:test";
@@ -1377,7 +1377,7 @@ describe("VoiceAgent — multi-turn", () => {
     ws.close();
   });
 
-  it("persists conversation messages across turns", async () => {
+  it("retains conversation messages across turns in memory", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
 
@@ -1450,7 +1450,7 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     ws.close();
   });
 
-  it("reuses a matching eager turn and persists one exchange", async () => {
+  it("reuses a matching eager turn and keeps one exchange", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
     await startCall(ws);

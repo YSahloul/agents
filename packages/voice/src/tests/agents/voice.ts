@@ -811,11 +811,7 @@ export class TestVoiceAgent extends VoiceBase {
   }
 
   getMessageCount(): number {
-    return (
-      this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_voice_messages
-    `[0]?.count ?? 0
-    );
+    return this.getConversationHistory(Number.MAX_SAFE_INTEGER).length;
   }
   getTurnStateForTest(): { transcripts: string[]; abortCount: number } {
     return {
@@ -937,11 +933,7 @@ export class TestEmptyResponseVoiceAgent extends VoiceBase {
   }
 
   getMessageCount(): number {
-    return (
-      this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_voice_messages
-    `[0]?.count ?? 0
-    );
+    return this.getConversationHistory(Number.MAX_SAFE_INTEGER).length;
   }
 }
 

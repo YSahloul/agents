@@ -1,7 +1,7 @@
 # packages/voice — @cloudflare/voice
 
 Server-side voice pipeline for the Agents SDK: continuous STT, TTS,
-interruption/barge-in, conversation persistence, and the WebSocket voice
+interruption/barge-in, transient conversation history, and the WebSocket voice
 protocol. Optional SFU/WebRTC transport.
 
 ## Source layout

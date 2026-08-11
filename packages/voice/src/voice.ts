@@ -18,9 +18,9 @@
  *   }
  *
  * This mixin adds the full voice pipeline: continuous STT, streaming TTS,
- * interruption handling, conversation persistence, and the WebSocket
- * voice protocol. The transcriber session is per-call — created at
- * start_call, closed at end_call. The model handles turn detection.
+ * interruption handling, in-memory conversation history, and the WebSocket
+ * voice protocol. The transcriber session is per-call — created at start_call,
+ * closed at end_call. The model handles turn detection.
  *
  * @experimental This API is not yet stable and may change.
  */
@@ -140,7 +140,7 @@ export interface VoiceAgentOptions {
    * @default 16000
    */
   sampleRate?: number;
-  /** Max conversation messages to keep in SQLite. Oldest are pruned. @default 1000 */
+  /** Max conversation messages to keep in memory. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
 }
 
@@ -273,7 +273,10 @@ export function withVoice<TBase extends AgentLike>(
 
     // Optional server audio transports keyed by their voice connection.
     #audioTransports = new Map<string, VoiceServerAudioTransport>();
-    // Speculative Flux responses wait for EndOfTurn before persistence.
+    // Conversation history is intentionally process-local. Consumers that need
+    // durable transcripts persist them explicitly from lifecycle hooks.
+    #conversationHistory: Array<{ role: VoiceRole; content: string }> = [];
+    // Speculative Flux responses wait for EndOfTurn before entering history.
     #speculativeTurns = new Map<string, SpeculativeTurn>();
 
     // Debounces barge-in: see BARGE_IN_COOLDOWN_MS.
@@ -294,21 +297,6 @@ export function withVoice<TBase extends AgentLike>(
     ]);
 
     // --- Agent lifecycle ---
-
-    #schemaReady = false;
-
-    #ensureSchema() {
-      if (this.#schemaReady) return;
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_voice_messages (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          role TEXT NOT NULL,
-          text TEXT NOT NULL,
-          timestamp INTEGER NOT NULL
-        )
-      `;
-      this.#schemaReady = true;
-    }
 
     // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- mixin constructor must accept any args
     constructor(...args: any[]) {
@@ -494,38 +482,24 @@ export function withVoice<TBase extends AgentLike>(
       return audio;
     }
 
-    // --- Conversation persistence ---
+    // --- In-memory conversation history ---
 
     saveMessage(role: "user" | "assistant", text: string) {
-      this.#ensureSchema();
-      this.sql`
-        INSERT INTO cf_voice_messages (role, text, timestamp)
-        VALUES (${role}, ${text}, ${Date.now()})
-      `;
+      this.#conversationHistory.push({ role, content: text });
 
       const maxMessages = opt("maxMessageCount", DEFAULT_MAX_MESSAGE_COUNT);
-      this.sql`
-        DELETE FROM cf_voice_messages
-        WHERE id NOT IN (
-          SELECT id FROM cf_voice_messages
-          ORDER BY id DESC LIMIT ${maxMessages}
-        )
-      `;
+      const excess = this.#conversationHistory.length - maxMessages;
+      if (excess > 0) this.#conversationHistory.splice(0, excess);
     }
 
     getConversationHistory(
       limit?: number
     ): Array<{ role: VoiceRole; content: string }> {
-      this.#ensureSchema();
       const historyLimit = limit ?? opt("historyLimit", DEFAULT_HISTORY_LIMIT);
-      const rows = this.sql<{ role: VoiceRole; text: string }>`
-        SELECT role, text FROM cf_voice_messages
-        ORDER BY id DESC LIMIT ${historyLimit}
-      `;
-      return rows.reverse().map((row) => ({
-        role: row.role,
-        content: row.text
-      }));
+      if (historyLimit <= 0) return [];
+      return this.#conversationHistory
+        .slice(-historyLimit)
+        .map((message) => ({ ...message }));
     }
 
     async #sendAudio(
