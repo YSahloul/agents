@@ -102,6 +102,14 @@ interface TranscriptMessage {
   timestamp: number;
 }
 interface TTSProvider {
+  /**
+   * Binary audio format this provider emits. Announced to clients in
+   * `audio_config` so a carrier adapter can forward audio without guessing
+   * (e.g. `"mulaw"` at 8000 forwards byte-for-byte to a phone trunk).
+   */
+  readonly audioFormat?: VoiceAudioFormat;
+  /** Sample rate of raw PCM output. */
+  readonly sampleRate?: number;
   synthesize(text: string, signal?: AbortSignal): Promise<ArrayBuffer | null>;
 }
 /**
@@ -112,41 +120,16 @@ interface TTSProvider {
  * audio chunks as they are produced. Stateless: one independent call per
  * sentence, no session held between calls.
  *
- * Distinct from {@link RealtimeTTSProvider}, which holds a live,
- * token-granular session.
+ * The generator returning is completion, and throwing is failure — a provider
+ * built on a socket needs no separate acknowledgement protocol, and a socket
+ * that dies mid-sentence surfaces in the consumer's `for await` instead of
+ * leaving a promise pending.
  */
 interface StreamingTTSProvider {
   synthesizeStream(
     text: string,
     signal?: AbortSignal
   ): AsyncGenerator<ArrayBuffer>;
-}
-/**
- * A text-to-speech provider that holds one bidirectional synthesis session,
- * fed **token-by-token** as the LLM streams, so audio starts before any
- * sentence boundary. Stateful and interruptible (`clear()` for mid-utterance
- * barge-in).
- *
- * Distinct from {@link StreamingTTSProvider}, which is stateless and
- * per-sentence.
- */
-interface RealtimeTTSProvider {
-  /** Binary audio format emitted by the session. */
-  readonly audioFormat?: VoiceAudioFormat;
-  /** Sample rate of raw PCM session output. */
-  readonly sampleRate?: number;
-  createSession(options: RealtimeTTSSessionOptions): RealtimeTTSSession;
-}
-interface RealtimeTTSSessionOptions {
-  onAudio: (audio: ArrayBuffer) => void | Promise<void>;
-  onError?: (error: unknown) => void;
-}
-interface RealtimeTTSSession {
-  waitUntilReady?(): Promise<void>;
-  speak(text: string): void | Promise<void>;
-  flush(): void | Promise<void>;
-  clear(): void | Promise<void>;
-  close(): void | Promise<void>;
 }
 /**
  * Continuous speech-to-text provider.
@@ -327,24 +310,21 @@ interface VoiceTransport {
 }
 //#endregion
 export {
-  VoiceServerMessage as _,
-  TTSProvider as a,
-  TranscriberSessionOptions as c,
-  VoiceAudioFormat as d,
-  VoiceAudioInput as f,
-  VoiceServerAudioTransport as g,
-  VoiceRole as h,
-  StreamingTTSProvider as i,
-  TranscriptMessage as l,
-  VoicePipelineMetrics as m,
-  RealtimeTTSSession as n,
-  Transcriber as o,
-  VoiceClientMessage as p,
-  RealtimeTTSSessionOptions as r,
-  TranscriberSession as s,
-  RealtimeTTSProvider as t,
-  VOICE_PROTOCOL_VERSION as u,
-  VoiceStatus as v,
-  VoiceTransport as y
+  TranscriberSessionOptions as a,
+  VoiceAudioFormat as c,
+  VoicePipelineMetrics as d,
+  VoiceRole as f,
+  VoiceTransport as g,
+  VoiceStatus as h,
+  TranscriberSession as i,
+  VoiceAudioInput as l,
+  VoiceServerMessage as m,
+  TTSProvider as n,
+  TranscriptMessage as o,
+  VoiceServerAudioTransport as p,
+  Transcriber as r,
+  VOICE_PROTOCOL_VERSION as s,
+  StreamingTTSProvider as t,
+  VoiceClientMessage as u
 };
-//# sourceMappingURL=types-D6c11Ivd.d.ts.map
+//# sourceMappingURL=types-BmCmlGn2.d.ts.map

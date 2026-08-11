@@ -1,13 +1,13 @@
 import {
-  d as VoiceAudioFormat,
-  f as VoiceAudioInput,
-  h as VoiceRole,
-  l as TranscriptMessage,
-  m as VoicePipelineMetrics,
-  u as VOICE_PROTOCOL_VERSION,
-  v as VoiceStatus,
-  y as VoiceTransport
-} from "./types-D6c11Ivd.js";
+  c as VoiceAudioFormat,
+  d as VoicePipelineMetrics,
+  f as VoiceRole,
+  g as VoiceTransport,
+  h as VoiceStatus,
+  l as VoiceAudioInput,
+  o as TranscriptMessage,
+  s as VOICE_PROTOCOL_VERSION
+} from "./types-BmCmlGn2.js";
 import {
   a as WebSocketVoiceTransport,
   i as VoiceClientOptions,
@@ -16,7 +16,7 @@ import {
   r as VoiceClientEventMap,
   s as SFUVoiceAudioInputOptions,
   t as VoiceClient
-} from "./voice-client-BcRDjsuM.js";
+} from "./voice-client-SLEdHOQ-.js";
 export {
   SFUVoiceAudioInput,
   type SFUVoiceAudioInputOptions,

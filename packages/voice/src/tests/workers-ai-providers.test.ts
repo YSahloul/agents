@@ -92,107 +92,115 @@ async function waitForConnect(ai: MockAi): Promise<MockWebSocket> {
 }
 
 describe("WorkersAIMulawRealtimeTTS", () => {
-  it("does not connect until speak() or flush() is called", () => {
+  it("does not connect until the stream is iterated", async () => {
     const ai = new MockAi();
     const tts = new WorkersAIMulawRealtimeTTS(ai);
-    tts.createSession({ onAudio: () => {} });
+    tts.synthesizeStream("hello");
+    await Promise.resolve();
     expect(ai.calls).toHaveLength(0);
   });
 
-  it("connects on speak(), sends mulaw/8000, and delivers audio", async () => {
+  it("requests mulaw/8000 and yields 20 ms frames, ending on Flushed", async () => {
     const ai = new MockAi();
-    const audio: number[][] = [];
     const tts = new WorkersAIMulawRealtimeTTS(ai, { speaker: "luna" });
     expect(tts.audioFormat).toBe("mulaw");
     expect(tts.sampleRate).toBe(8000);
-    const session = tts.createSession({
-      onAudio: (chunk) => audio.push([...new Uint8Array(chunk)])
-    });
 
-    const speakDone = session.speak("hello");
+    const frames: number[][] = [];
+    const done = (async () => {
+      for await (const frame of tts.synthesizeStream("hello")) {
+        frames.push([...new Uint8Array(frame)]);
+      }
+    })();
+
     const socket = await waitForConnect(ai);
-    await speakDone;
-
-    expect(ai.calls[0].input.encoding).toBe("mulaw");
-    expect(ai.calls[0].input.sample_rate).toBe("8000");
-    expect(ai.calls[0].input.speaker).toBe("luna");
+    expect(ai.calls[0].input).toMatchObject({
+      encoding: "mulaw",
+      sample_rate: "8000",
+      speaker: "luna",
+      container: "none"
+    });
+    expect(ai.calls[0].options).toMatchObject({ websocket: true });
     expect(socket.sent).toContain(
       JSON.stringify({ type: "Speak", text: "hello", speaker: "luna" })
     );
+    expect(socket.sent).toContain(JSON.stringify({ type: "Flush" }));
 
-    // Aura's WS fragments arrive in arbitrary-sized transport chunks, not
-    // audio frames. One full 160-byte frame plus 3 leftover bytes: only the
-    // complete frame should deliver before Flush; the remainder must not be
-    // dropped or glued onto the wrong frame boundary.
-    const fullFrame = new Uint8Array(160).fill(5);
-    socket.message(fullFrame.buffer);
-    socket.message(new Uint8Array([9, 8, 7]).buffer);
-    await vi.waitFor(() => expect(audio).toHaveLength(1));
-    expect(audio[0]).toHaveLength(160);
-    expect(audio[0]).toEqual([...fullFrame]);
+    // Transport fragments are coalesced into 160-byte frames.
+    socket.message(new Uint8Array(100).fill(1).buffer);
+    socket.message(new Uint8Array(100).fill(2).buffer);
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    expect(frames[0]).toHaveLength(160);
 
-    const flushed = session.flush();
+    // Flushed emits the partial remainder and ends the stream.
     socket.message(JSON.stringify({ type: "Flushed" }));
-    await flushed;
-
-    // The 3 leftover bytes flush as a short final frame on Flush, not lost.
-    expect(audio).toHaveLength(2);
-    expect(audio[1]).toEqual([9, 8, 7]);
-    session.close();
+    await done;
+    expect(frames).toHaveLength(2);
+    expect(frames[1]).toHaveLength(40);
+    expect(socket.closed).toBe(true);
   });
 
-  it("drops in-flight audio bytes that arrive after clear(), without corrupting the next utterance's frame", async () => {
+  it("throws instead of hanging when the socket dies before Flushed", async () => {
     const ai = new MockAi();
-    const audio: number[][] = [];
     const tts = new WorkersAIMulawRealtimeTTS(ai);
-    const session = tts.createSession({
-      onAudio: (chunk) => audio.push([...new Uint8Array(chunk)])
-    });
 
-    await session.speak("interrupted");
+    const consumed = (async () => {
+      for await (const _frame of tts.synthesizeStream("interrupted")) {
+        // drain
+      }
+    })();
+
     const socket = await waitForConnect(ai);
+    socket.message(new Uint8Array(160).fill(3).buffer);
+    socket.close();
 
-    // Partial frame buffered, then barge-in cuts the utterance.
-    socket.message(new Uint8Array([1, 2, 3]).buffer);
-    await session.clear();
-
-    // Bytes still in flight from before the server processed Clear must be
-    // dropped, not coalesced into the next utterance's frame.
-    socket.message(new Uint8Array([255, 255, 255]).buffer);
-
-    const nextFrame = new Uint8Array(160).fill(7);
-    await session.speak("next");
-    socket.message(nextFrame.buffer);
-    await vi.waitFor(() => expect(audio).toHaveLength(1));
-    expect(audio[0]).toEqual([...nextFrame]);
-    session.close();
+    await expect(consumed).rejects.toThrow(/closed before flush/);
   });
 
-  it("reconnects lazily on the next speak() after the socket closes, with no eager reconnect", async () => {
+  it("surfaces a socket error rather than stalling the turn", async () => {
     const ai = new MockAi();
     const tts = new WorkersAIMulawRealtimeTTS(ai);
-    const session = tts.createSession({ onAudio: () => {} });
 
-    await session.speak("first");
-    const first = await waitForConnect(ai);
-    expect(ai.sockets).toHaveLength(1);
+    const consumed = (async () => {
+      for await (const _frame of tts.synthesizeStream("boom")) {
+        // drain
+      }
+    })();
 
-    first.close();
-    // No keepalive/backoff machinery — closing the socket alone must not
-    // trigger a reconnect by itself.
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(ai.sockets).toHaveLength(1);
+    const socket = await waitForConnect(ai);
+    socket.dispatch("error", {});
 
-    // The next speak() reconnects on demand.
-    const speakDone = session.speak("second");
-    const second = await waitForConnect(ai);
-    await speakDone;
-    expect(ai.sockets).toHaveLength(2);
-    expect(second.sent).toContain(
-      JSON.stringify({ type: "Speak", text: "second", speaker: "asteria" })
-    );
-    session.close();
+    await expect(consumed).rejects.toThrow(/socket error/);
+  });
+
+  it("closes the socket when the consumer abandons the stream", async () => {
+    const ai = new MockAi();
+    const tts = new WorkersAIMulawRealtimeTTS(ai);
+    const stream = tts.synthesizeStream("partial");
+
+    const first = stream.next();
+    const socket = await waitForConnect(ai);
+    socket.message(new Uint8Array(160).fill(9).buffer);
+    await first;
+
+    await stream.return(undefined);
+    expect(socket.closed).toBe(true);
+  });
+
+  it("yields nothing for empty text or an already-aborted signal", async () => {
+    const ai = new MockAi();
+    const tts = new WorkersAIMulawRealtimeTTS(ai);
+
+    for await (const _frame of tts.synthesizeStream("")) {
+      throw new Error("expected no frames");
+    }
+    for await (const _frame of tts.synthesizeStream(
+      "hi",
+      AbortSignal.abort()
+    )) {
+      throw new Error("expected no frames");
+    }
+    expect(ai.calls).toHaveLength(0);
   });
 
   it("falls back to synthesize() (inherited HTTP path) with matching mulaw config", async () => {

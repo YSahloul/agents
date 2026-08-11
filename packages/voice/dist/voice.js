@@ -795,7 +795,7 @@ async function closeSFUWebSocketAdapter(config, adapterId) {
 }
 //#endregion
 //#region src/sfu-transport.ts
-const FRAME_BYTES = 3840;
+const FRAME_BYTES$1 = 3840;
 const FRAME_INTERVAL_MS = 20;
 function errorMessage(error) {
 	return error instanceof Error ? error.message : String(error);
@@ -853,9 +853,9 @@ var SFUVoiceTransport = class {
 		combined.set(this.#partialFrame);
 		combined.set(converted, this.#partialFrame.byteLength);
 		let offset = 0;
-		while (combined.byteLength - offset >= FRAME_BYTES) {
-			this.#queue.push(combined.slice(offset, offset + FRAME_BYTES));
-			offset += FRAME_BYTES;
+		while (combined.byteLength - offset >= FRAME_BYTES$1) {
+			this.#queue.push(combined.slice(offset, offset + FRAME_BYTES$1));
+			offset += FRAME_BYTES$1;
 		}
 		this.#partialFrame = combined.slice(offset);
 		this.#startPacing();
@@ -864,7 +864,7 @@ var SFUVoiceTransport = class {
 		this.#requireActiveConnection(connectionId);
 		this.#requireTtsSocket();
 		if (this.#partialFrame.byteLength > 0) {
-			const frame = new Uint8Array(FRAME_BYTES);
+			const frame = new Uint8Array(FRAME_BYTES$1);
 			frame.set(this.#partialFrame);
 			this.#queue.push(frame);
 			this.#partialFrame = /* @__PURE__ */ new Uint8Array();
@@ -1432,14 +1432,14 @@ var WorkersAITTS = class {
 * the encoding a phone carrier's wire format expects, so audio forwards
 * byte-for-byte with no resampling.
 *
-* No socket is held open for the whole call, no keepalive ping, no
-* reconnect-with-backoff state machine. Each `speak()`/`flush()` reconnects
-* on demand if the socket isn't open — the socket is allowed to close
-* between turns rather than treated as a failure to recover from. This
-* connect-on-use pattern has run stable in production; a persistent session
-* held open for the full call has been observed hitting the Speak
-* WebSocket's periodic 1011 (server-side internal error) closes under
-* sustained connections.
+* Implements {@link StreamingTTSProvider}: one socket per sentence, and the
+* generator returning *is* completion. There is no session to keep alive, no
+* Speak/Flush/Clear protocol to reconcile, and no acknowledgement to lose — a
+* socket that dies mid-utterance throws into the caller's `for await` instead
+* of leaving a pending promise nobody settles. Interruption is the consumer
+* abandoning the iterator (or aborting the signal), which closes the socket.
+*
+* Inherits {@link WorkersAITTS.synthesize} as the non-streaming fallback.
 *
 * @example
 * ```ts
@@ -1468,179 +1468,139 @@ var WorkersAIMulawRealtimeTTS = class extends WorkersAITTS {
 		this.#model = model;
 		this.#speaker = speaker;
 	}
-	createSession(options) {
-		return new WorkersAIMulawRealtimeTTSSession(this.#ai, this.#model, this.#speaker, options);
-	}
-};
-var WorkersAIMulawRealtimeTTSSession = class {
-	#ws = null;
-	#connecting = null;
-	#closed = false;
-	#active = false;
-	#flushWaiters = [];
-	#frame = /* @__PURE__ */ new Uint8Array(160);
-	#frameLength = 0;
-	#nextYieldAt = 0;
-	#firstFrameYielded = false;
-	#delivery = Promise.resolve();
-	constructor(ai, model, speaker, options) {
-		this.ai = ai;
-		this.model = model;
-		this.speaker = speaker;
-		this.options = options;
-	}
-	async speak(text) {
-		if (this.#closed || !text) return;
-		this.#active = true;
-		(this.#ws?.readyState === WebSocket.OPEN ? this.#ws : await this.#connect()).send(JSON.stringify({
-			type: "Speak",
-			text,
-			speaker: this.speaker
-		}));
-	}
-	async flush() {
-		if (this.#closed) return;
-		const ws = this.#ws?.readyState === WebSocket.OPEN ? this.#ws : await this.#connect();
-		const flushed = new Promise((resolve, reject) => {
-			this.#flushWaiters.push({
-				resolve,
-				reject
-			});
+	async *synthesizeStream(text, signal) {
+		if (!text || signal?.aborted) return;
+		const ws = await this.#open();
+		const frames = new MulawFrameStream();
+		ws.addEventListener("message", (event) => {
+			if (typeof event.data === "string") {
+				try {
+					const message = JSON.parse(event.data);
+					if (message && typeof message === "object" && "type" in message && message.type === "Flushed") frames.finish();
+				} catch {}
+				return;
+			}
+			if (event.data instanceof ArrayBuffer) frames.push(new Uint8Array(event.data));
+			else if (ArrayBuffer.isView(event.data)) {
+				const view = event.data;
+				frames.push(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+			}
 		});
-		ws.send(JSON.stringify({ type: "Flush" }));
-		return flushed;
-	}
-	async clear() {
-		this.#active = false;
-		this.#frame = /* @__PURE__ */ new Uint8Array(160);
-		this.#frameLength = 0;
-		this.#firstFrameYielded = false;
-		if (this.#ws?.readyState === WebSocket.OPEN) try {
-			this.#ws.send(JSON.stringify({ type: "Clear" }));
-		} catch {}
-		for (const waiter of this.#flushWaiters.splice(0)) waiter.resolve();
-	}
-	close() {
-		this.#closed = true;
-		this.#active = false;
-		for (const waiter of this.#flushWaiters.splice(0)) waiter.resolve();
+		ws.addEventListener("close", (event) => {
+			frames.fail(/* @__PURE__ */ new Error(`Workers AI mulaw TTS socket closed before flush (code ${event.code}${event.reason ? `: ${event.reason}` : ""})`));
+		});
+		ws.addEventListener("error", () => {
+			frames.fail(/* @__PURE__ */ new Error("Workers AI mulaw TTS socket error"));
+		});
 		try {
-			this.#ws?.close();
-		} catch {}
-		this.#ws = null;
-	}
-	/** Connect on demand. No keepalive, no eager reconnect — the socket is
-	* allowed to close between turns; the next speak()/flush() reopens it. */
-	async #connect() {
-		if (this.#ws?.readyState === WebSocket.OPEN) return this.#ws;
-		if (this.#connecting) return this.#connecting;
-		this.#connecting = this.#open();
-		try {
-			const ws = await this.#connecting;
-			this.#ws = ws;
-			return ws;
+			ws.send(JSON.stringify({
+				type: "Speak",
+				text,
+				speaker: this.#speaker
+			}));
+			ws.send(JSON.stringify({ type: "Flush" }));
+			let nextYieldAt = 0;
+			for await (const frame of frames) {
+				if (signal?.aborted) return;
+				const now = Date.now();
+				if (nextYieldAt === 0) nextYieldAt = now + FRAME_MS;
+				else {
+					if (now < nextYieldAt) await new Promise((resolve) => setTimeout(resolve, nextYieldAt - now));
+					nextYieldAt = Math.max(nextYieldAt + FRAME_MS, Date.now() + FRAME_MS);
+				}
+				yield frame;
+			}
 		} finally {
-			this.#connecting = null;
+			try {
+				ws.close();
+			} catch {}
 		}
 	}
 	async #open() {
-		const response = await this.ai.run(this.model, {
+		const response = await this.#ai.run(this.#model, {
 			encoding: "mulaw",
 			sample_rate: "8000",
-			speaker: this.speaker,
+			speaker: this.#speaker,
 			container: "none"
 		}, { websocket: true });
 		if (!response || typeof response !== "object" || !("webSocket" in response) || !isWebSocket(response.webSocket)) throw new Error("Workers AI mulaw TTS did not return a WebSocket");
 		const ws = response.webSocket;
 		ws.accept();
 		ws.binaryType = "arraybuffer";
-		ws.addEventListener("message", (event) => {
-			this.#handleMessage(event);
-		});
-		ws.addEventListener("close", (event) => {
-			console.log("[WorkersAIMulawTTS] WebSocket closed — code:", event.code, "reason:", event.reason, "wasClean:", event.wasClean);
-			if (this.#ws === ws) this.#ws = null;
-		});
-		ws.addEventListener("error", (event) => {
-			console.error("[WorkersAIMulawTTS] WebSocket error:", {
-				type: event.type,
-				message: event.message,
-				error: event.error
-			});
-			if (this.#ws === ws) this.#ws = null;
-			this.options.onError?.(event);
-		});
 		return ws;
 	}
-	#handleMessage(event) {
-		if (this.#closed) return;
-		if (typeof event.data === "string") {
-			try {
-				const message = JSON.parse(event.data);
-				if (message && typeof message === "object" && "type" in message && message.type === "Flushed") {
-					this.#flushRemainder();
-					this.#firstFrameYielded = false;
-					this.#flushWaiters.shift()?.resolve();
-				}
-			} catch {}
-			return;
-		}
-		if (!this.#active) return;
-		const audio = copyArrayBuffer(event.data);
-		if (!audio) return;
-		if (audio instanceof ArrayBuffer) {
-			this.#appendAudio(new Uint8Array(audio));
-			return;
-		}
-		audio.then((buffer) => {
-			if (!this.#active) return;
-			this.#appendAudio(new Uint8Array(buffer));
-		}).catch((error) => this.options.onError?.(error));
-	}
-	#appendAudio(chunk) {
+};
+/** 20 ms of 8 kHz μ-law. */
+const FRAME_BYTES = 160;
+const FRAME_MS = 20;
+/**
+* Bridges the TTS socket's events into an async iterable of 20 ms μ-law
+* frames.
+*
+* Aura's WebSocket messages are transport fragments, not audio frames — it
+* splits μ-law into arbitrary-sized pieces — so bytes are coalesced to 160 and
+* any remainder is emitted when the server acknowledges the flush. The
+* iterator ends on `Flushed` and throws if the socket dies first, so a
+* consumer can never be left waiting on an acknowledgement that is not coming.
+*/
+var MulawFrameStream = class {
+	#frame = new Uint8Array(FRAME_BYTES);
+	#frameLength = 0;
+	#queue = [];
+	#done = false;
+	#error = null;
+	#wake = null;
+	push(chunk) {
+		if (this.#done) return;
 		let offset = 0;
 		while (offset < chunk.byteLength) {
-			const copied = Math.min(this.#frame.byteLength - this.#frameLength, chunk.byteLength - offset);
+			const copied = Math.min(FRAME_BYTES - this.#frameLength, chunk.byteLength - offset);
 			this.#frame.set(chunk.subarray(offset, offset + copied), this.#frameLength);
 			this.#frameLength += copied;
 			offset += copied;
-			if (this.#frameLength === this.#frame.byteLength) {
-				this.#deliverFrame(this.#frame.buffer);
-				this.#frame = /* @__PURE__ */ new Uint8Array(160);
+			if (this.#frameLength === FRAME_BYTES) {
+				this.#queue.push(this.#frame.buffer);
+				this.#frame = new Uint8Array(FRAME_BYTES);
 				this.#frameLength = 0;
 			}
 		}
+		this.#notify();
 	}
-	#flushRemainder() {
-		if (this.#frameLength === 0) return;
-		this.#deliverFrame(this.#frame.slice(0, this.#frameLength).buffer);
-		this.#frame = /* @__PURE__ */ new Uint8Array(160);
-		this.#frameLength = 0;
+	/** Server acknowledged the flush: emit the partial frame and end. */
+	finish() {
+		if (this.#done) return;
+		if (this.#frameLength > 0) {
+			this.#queue.push(this.#frame.slice(0, this.#frameLength).buffer);
+			this.#frameLength = 0;
+		}
+		this.#done = true;
+		this.#notify();
 	}
-	/** Real-time pacing: one 20 ms frame every 20 ms. First frame of an
-	* utterance yields immediately; subsequent frames wait for their slot. */
-	#deliverFrame(frame) {
-		this.#delivery = this.#delivery.then(async () => {
-			const now = Date.now();
-			if (!this.#firstFrameYielded) {
-				this.#firstFrameYielded = true;
-				this.#nextYieldAt = now + 20;
-			} else {
-				if (now < this.#nextYieldAt) await new Promise((resolve) => setTimeout(resolve, this.#nextYieldAt - now));
-				this.#nextYieldAt = Math.max(this.#nextYieldAt + 20, Date.now() + 20);
-			}
-			await this.options.onAudio(frame);
-		}).catch((error) => this.options.onError?.(error));
+	/** Socket died before the flush was acknowledged. No-op once ended. */
+	fail(error) {
+		if (this.#done) return;
+		this.#error = error;
+		this.#done = true;
+		this.#notify();
+	}
+	#notify() {
+		const wake = this.#wake;
+		this.#wake = null;
+		wake?.();
+	}
+	async *[Symbol.asyncIterator]() {
+		while (true) {
+			while (this.#queue.length > 0) yield this.#queue.shift();
+			if (this.#error) throw this.#error;
+			if (this.#done) return;
+			await new Promise((resolve) => {
+				this.#wake = resolve;
+			});
+		}
 	}
 };
 function isWebSocket(value) {
 	return !!value && typeof value === "object" && "accept" in value && typeof value.accept === "function" && "send" in value && typeof value.send === "function" && "addEventListener" in value && typeof value.addEventListener === "function";
-}
-function copyArrayBuffer(data) {
-	if (data instanceof ArrayBuffer) return data.slice(0);
-	if (data instanceof Blob) return data.arrayBuffer();
-	if (!ArrayBuffer.isView(data)) return null;
-	return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
 }
 /**
 * Workers AI continuous speech-to-text provider using the Flux model.
@@ -2072,9 +2032,6 @@ function withVoice(Base, voiceOptions) {
 		#cm = new AudioConnectionManager("VoiceAgent");
 		#keepAliveDispose = /* @__PURE__ */ new Map();
 		#audioTransports = /* @__PURE__ */ new Map();
-		#realtimeTTSSessions = /* @__PURE__ */ new Map();
-		#realtimeTTSText = /* @__PURE__ */ new Map();
-		#firstRealtimeAudioAt = /* @__PURE__ */ new Map();
 		#speculativeTurns = /* @__PURE__ */ new Map();
 		#lastBargeInAt = /* @__PURE__ */ new Map();
 		#startupTokens = /* @__PURE__ */ new Map();
@@ -2125,14 +2082,7 @@ function withVoice(Base, voiceOptions) {
 					this.#audioTransports.delete(connection.id);
 					runBackground("audio_transport_stop", () => transport.stop(connection.id));
 				}
-				const realtimeTTS = this.#realtimeTTSSessions.get(connection.id);
-				if (realtimeTTS) {
-					this.#realtimeTTSSessions.delete(connection.id);
-					runBackground("realtime_tts_stop", () => realtimeTTS.close());
-				}
 				this.#cancelSpeculativeTurn(connection.id);
-				this.#realtimeTTSText.delete(connection.id);
-				this.#firstRealtimeAudioAt.delete(connection.id);
 				this.#lastBargeInAt.delete(connection.id);
 				return _onClose?.(connection, ...rest);
 			};
@@ -2254,51 +2204,6 @@ function withVoice(Base, voiceOptions) {
 			this.#audioTransports.delete(connectionId);
 			await transport.stop(connectionId);
 		}
-		async #startRealtimeTTS(connection) {
-			const tts = this.#requireTTS();
-			if (typeof tts.createSession !== "function") return;
-			let session;
-			session = tts.createSession({
-				onAudio: (audio) => {
-					if (this.#realtimeTTSSessions.get(connection.id) !== session) return;
-					this.#sendAudio(connection, audio);
-					if (!this.#firstRealtimeAudioAt.has(connection.id)) {
-						console.log("[VoiceTrace]", {
-							event: "tts_first_audio",
-							connectionId: connection.id,
-							bytes: audio.byteLength
-						});
-						this.#firstRealtimeAudioAt.set(connection.id, Date.now());
-					}
-				},
-				onError: (error) => {
-					if (this.#realtimeTTSSessions.get(connection.id) !== session) return;
-					const err = error;
-					console.error("[VoiceAgent] Realtime TTS error:", {
-						message: err.message,
-						type: err.type,
-						error: err.error,
-						source: typeof error
-					});
-				}
-			});
-			this.#realtimeTTSSessions.set(connection.id, session);
-			try {
-				await session.waitUntilReady?.();
-			} catch (error) {
-				this.#realtimeTTSSessions.delete(connection.id);
-				await session.close();
-				throw error;
-			}
-		}
-		async #stopRealtimeTTS(connectionId) {
-			const session = this.#realtimeTTSSessions.get(connectionId);
-			if (!session) return;
-			this.#realtimeTTSSessions.delete(connectionId);
-			this.#realtimeTTSText.delete(connectionId);
-			this.#firstRealtimeAudioAt.delete(connectionId);
-			await session.close();
-		}
 		#cancelSpeculativeTurn(connectionId) {
 			const turn = this.#speculativeTurns.get(connectionId);
 			if (!turn) return false;
@@ -2393,20 +2298,15 @@ function withVoice(Base, voiceOptions) {
 			return this.afterSynthesize(rawAudio, textToSpeak, connection);
 		}
 		async #speakText(connection, text, signal) {
-			const realtime = this.#realtimeTTSSessions.get(connection.id);
-			if (realtime) {
+			const tts = this.#requireTTS();
+			if (typeof tts.synthesizeStream === "function") {
 				const textToSpeak = await this.beforeSynthesize(text, connection);
 				if (!textToSpeak || signal.aborted) return;
-				this.#realtimeTTSText.set(connection.id, textToSpeak);
-				this.#firstRealtimeAudioAt.delete(connection.id);
-				console.log("[VoiceTrace]", {
-					event: "tts_speak_sent",
-					connectionId: connection.id,
-					chars: textToSpeak.length,
-					text: textToSpeak
-				});
-				await realtime.speak(textToSpeak);
-				await realtime.flush();
+				for await (const chunk of tts.synthesizeStream(textToSpeak, signal)) {
+					if (signal.aborted) return;
+					const processed = await this.afterSynthesize(chunk, textToSpeak, connection);
+					if (processed) await this.#sendAudio(connection, processed);
+				}
 				if (!signal.aborted) await this.#flushAudio(connection);
 				return;
 			}
@@ -2446,7 +2346,6 @@ function withVoice(Base, voiceOptions) {
 					await transport.start(connection.id, (audio) => this.receiveAudio(connection.id, audio));
 					if (!this.#isCurrentStartup(connection.id, startupToken)) return;
 				}
-				await this.#startRealtimeTTS(connection);
 				if (!this.#isCurrentStartup(connection.id, startupToken)) return;
 				provider = this.createTranscriber(connection) ?? this.transcriber;
 				if (!provider) {
@@ -2532,7 +2431,6 @@ function withVoice(Base, voiceOptions) {
 				message: clientMessage
 			});
 			try {
-				await this.#stopRealtimeTTS(connection.id);
 				await this.#stopAudioTransport(connection.id);
 			} finally {
 				this.#cm.cleanup(connection.id);
@@ -2556,7 +2454,6 @@ function withVoice(Base, voiceOptions) {
 			this.#cancelSpeculativeTurn(connection.id);
 			this.#lastBargeInAt.delete(connection.id);
 			try {
-				await this.#stopRealtimeTTS(connection.id);
 				await this.#stopAudioTransport(connection.id);
 			} finally {
 				this.#cm.cleanup(connection.id);
@@ -2581,7 +2478,6 @@ function withVoice(Base, voiceOptions) {
 				status: "listening"
 			});
 			try {
-				await this.#realtimeTTSSessions.get(connection.id)?.clear();
 				await this.#audioTransports.get(connection.id)?.interrupt(connection.id);
 			} finally {
 				await this.onInterrupt(connection);
@@ -2604,7 +2500,6 @@ function withVoice(Base, voiceOptions) {
 			});
 			runBackground("barge_in", async () => {
 				try {
-					await this.#realtimeTTSSessions.get(connection.id)?.clear();
 					await this.#audioTransports.get(connection.id)?.interrupt(connection.id);
 				} finally {
 					await this.onInterrupt(connection);
@@ -2832,8 +2727,6 @@ function withVoice(Base, voiceOptions) {
 			}
 		}
 		async #streamResponse(connection, response, llmStart, pipelineStart, signal) {
-			const realtime = this.#realtimeTTSSessions.get(connection.id);
-			if (realtime) return this.#realtimeTTSPipeline(connection, realtime, iterateTextEvents(response), llmStart, pipelineStart, signal);
 			if (typeof response === "string") {
 				const llmMs = Date.now() - llmStart;
 				if (response.trim().length === 0) return {
@@ -2867,103 +2760,6 @@ function withVoice(Base, voiceOptions) {
 				};
 			}
 			return this.#streamingTTSPipeline(connection, iterateTextEvents(response), llmStart, pipelineStart, signal);
-		}
-		async #realtimeTTSPipeline(connection, tts, tokenStream, llmStart, pipelineStart, signal) {
-			let fullText = "";
-			let spokenText = "";
-			let transcriptStarted = false;
-			let firstModelDeltaAt = null;
-			let firstTextSentAt = null;
-			let ttsStartedAt = null;
-			let hasPendingSpeech = false;
-			this.#firstRealtimeAudioAt.delete(connection.id);
-			const trace = (event, details = {}) => {
-				console.log("[VoiceTrace]", {
-					event,
-					connectionId: connection.id,
-					elapsedMs: Date.now() - pipelineStart,
-					...details
-				});
-			};
-			const flush = async () => {
-				if (!hasPendingSpeech) return false;
-				await tts.flush();
-				hasPendingSpeech = false;
-				return true;
-			};
-			const speak = async (text) => {
-				if (!text || signal.aborted) return;
-				firstTextSentAt ??= Date.now();
-				ttsStartedAt ??= Date.now();
-				await tts.speak(text);
-				spokenText += text;
-				trace("tts_speak_sent", {
-					chars: text.length,
-					text
-				});
-				hasPendingSpeech = true;
-			};
-			const sendAssistantDelta = (text) => {
-				if (!transcriptStarted) {
-					this.#sendJSON(connection, {
-						type: "transcript_start",
-						role: "assistant"
-					});
-					transcriptStarted = true;
-				}
-				this.#sendJSON(connection, {
-					type: "transcript_delta",
-					text
-				});
-			};
-			const flushOutput = async () => {
-				if (!await flush()) return;
-				trace("tts_flush_complete");
-				if (!signal.aborted) await this.#flushAudio(connection);
-			};
-			for await (const event of tokenStream) {
-				if (signal.aborted) break;
-				if (event.type === "boundary") {
-					await flushOutput();
-					continue;
-				}
-				if (event.type === "error") {
-					await flushOutput();
-					if (transcriptStarted) this.#sendJSON(connection, {
-						type: "transcript_end",
-						text: fullText
-					});
-					throw event.error;
-				}
-				const token = event.text;
-				if (firstModelDeltaAt === null) trace("model_first_delta");
-				firstModelDeltaAt ??= Date.now();
-				fullText += token;
-				sendAssistantDelta(token);
-				await speak(token);
-			}
-			const llmMs = Date.now() - llmStart;
-			if (!signal.aborted) await flushOutput();
-			trace("model_stream_complete", {
-				generatedChars: fullText.length,
-				ttsChars: spokenText.length,
-				aborted: signal.aborted,
-				text: fullText.slice(0, 200)
-			});
-			if (transcriptStarted) this.#sendJSON(connection, {
-				type: "transcript_end",
-				text: fullText
-			});
-			trace("transcript_end_sent", { chars: fullText.length });
-			const firstAudioAt = this.#firstRealtimeAudioAt.get(connection.id);
-			return {
-				text: spokenText,
-				llmMs,
-				ttsMs: ttsStartedAt ? Date.now() - ttsStartedAt : 0,
-				firstModelDeltaMs: firstModelDeltaAt ? firstModelDeltaAt - pipelineStart : 0,
-				firstSentenceMs: firstTextSentAt ? firstTextSentAt - pipelineStart : 0,
-				firstAudioMs: firstAudioAt ? firstAudioAt - pipelineStart : 0
-			};
 		}
 		async #streamingTTSPipeline(connection, tokenStream, llmStart, pipelineStart, signal) {
 			const chunker = new SentenceChunker();

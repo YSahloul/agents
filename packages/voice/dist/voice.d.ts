@@ -1,24 +1,21 @@
 import {
-  _ as VoiceServerMessage,
-  a as TTSProvider,
-  c as TranscriberSessionOptions,
-  d as VoiceAudioFormat,
-  f as VoiceAudioInput,
-  g as VoiceServerAudioTransport,
-  h as VoiceRole,
-  i as StreamingTTSProvider,
-  l as TranscriptMessage,
-  m as VoicePipelineMetrics,
-  n as RealtimeTTSSession,
-  o as Transcriber,
-  p as VoiceClientMessage,
-  r as RealtimeTTSSessionOptions,
-  s as TranscriberSession,
-  t as RealtimeTTSProvider,
-  u as VOICE_PROTOCOL_VERSION,
-  v as VoiceStatus,
-  y as VoiceTransport
-} from "./types-D6c11Ivd.js";
+  a as TranscriberSessionOptions,
+  c as VoiceAudioFormat,
+  d as VoicePipelineMetrics,
+  f as VoiceRole,
+  g as VoiceTransport,
+  h as VoiceStatus,
+  i as TranscriberSession,
+  l as VoiceAudioInput,
+  m as VoiceServerMessage,
+  n as TTSProvider,
+  o as TranscriptMessage,
+  p as VoiceServerAudioTransport,
+  r as Transcriber,
+  s as VOICE_PROTOCOL_VERSION,
+  t as StreamingTTSProvider,
+  u as VoiceClientMessage
+} from "./types-BmCmlGn2.js";
 import { Agent, Connection } from "agents";
 
 //#region src/sentence-chunker.d.ts
@@ -307,14 +304,14 @@ interface WorkersAIMulawRealtimeTTSOptions {
  * the encoding a phone carrier's wire format expects, so audio forwards
  * byte-for-byte with no resampling.
  *
- * No socket is held open for the whole call, no keepalive ping, no
- * reconnect-with-backoff state machine. Each `speak()`/`flush()` reconnects
- * on demand if the socket isn't open — the socket is allowed to close
- * between turns rather than treated as a failure to recover from. This
- * connect-on-use pattern has run stable in production; a persistent session
- * held open for the full call has been observed hitting the Speak
- * WebSocket's periodic 1011 (server-side internal error) closes under
- * sustained connections.
+ * Implements {@link StreamingTTSProvider}: one socket per sentence, and the
+ * generator returning *is* completion. There is no session to keep alive, no
+ * Speak/Flush/Clear protocol to reconcile, and no acknowledgement to lose — a
+ * socket that dies mid-utterance throws into the caller's `for await` instead
+ * of leaving a pending promise nobody settles. Interruption is the consumer
+ * abandoning the iterator (or aborting the signal), which closes the socket.
+ *
+ * Inherits {@link WorkersAITTS.synthesize} as the non-streaming fallback.
  *
  * @example
  * ```ts
@@ -325,13 +322,16 @@ interface WorkersAIMulawRealtimeTTSOptions {
  */
 declare class WorkersAIMulawRealtimeTTS
   extends WorkersAITTS
-  implements RealtimeTTSProvider
+  implements StreamingTTSProvider
 {
   #private;
   readonly audioFormat: VoiceAudioFormat;
   readonly sampleRate = 8000;
   constructor(ai: AiLike, options?: WorkersAIMulawRealtimeTTSOptions);
-  createSession(options: RealtimeTTSSessionOptions): RealtimeTTSSession;
+  synthesizeStream(
+    text: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer>;
 }
 interface WorkersAIFluxSTTOptions {
   /** End-of-turn confidence threshold (0.5-0.9). @default 0.7 */
@@ -456,11 +456,7 @@ type AgentLike = Constructor<Agent<Cloudflare.Env>>;
 /** Public surface of the voice mixin, used as an explicit return type to satisfy TS6 declaration emit. */
 interface VoiceAgentMixinMembers {
   transcriber?: Transcriber;
-  tts?:
-    | (TTSProvider &
-        Partial<RealtimeTTSProvider> &
-        Partial<StreamingTTSProvider>)
-    | undefined;
+  tts?: (TTSProvider & Partial<StreamingTTSProvider>) | undefined;
   createTranscriber(connection: Connection): Transcriber | null;
   createAudioTransport(
     connection: Connection
@@ -530,9 +526,6 @@ declare function withVoice<TBase extends AgentLike>(
 ): VoiceAgentMixinReturn<TBase>;
 //#endregion
 export {
-  type RealtimeTTSProvider,
-  type RealtimeTTSSession,
-  type RealtimeTTSSessionOptions,
   type SFUConfig,
   type SFUVoiceAgentOptions,
   type SFUVoiceState,

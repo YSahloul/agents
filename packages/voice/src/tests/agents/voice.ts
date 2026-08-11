@@ -9,9 +9,6 @@ import {
 import { z } from "zod";
 import { withVoice, type TextSource, type VoiceTurnContext } from "../../voice";
 import type {
-  RealtimeTTSProvider,
-  RealtimeTTSSession,
-  RealtimeTTSSessionOptions,
   TTSProvider,
   StreamingTTSProvider,
   Transcriber,
@@ -29,45 +26,6 @@ class TestTTS implements TTSProvider {
       view[i] = text.charCodeAt(i) & 0xff;
     }
     return buffer;
-  }
-}
-
-class TestRealtimeTTS implements TTSProvider, RealtimeTTSProvider {
-  readonly audioFormat = "pcm16" as const;
-  readonly sampleRate = 24000;
-  events: string[] = [];
-
-  async synthesize(text: string): Promise<ArrayBuffer> {
-    return new TextEncoder().encode(text).buffer;
-  }
-
-  createSession(options: RealtimeTTSSessionOptions): RealtimeTTSSession {
-    this.events.push("start");
-    return new TestRealtimeTTSSession(this.events, options);
-  }
-}
-
-class TestRealtimeTTSSession implements RealtimeTTSSession {
-  constructor(
-    readonly events: string[],
-    readonly options: RealtimeTTSSessionOptions
-  ) {}
-
-  async speak(text: string): Promise<void> {
-    this.events.push(`speak:${text}`);
-    await this.options.onAudio(new TextEncoder().encode(text).buffer);
-  }
-
-  flush(): void {
-    this.events.push("flush");
-  }
-
-  clear(): void {
-    this.events.push("clear");
-  }
-
-  close(): void {
-    this.events.push("close");
   }
 }
 
@@ -478,7 +436,7 @@ export class TestVoiceAgent extends VoiceBase {
   static options = { hibernate: false };
 
   transcriber: Transcriber | undefined = new TestTranscriber();
-  tts: TTSProvider & Partial<RealtimeTTSProvider> = new TestTTS();
+  tts: TTSProvider & Partial<StreamingTTSProvider> = new TestTTS();
 
   #callStartCount = 0;
   #callEndCount = 0;
@@ -493,7 +451,6 @@ export class TestVoiceAgent extends VoiceBase {
   #keepAliveReleasedCount = 0;
   #useAudioTransport = false;
   #audioTransport = new TestAudioTransport();
-  #realtimeTTS = new TestRealtimeTTS();
   #streamTurns = false;
 
   async keepAlive(): Promise<() => void> {
@@ -693,14 +650,6 @@ export class TestVoiceAgent extends VoiceBase {
             })
           );
           break;
-        case "_use_realtime_tts":
-          this.#realtimeTTS.events = [];
-          this.tts = this.#realtimeTTS;
-          this.#streamTurns = true;
-          connection.send(
-            JSON.stringify({ type: "_ack", command: parsed.type })
-          );
-          break;
         case "_emit_end":
           if (
             typeof parsed.text === "string" &&
@@ -708,14 +657,6 @@ export class TestVoiceAgent extends VoiceBase {
           ) {
             this.transcriber.lastSession?.emitEnd(parsed.text);
           }
-          break;
-        case "_get_realtime_tts_events":
-          connection.send(
-            JSON.stringify({
-              type: "_realtime_tts_events",
-              events: this.#realtimeTTS.events
-            })
-          );
           break;
         case "_force_end_call":
           this.forceEndCall(connection);

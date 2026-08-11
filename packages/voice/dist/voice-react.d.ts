@@ -1,12 +1,12 @@
 import {
-  d as VoiceAudioFormat,
-  f as VoiceAudioInput,
-  h as VoiceRole,
-  l as TranscriptMessage,
-  m as VoicePipelineMetrics,
-  v as VoiceStatus,
-  y as VoiceTransport
-} from "./types-D6c11Ivd.js";
+  c as VoiceAudioFormat,
+  d as VoicePipelineMetrics,
+  f as VoiceRole,
+  g as VoiceTransport,
+  h as VoiceStatus,
+  l as VoiceAudioInput,
+  o as TranscriptMessage
+} from "./types-BmCmlGn2.js";
 import {
   a as WebSocketVoiceTransport,
   i as VoiceClientOptions,
@@ -14,7 +14,7 @@ import {
   o as SFUVoiceAudioInput,
   r as VoiceClientEventMap,
   s as SFUVoiceAudioInputOptions
-} from "./voice-client-BcRDjsuM.js";
+} from "./voice-client-SLEdHOQ-.js";
 
 //#region src/voice-react.d.ts
 /** Options accepted by useVoiceAgent. */

@@ -6,13 +6,19 @@ export {
   TestContextVoiceAgent,
   TestAiSdkFullStreamVoiceAgent,
   TestAiSdkTextStreamVoiceAgent,
-  TestPcm24kVoiceAgent
+  TestPcm24kVoiceAgent,
+  TestStreamingTtsVoiceAgent
 } from "./agents/voice";
 
 export {
   TestVoiceInputAgent,
   TestRejectCallVoiceInputAgent
 } from "./agents/voice-input";
+
+export {
+  TestSFUVoiceAgent,
+  TestMissingSFUConfigAgent
+} from "./agents/sfu-voice";
 
 export type Env = {
   TestVoiceAgent: DurableObjectNamespace;

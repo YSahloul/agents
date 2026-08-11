@@ -35,8 +35,6 @@ import {
 } from "./text-stream";
 import { VOICE_PROTOCOL_VERSION } from "./types";
 import type {
-  RealtimeTTSProvider,
-  RealtimeTTSSession,
   VoiceRole,
   VoiceAudioFormat,
   TTSProvider,
@@ -70,9 +68,6 @@ export type {
   TranscriptMessage,
   TTSProvider,
   StreamingTTSProvider,
-  RealtimeTTSProvider,
-  RealtimeTTSSession,
-  RealtimeTTSSessionOptions,
   Transcriber,
   TranscriberSession,
   TranscriberSessionOptions
@@ -175,11 +170,7 @@ type AgentLike = Constructor<Agent<Cloudflare.Env>>;
 /** Public surface of the voice mixin, used as an explicit return type to satisfy TS6 declaration emit. */
 export interface VoiceAgentMixinMembers {
   transcriber?: Transcriber;
-  tts?:
-    | (TTSProvider &
-        Partial<RealtimeTTSProvider> &
-        Partial<StreamingTTSProvider>)
-    | undefined;
+  tts?: (TTSProvider & Partial<StreamingTTSProvider>) | undefined;
   createTranscriber(connection: Connection): Transcriber | null;
   createAudioTransport(
     connection: Connection
@@ -264,9 +255,7 @@ export function withVoice<TBase extends AgentLike>(
     /** Continuous transcriber provider. */
     transcriber?: Transcriber;
     /** Text-to-speech provider. Required. */
-    tts?: TTSProvider &
-      Partial<RealtimeTTSProvider> &
-      Partial<StreamingTTSProvider>;
+    tts?: TTSProvider & Partial<StreamingTTSProvider>;
 
     // Shared per-connection audio state manager
     #cm = new AudioConnectionManager("VoiceAgent");
@@ -276,10 +265,6 @@ export function withVoice<TBase extends AgentLike>(
 
     // Optional server audio transports keyed by their voice connection.
     #audioTransports = new Map<string, VoiceServerAudioTransport>();
-    // Persistent text-to-speech sessions keyed by voice connection.
-    #realtimeTTSSessions = new Map<string, RealtimeTTSSession>();
-    #realtimeTTSText = new Map<string, string>();
-    #firstRealtimeAudioAt = new Map<string, number>();
     // Speculative Flux responses wait for EndOfTurn before persistence.
     #speculativeTurns = new Map<string, SpeculativeTurn>();
 
@@ -353,14 +338,7 @@ export function withVoice<TBase extends AgentLike>(
             transport.stop(connection.id)
           );
         }
-        const realtimeTTS = this.#realtimeTTSSessions.get(connection.id);
-        if (realtimeTTS) {
-          this.#realtimeTTSSessions.delete(connection.id);
-          runBackground("realtime_tts_stop", () => realtimeTTS.close());
-        }
         this.#cancelSpeculativeTurn(connection.id);
-        this.#realtimeTTSText.delete(connection.id);
-        this.#firstRealtimeAudioAt.delete(connection.id);
         this.#lastBargeInAt.delete(connection.id);
         return _onClose?.(connection, ...rest);
       };
@@ -565,54 +543,6 @@ export function withVoice<TBase extends AgentLike>(
       await transport.stop(connectionId);
     }
 
-    async #startRealtimeTTS(connection: Connection): Promise<void> {
-      const tts = this.#requireTTS();
-      if (typeof tts.createSession !== "function") return;
-
-      let session: RealtimeTTSSession;
-      session = tts.createSession({
-        onAudio: (audio) => {
-          if (this.#realtimeTTSSessions.get(connection.id) !== session) return;
-          void this.#sendAudio(connection, audio);
-          if (!this.#firstRealtimeAudioAt.has(connection.id)) {
-            console.log("[VoiceTrace]", {
-              event: "tts_first_audio",
-              connectionId: connection.id,
-              bytes: audio.byteLength
-            });
-            this.#firstRealtimeAudioAt.set(connection.id, Date.now());
-          }
-        },
-        onError: (error) => {
-          if (this.#realtimeTTSSessions.get(connection.id) !== session) return;
-          const err = error as ErrorEvent;
-          console.error("[VoiceAgent] Realtime TTS error:", {
-            message: err.message,
-            type: err.type,
-            error: err.error,
-            source: typeof error
-          });
-        }
-      });
-      this.#realtimeTTSSessions.set(connection.id, session);
-      try {
-        await session.waitUntilReady?.();
-      } catch (error) {
-        this.#realtimeTTSSessions.delete(connection.id);
-        await session.close();
-        throw error;
-      }
-    }
-
-    async #stopRealtimeTTS(connectionId: string): Promise<void> {
-      const session = this.#realtimeTTSSessions.get(connectionId);
-      if (!session) return;
-      this.#realtimeTTSSessions.delete(connectionId);
-      this.#realtimeTTSText.delete(connectionId);
-      this.#firstRealtimeAudioAt.delete(connectionId);
-      await session.close();
-    }
-
     // --- Convenience methods ---
 
     #cancelSpeculativeTurn(connectionId: string): boolean {
@@ -690,9 +620,7 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
-    #requireTTS(): TTSProvider &
-      Partial<RealtimeTTSProvider> &
-      Partial<StreamingTTSProvider> {
+    #requireTTS(): TTSProvider & Partial<StreamingTTSProvider> {
       if (!this.tts) {
         throw new Error(
           "No TTS provider configured. Set 'tts' on your VoiceAgent subclass."
@@ -717,20 +645,21 @@ export function withVoice<TBase extends AgentLike>(
       text: string,
       signal: AbortSignal
     ): Promise<void> {
-      const realtime = this.#realtimeTTSSessions.get(connection.id);
-      if (realtime) {
+      // Same mechanism the turn pipeline uses, so the greeting and every
+      // reply travel one code path.
+      const tts = this.#requireTTS();
+      if (typeof tts.synthesizeStream === "function") {
         const textToSpeak = await this.beforeSynthesize(text, connection);
         if (!textToSpeak || signal.aborted) return;
-        this.#realtimeTTSText.set(connection.id, textToSpeak);
-        this.#firstRealtimeAudioAt.delete(connection.id);
-        console.log("[VoiceTrace]", {
-          event: "tts_speak_sent",
-          connectionId: connection.id,
-          chars: textToSpeak.length,
-          text: textToSpeak
-        });
-        await realtime.speak(textToSpeak);
-        await realtime.flush();
+        for await (const chunk of tts.synthesizeStream(textToSpeak, signal)) {
+          if (signal.aborted) return;
+          const processed = await this.afterSynthesize(
+            chunk,
+            textToSpeak,
+            connection
+          );
+          if (processed) await this.#sendAudio(connection, processed);
+        }
         if (!signal.aborted) await this.#flushAudio(connection);
         return;
       }
@@ -793,7 +722,6 @@ export function withVoice<TBase extends AgentLike>(
           );
           if (!this.#isCurrentStartup(connection.id, startupToken)) return;
         }
-        await this.#startRealtimeTTS(connection);
         if (!this.#isCurrentStartup(connection.id, startupToken)) return;
         provider = this.createTranscriber(connection) ?? this.transcriber;
         if (!provider) {
@@ -922,7 +850,6 @@ export function withVoice<TBase extends AgentLike>(
         message: clientMessage
       });
       try {
-        await this.#stopRealtimeTTS(connection.id);
         await this.#stopAudioTransport(connection.id);
       } finally {
         this.#cm.cleanup(connection.id);
@@ -945,7 +872,6 @@ export function withVoice<TBase extends AgentLike>(
       this.#cancelSpeculativeTurn(connection.id);
       this.#lastBargeInAt.delete(connection.id);
       try {
-        await this.#stopRealtimeTTS(connection.id);
         await this.#stopAudioTransport(connection.id);
       } finally {
         this.#cm.cleanup(connection.id);
@@ -965,7 +891,6 @@ export function withVoice<TBase extends AgentLike>(
       this.#cm.clearAudioBuffer(connection.id);
       this.#sendJSON(connection, { type: "status", status: "listening" });
       try {
-        await this.#realtimeTTSSessions.get(connection.id)?.clear();
         await this.#audioTransports
           .get(connection.id)
           ?.interrupt(connection.id);
@@ -989,7 +914,6 @@ export function withVoice<TBase extends AgentLike>(
       this.#sendJSON(connection, { type: "status", status: "listening" });
       runBackground("barge_in", async () => {
         try {
-          await this.#realtimeTTSSessions.get(connection.id)?.clear();
           await this.#audioTransports
             .get(connection.id)
             ?.interrupt(connection.id);
@@ -1279,18 +1203,6 @@ export function withVoice<TBase extends AgentLike>(
       firstSentenceMs: number;
       firstAudioMs: number;
     }> {
-      const realtime = this.#realtimeTTSSessions.get(connection.id);
-      if (realtime) {
-        return this.#realtimeTTSPipeline(
-          connection,
-          realtime,
-          iterateTextEvents(response),
-          llmStart,
-          pipelineStart,
-          signal
-        );
-      }
-
       if (typeof response === "string") {
         const llmMs = Date.now() - llmStart;
 
@@ -1341,127 +1253,6 @@ export function withVoice<TBase extends AgentLike>(
         pipelineStart,
         signal
       );
-    }
-
-    async #realtimeTTSPipeline(
-      connection: Connection,
-      tts: RealtimeTTSSession,
-      tokenStream: AsyncIterable<TextStreamEvent>,
-      llmStart: number,
-      pipelineStart: number,
-      signal: AbortSignal
-    ): Promise<{
-      text: string;
-      llmMs: number;
-      ttsMs: number;
-      firstModelDeltaMs: number;
-      firstSentenceMs: number;
-      firstAudioMs: number;
-    }> {
-      let fullText = "";
-      let spokenText = "";
-      let transcriptStarted = false;
-      let firstModelDeltaAt: number | null = null;
-      let firstTextSentAt: number | null = null;
-      let ttsStartedAt: number | null = null;
-      let hasPendingSpeech = false;
-      this.#firstRealtimeAudioAt.delete(connection.id);
-
-      const trace = (event: string, details: Record<string, unknown> = {}) => {
-        console.log("[VoiceTrace]", {
-          event,
-          connectionId: connection.id,
-          elapsedMs: Date.now() - pipelineStart,
-          ...details
-        });
-      };
-
-      const flush = async (): Promise<boolean> => {
-        if (!hasPendingSpeech) return false;
-        await tts.flush();
-        hasPendingSpeech = false;
-        return true;
-      };
-
-      const speak = async (text: string): Promise<void> => {
-        if (!text || signal.aborted) return;
-        firstTextSentAt ??= Date.now();
-        ttsStartedAt ??= Date.now();
-        await tts.speak(text);
-        spokenText += text;
-        trace("tts_speak_sent", { chars: text.length, text });
-        hasPendingSpeech = true;
-      };
-
-      const sendAssistantDelta = (text: string) => {
-        if (!transcriptStarted) {
-          this.#sendJSON(connection, {
-            type: "transcript_start",
-            role: "assistant"
-          });
-          transcriptStarted = true;
-        }
-        this.#sendJSON(connection, { type: "transcript_delta", text });
-      };
-
-      const flushOutput = async () => {
-        if (!(await flush())) return;
-        trace("tts_flush_complete");
-        if (!signal.aborted) await this.#flushAudio(connection);
-      };
-
-      for await (const event of tokenStream) {
-        if (signal.aborted) break;
-        if (event.type === "boundary") {
-          await flushOutput();
-          continue;
-        }
-        if (event.type === "error") {
-          await flushOutput();
-          if (transcriptStarted) {
-            this.#sendJSON(connection, {
-              type: "transcript_end",
-              text: fullText
-            });
-          }
-          throw event.error;
-        }
-
-        const token = event.text;
-        if (firstModelDeltaAt === null) trace("model_first_delta");
-        firstModelDeltaAt ??= Date.now();
-        fullText += token;
-        sendAssistantDelta(token);
-        await speak(token);
-      }
-
-      const llmMs = Date.now() - llmStart;
-      if (!signal.aborted) await flushOutput();
-      trace("model_stream_complete", {
-        generatedChars: fullText.length,
-        ttsChars: spokenText.length,
-        aborted: signal.aborted,
-        text: fullText.slice(0, 200)
-      });
-      if (transcriptStarted) {
-        this.#sendJSON(connection, {
-          type: "transcript_end",
-          text: fullText
-        });
-      }
-      trace("transcript_end_sent", { chars: fullText.length });
-
-      const firstAudioAt = this.#firstRealtimeAudioAt.get(connection.id);
-      return {
-        text: spokenText,
-        llmMs,
-        ttsMs: ttsStartedAt ? Date.now() - ttsStartedAt : 0,
-        firstModelDeltaMs: firstModelDeltaAt
-          ? firstModelDeltaAt - pipelineStart
-          : 0,
-        firstSentenceMs: firstTextSentAt ? firstTextSentAt - pipelineStart : 0,
-        firstAudioMs: firstAudioAt ? firstAudioAt - pipelineStart : 0
-      };
     }
 
     async #streamingTTSPipeline(

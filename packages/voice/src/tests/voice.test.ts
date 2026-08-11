@@ -111,23 +111,6 @@ async function getTransportEvents(ws: WebSocket): Promise<string[]> {
   return message.events;
 }
 
-async function getRealtimeTTSEvents(ws: WebSocket): Promise<string[]> {
-  const response = waitForType(ws, "_realtime_tts_events");
-  sendJSON(ws, { type: "_get_realtime_tts_events" });
-  const message = await response;
-  if (
-    !message ||
-    typeof message !== "object" ||
-    !("events" in message) ||
-    !Array.isArray(message.events)
-  ) {
-    throw new Error("Expected realtime TTS events");
-  }
-  return message.events.filter(
-    (event): event is string => typeof event === "string"
-  );
-}
-
 async function setTranscriberMode(
   ws: WebSocket,
   value:

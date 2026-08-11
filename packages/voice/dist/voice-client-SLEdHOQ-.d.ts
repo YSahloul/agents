@@ -1,11 +1,11 @@
 import {
-  d as VoiceAudioFormat,
-  f as VoiceAudioInput,
-  l as TranscriptMessage,
-  m as VoicePipelineMetrics,
-  v as VoiceStatus,
-  y as VoiceTransport
-} from "./types-D6c11Ivd.js";
+  c as VoiceAudioFormat,
+  d as VoicePipelineMetrics,
+  g as VoiceTransport,
+  h as VoiceStatus,
+  l as VoiceAudioInput,
+  o as TranscriptMessage
+} from "./types-BmCmlGn2.js";
 
 //#region src/sfu-voice-client.d.ts
 interface SFUVoiceAudioInputOptions {
@@ -194,4 +194,4 @@ export {
   SFUVoiceAudioInputOptions as s,
   VoiceClient as t
 };
-//# sourceMappingURL=voice-client-BcRDjsuM.d.ts.map
+//# sourceMappingURL=voice-client-SLEdHOQ-.d.ts.map

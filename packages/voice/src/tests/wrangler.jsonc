@@ -67,8 +67,11 @@
         "TestAiSdkFullStreamVoiceAgent",
         "TestAiSdkTextStreamVoiceAgent",
         "TestPcm24kVoiceAgent",
+        "TestStreamingTtsVoiceAgent",
         "TestVoiceInputAgent",
-        "TestRejectCallVoiceInputAgent"
+        "TestRejectCallVoiceInputAgent",
+        "TestSFUVoiceAgent",
+        "TestMissingSFUConfigAgent"
       ],
       "tag": "v1"
     }

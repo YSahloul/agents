@@ -2,7 +2,7 @@ import { Agent, routeAgentRequest, type Connection } from "agents";
 import {
   withVoice,
   WorkersAIFluxSTT,
-  WorkersAITTS,
+  WorkersAIMulawRealtimeTTS,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
@@ -22,15 +22,10 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     eagerEotThreshold: 0.5,
     eotThreshold: 0.7
   });
-  // Batch HTTP TTS (Plivo-style) for A/B latency test vs the realtime WS
-  // class. Linear16/16k PCM; the SignalWire adapter encodes mulaw itself in
-  // pcm16 mode.
-  tts = new WorkersAITTS(this.env.AI, {
-    model: "@cf/deepgram/aura-2-en",
-    encoding: "linear16",
-    sampleRate: 16000,
-    container: "none"
-  });
+  // WebSocket μ-law TTS (the rebuilt synthesizeStream path): one socket per
+  // sentence, audio streams out as it synthesizes and forwards byte-for-byte
+  // (mulaw/8000 straight to the carrier — no resample, no adapter encode).
+  tts = new WorkersAIMulawRealtimeTTS(this.env.AI);
   #workersAi = createWorkersAI({ binding: this.env.AI });
 
   async onCallStart(connection: Connection) {
@@ -79,7 +74,7 @@ export default {
         request,
         env as unknown as Record<string, unknown>,
         "MyVoiceAgent",
-        { agentAudioFormat: "pcm16" }
+        { agentAudioFormat: "mulaw" }
       );
     }
 

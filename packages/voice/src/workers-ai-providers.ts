@@ -7,9 +7,7 @@
  */
 
 import type {
-  RealtimeTTSProvider,
-  RealtimeTTSSession,
-  RealtimeTTSSessionOptions,
+  StreamingTTSProvider,
   TTSProvider,
   Transcriber,
   TranscriberSession,
@@ -113,14 +111,14 @@ export interface WorkersAIMulawRealtimeTTSOptions {
  * the encoding a phone carrier's wire format expects, so audio forwards
  * byte-for-byte with no resampling.
  *
- * No socket is held open for the whole call, no keepalive ping, no
- * reconnect-with-backoff state machine. Each `speak()`/`flush()` reconnects
- * on demand if the socket isn't open — the socket is allowed to close
- * between turns rather than treated as a failure to recover from. This
- * connect-on-use pattern has run stable in production; a persistent session
- * held open for the full call has been observed hitting the Speak
- * WebSocket's periodic 1011 (server-side internal error) closes under
- * sustained connections.
+ * Implements {@link StreamingTTSProvider}: one socket per sentence, and the
+ * generator returning *is* completion. There is no session to keep alive, no
+ * Speak/Flush/Clear protocol to reconcile, and no acknowledgement to lose — a
+ * socket that dies mid-utterance throws into the caller's `for await` instead
+ * of leaving a pending promise nobody settles. Interruption is the consumer
+ * abandoning the iterator (or aborting the signal), which closes the socket.
+ *
+ * Inherits {@link WorkersAITTS.synthesize} as the non-streaming fallback.
  *
  * @example
  * ```ts
@@ -131,7 +129,7 @@ export interface WorkersAIMulawRealtimeTTSOptions {
  */
 export class WorkersAIMulawRealtimeTTS
   extends WorkersAITTS
-  implements RealtimeTTSProvider
+  implements StreamingTTSProvider
 {
   readonly audioFormat: VoiceAudioFormat = "mulaw";
   readonly sampleRate = 8000;
@@ -154,118 +152,96 @@ export class WorkersAIMulawRealtimeTTS
     this.#speaker = speaker;
   }
 
-  createSession(options: RealtimeTTSSessionOptions): RealtimeTTSSession {
-    return new WorkersAIMulawRealtimeTTSSession(
-      this.#ai,
-      this.#model,
-      this.#speaker,
-      options
-    );
-  }
-}
+  async *synthesizeStream(
+    text: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer> {
+    if (!text || signal?.aborted) return;
 
-class WorkersAIMulawRealtimeTTSSession implements RealtimeTTSSession {
-  #ws: WebSocket | null = null;
-  #connecting: Promise<WebSocket> | null = null;
-  #closed = false;
-  #active = false;
-  #flushWaiters: Array<{
-    resolve: () => void;
-    reject: (error: unknown) => void;
-  }> = [];
+    const ws = await this.#open();
+    const frames = new MulawFrameStream();
 
-  // Aura's WS frames are transport fragments, not audio frames — same as
-  // the HTTP path, it can split 8 kHz mulaw into arbitrary-sized pieces.
-  // Coalesce into 20 ms (160-byte) frames and pace them to real time before
-  // each is forwarded as a carrier media message; sending fragments
-  // straight through desyncs the carrier's playback cadence and garbles
-  // the call.
-  #frame = new Uint8Array(160);
-  #frameLength = 0;
-  #nextYieldAt = 0;
-  #firstFrameYielded = false;
-  #delivery: Promise<void> = Promise.resolve();
-
-  constructor(
-    private readonly ai: AiLike,
-    private readonly model: string,
-    private readonly speaker: string,
-    private readonly options: RealtimeTTSSessionOptions
-  ) {}
-
-  async speak(text: string): Promise<void> {
-    if (this.#closed || !text) return;
-    this.#active = true;
-    const ws =
-      this.#ws?.readyState === WebSocket.OPEN
-        ? this.#ws
-        : await this.#connect();
-    ws.send(JSON.stringify({ type: "Speak", text, speaker: this.speaker }));
-  }
-
-  async flush(): Promise<void> {
-    if (this.#closed) return;
-    const ws =
-      this.#ws?.readyState === WebSocket.OPEN
-        ? this.#ws
-        : await this.#connect();
-    const flushed = new Promise<void>((resolve, reject) => {
-      this.#flushWaiters.push({ resolve, reject });
-    });
-    ws.send(JSON.stringify({ type: "Flush" }));
-    return flushed;
-  }
-
-  async clear(): Promise<void> {
-    this.#active = false;
-    this.#frame = new Uint8Array(160);
-    this.#frameLength = 0;
-    this.#firstFrameYielded = false;
-    if (this.#ws?.readyState === WebSocket.OPEN) {
-      try {
-        this.#ws.send(JSON.stringify({ type: "Clear" }));
-      } catch {
-        // Socket died between the readyState check and send; next
-        // speak()/flush() reconnects.
+    ws.addEventListener("message", (event: MessageEvent) => {
+      if (typeof event.data === "string") {
+        try {
+          const message: unknown = JSON.parse(event.data);
+          if (
+            message &&
+            typeof message === "object" &&
+            "type" in message &&
+            message.type === "Flushed"
+          ) {
+            frames.finish();
+          }
+        } catch {
+          // Ignore malformed control messages.
+        }
+        return;
       }
-    }
-    for (const waiter of this.#flushWaiters.splice(0)) waiter.resolve();
-  }
+      // binaryType is pinned to "arraybuffer" in #open, so audio arrives as
+      // an ArrayBuffer and can be appended without a microtask gap.
+      if (event.data instanceof ArrayBuffer) {
+        frames.push(new Uint8Array(event.data));
+      } else if (ArrayBuffer.isView(event.data)) {
+        const view = event.data as ArrayBufferView;
+        frames.push(
+          new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
+        );
+      }
+    });
+    ws.addEventListener("close", (event: CloseEvent) => {
+      frames.fail(
+        new Error(
+          `Workers AI mulaw TTS socket closed before flush (code ${event.code}${
+            event.reason ? `: ${event.reason}` : ""
+          })`
+        )
+      );
+    });
+    ws.addEventListener("error", () => {
+      frames.fail(new Error("Workers AI mulaw TTS socket error"));
+    });
 
-  close(): void {
-    this.#closed = true;
-    this.#active = false;
-    for (const waiter of this.#flushWaiters.splice(0)) waiter.resolve();
     try {
-      this.#ws?.close();
-    } catch {
-      // Already closed.
-    }
-    this.#ws = null;
-  }
+      ws.send(JSON.stringify({ type: "Speak", text, speaker: this.#speaker }));
+      ws.send(JSON.stringify({ type: "Flush" }));
 
-  /** Connect on demand. No keepalive, no eager reconnect — the socket is
-   * allowed to close between turns; the next speak()/flush() reopens it. */
-  async #connect(): Promise<WebSocket> {
-    if (this.#ws?.readyState === WebSocket.OPEN) return this.#ws;
-    if (this.#connecting) return this.#connecting;
-    this.#connecting = this.#open();
-    try {
-      const ws = await this.#connecting;
-      this.#ws = ws;
-      return ws;
+      // Real-time pacing: one 20 ms frame every 20 ms, first frame
+      // immediately. Without it a whole utterance lands at the transport at
+      // once — which an RTP track cannot absorb, and which leaves seconds of
+      // audio queued downstream that a barge-in then has to claw back.
+      let nextYieldAt = 0;
+      for await (const frame of frames) {
+        if (signal?.aborted) return;
+        const now = Date.now();
+        if (nextYieldAt === 0) {
+          nextYieldAt = now + FRAME_MS;
+        } else {
+          if (now < nextYieldAt) {
+            await new Promise<void>((resolve) =>
+              setTimeout(resolve, nextYieldAt - now)
+            );
+          }
+          nextYieldAt = Math.max(nextYieldAt + FRAME_MS, Date.now() + FRAME_MS);
+        }
+        yield frame;
+      }
     } finally {
-      this.#connecting = null;
+      try {
+        ws.close();
+      } catch {
+        // Already closed.
+      }
     }
   }
 
   async #open(): Promise<WebSocket> {
-    const response = await this.ai.run(
-      this.model,
+    const response = await this.#ai.run(
+      this.#model,
       {
         encoding: "mulaw",
         sample_rate: "8000",
-        speaker: this.speaker,
+        speaker: this.#speaker,
         container: "none"
       },
       { websocket: true }
@@ -281,84 +257,38 @@ class WorkersAIMulawRealtimeTTSSession implements RealtimeTTSSession {
     const ws = response.webSocket;
     ws.accept();
     ws.binaryType = "arraybuffer";
-
-    ws.addEventListener("message", (event: MessageEvent) => {
-      this.#handleMessage(event);
-    });
-    ws.addEventListener("close", (event: CloseEvent) => {
-      console.log(
-        "[WorkersAIMulawTTS] WebSocket closed — code:",
-        event.code,
-        "reason:",
-        event.reason,
-        "wasClean:",
-        event.wasClean
-      );
-      if (this.#ws === ws) this.#ws = null;
-    });
-    ws.addEventListener("error", (event: Event) => {
-      console.error("[WorkersAIMulawTTS] WebSocket error:", {
-        type: (event as ErrorEvent).type,
-        message: (event as ErrorEvent).message,
-        error: (event as ErrorEvent).error
-      });
-      if (this.#ws === ws) this.#ws = null;
-      this.options.onError?.(event);
-    });
     return ws;
   }
+}
 
-  #handleMessage(event: MessageEvent): void {
-    if (this.#closed) return;
+/** 20 ms of 8 kHz μ-law. */
+const FRAME_BYTES = 160;
+const FRAME_MS = 20;
 
-    if (typeof event.data === "string") {
-      try {
-        const message: unknown = JSON.parse(event.data);
-        if (
-          message &&
-          typeof message === "object" &&
-          "type" in message &&
-          message.type === "Flushed"
-        ) {
-          this.#flushRemainder();
-          this.#firstFrameYielded = false;
-          this.#flushWaiters.shift()?.resolve();
-        }
-      } catch {
-        // Ignore malformed control messages.
-      }
-      return;
-    }
+/**
+ * Bridges the TTS socket's events into an async iterable of 20 ms μ-law
+ * frames.
+ *
+ * Aura's WebSocket messages are transport fragments, not audio frames — it
+ * splits μ-law into arbitrary-sized pieces — so bytes are coalesced to 160 and
+ * any remainder is emitted when the server acknowledges the flush. The
+ * iterator ends on `Flushed` and throws if the socket dies first, so a
+ * consumer can never be left waiting on an acknowledgement that is not coming.
+ */
+class MulawFrameStream {
+  #frame = new Uint8Array(FRAME_BYTES);
+  #frameLength = 0;
+  #queue: ArrayBuffer[] = [];
+  #done = false;
+  #error: Error | null = null;
+  #wake: (() => void) | null = null;
 
-    // A Clear may already have dropped this session's interest in audio;
-    // stale bytes still in flight from before the server processed it must
-    // not be coalesced into the next utterance's frames.
-    if (!this.#active) return;
-    const audio = copyArrayBuffer(event.data);
-    if (!audio) return;
-    // ArrayBuffer is the common real-world case (binaryType is pinned to
-    // "arraybuffer" in #open) and resolves synchronously — appending inline
-    // avoids an unnecessary microtask gap that clear() could race between
-    // scheduling and running, un-clearing state it had just reset. Only the
-    // Blob fallback path is genuinely async, and re-checks #active at the
-    // point of the deferred append rather than relying on the check above.
-    if (audio instanceof ArrayBuffer) {
-      this.#appendAudio(new Uint8Array(audio));
-      return;
-    }
-    audio
-      .then((buffer) => {
-        if (!this.#active) return;
-        this.#appendAudio(new Uint8Array(buffer));
-      })
-      .catch((error: unknown) => this.options.onError?.(error));
-  }
-
-  #appendAudio(chunk: Uint8Array): void {
+  push(chunk: Uint8Array): void {
+    if (this.#done) return;
     let offset = 0;
     while (offset < chunk.byteLength) {
       const copied = Math.min(
-        this.#frame.byteLength - this.#frameLength,
+        FRAME_BYTES - this.#frameLength,
         chunk.byteLength - offset
       );
       this.#frame.set(
@@ -367,41 +297,49 @@ class WorkersAIMulawRealtimeTTSSession implements RealtimeTTSSession {
       );
       this.#frameLength += copied;
       offset += copied;
-      if (this.#frameLength === this.#frame.byteLength) {
-        this.#deliverFrame(this.#frame.buffer);
-        this.#frame = new Uint8Array(160);
+      if (this.#frameLength === FRAME_BYTES) {
+        this.#queue.push(this.#frame.buffer as ArrayBuffer);
+        this.#frame = new Uint8Array(FRAME_BYTES);
         this.#frameLength = 0;
       }
     }
+    this.#notify();
   }
 
-  #flushRemainder(): void {
-    if (this.#frameLength === 0) return;
-    this.#deliverFrame(this.#frame.slice(0, this.#frameLength).buffer);
-    this.#frame = new Uint8Array(160);
-    this.#frameLength = 0;
+  /** Server acknowledged the flush: emit the partial frame and end. */
+  finish(): void {
+    if (this.#done) return;
+    if (this.#frameLength > 0) {
+      this.#queue.push(this.#frame.slice(0, this.#frameLength).buffer);
+      this.#frameLength = 0;
+    }
+    this.#done = true;
+    this.#notify();
   }
 
-  /** Real-time pacing: one 20 ms frame every 20 ms. First frame of an
-   * utterance yields immediately; subsequent frames wait for their slot. */
-  #deliverFrame(frame: ArrayBuffer): void {
-    this.#delivery = this.#delivery
-      .then(async () => {
-        const now = Date.now();
-        if (!this.#firstFrameYielded) {
-          this.#firstFrameYielded = true;
-          this.#nextYieldAt = now + 20;
-        } else {
-          if (now < this.#nextYieldAt) {
-            await new Promise<void>((resolve) =>
-              setTimeout(resolve, this.#nextYieldAt - now)
-            );
-          }
-          this.#nextYieldAt = Math.max(this.#nextYieldAt + 20, Date.now() + 20);
-        }
-        await this.options.onAudio(frame);
-      })
-      .catch((error: unknown) => this.options.onError?.(error));
+  /** Socket died before the flush was acknowledged. No-op once ended. */
+  fail(error: Error): void {
+    if (this.#done) return;
+    this.#error = error;
+    this.#done = true;
+    this.#notify();
+  }
+
+  #notify(): void {
+    const wake = this.#wake;
+    this.#wake = null;
+    wake?.();
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<ArrayBuffer> {
+    while (true) {
+      while (this.#queue.length > 0) yield this.#queue.shift() as ArrayBuffer;
+      if (this.#error) throw this.#error;
+      if (this.#done) return;
+      await new Promise<void>((resolve) => {
+        this.#wake = resolve;
+      });
+    }
   }
 }
 
@@ -416,18 +354,6 @@ function isWebSocket(value: unknown): value is WebSocket {
     "addEventListener" in value &&
     typeof value.addEventListener === "function"
   );
-}
-
-function copyArrayBuffer(
-  data: unknown
-): ArrayBuffer | Promise<ArrayBuffer> | null {
-  if (data instanceof ArrayBuffer) return data.slice(0);
-  if (data instanceof Blob) return data.arrayBuffer();
-  if (!ArrayBuffer.isView(data)) return null;
-  return data.buffer.slice(
-    data.byteOffset,
-    data.byteOffset + data.byteLength
-  ) as ArrayBuffer;
 }
 
 // --- Flux continuous STT ---
