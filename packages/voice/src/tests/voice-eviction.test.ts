@@ -11,7 +11,7 @@ import {
   runInDurableObject
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { TestVoiceAgent } from "./agents/voice";
+import type { TestPersistentVoiceAgent, TestVoiceAgent } from "./agents/voice";
 
 type History = Array<{ role: string; content: string }>;
 
@@ -21,8 +21,14 @@ function voiceStub(name: string) {
   ) as DurableObjectStub<TestVoiceAgent>;
 }
 
-async function appendTurns(
-  stub: DurableObjectStub<TestVoiceAgent>,
+function persistentVoiceStub(name: string) {
+  return env.TestPersistentVoiceAgent.get(
+    env.TestPersistentVoiceAgent.idFromName(name)
+  ) as DurableObjectStub<TestPersistentVoiceAgent>;
+}
+
+async function appendTurns<T extends TestPersistentVoiceAgent | TestVoiceAgent>(
+  stub: DurableObjectStub<T>,
   turns: Array<{ user: string; assistant: string }>
 ): Promise<void> {
   await runInDurableObject(stub, (instance) => {
@@ -33,8 +39,8 @@ async function appendTurns(
   });
 }
 
-async function readHistory(
-  stub: DurableObjectStub<TestVoiceAgent>
+async function readHistory<T extends TestPersistentVoiceAgent | TestVoiceAgent>(
+  stub: DurableObjectStub<T>
 ): Promise<History> {
   return runInDurableObject(stub, (instance) =>
     instance.getConversationHistory()
@@ -79,5 +85,58 @@ describe("VoiceAgent history after forced Durable Object eviction", () => {
 
     expect(await readHistory(stubA)).toEqual([]);
     expect(await readHistory(stubB)).toEqual([]);
+  });
+});
+
+describe("VoiceAgent durable history after forced Durable Object eviction", () => {
+  it("restores and extends the exact ordered transcript", async () => {
+    const stub = persistentVoiceStub(
+      `evict-persistent-voice-${crypto.randomUUID()}`
+    );
+    await appendTurns(stub, [
+      { user: "what's the weather?", assistant: "Sunny" },
+      { user: "and tomorrow?", assistant: "Rain" }
+    ]);
+
+    await evictDurableObject(stub);
+
+    expect(await readHistory(stub)).toEqual([
+      { role: "user", content: "what's the weather?" },
+      { role: "assistant", content: "Sunny" },
+      { role: "user", content: "and tomorrow?" },
+      { role: "assistant", content: "Rain" }
+    ]);
+
+    await appendTurns(stub, [{ user: "weekend?", assistant: "Clear" }]);
+    expect(await readHistory(stub)).toEqual([
+      { role: "user", content: "what's the weather?" },
+      { role: "assistant", content: "Sunny" },
+      { role: "user", content: "and tomorrow?" },
+      { role: "assistant", content: "Rain" },
+      { role: "user", content: "weekend?" },
+      { role: "assistant", content: "Clear" }
+    ]);
+  });
+
+  it("keeps named transcripts isolated after a global forced eviction", async () => {
+    const stubA = persistentVoiceStub(
+      `evict-persistent-voice-a-${crypto.randomUUID()}`
+    );
+    const stubB = persistentVoiceStub(
+      `evict-persistent-voice-b-${crypto.randomUUID()}`
+    );
+    await appendTurns(stubA, [{ user: "A", assistant: "A reply" }]);
+    await appendTurns(stubB, [{ user: "B", assistant: "B reply" }]);
+
+    await evictAllDurableObjects();
+
+    expect(await readHistory(stubA)).toEqual([
+      { role: "user", content: "A" },
+      { role: "assistant", content: "A reply" }
+    ]);
+    expect(await readHistory(stubB)).toEqual([
+      { role: "user", content: "B" },
+      { role: "assistant", content: "B reply" }
+    ]);
   });
 });

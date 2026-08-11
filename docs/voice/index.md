@@ -1,23 +1,23 @@
 # Voice Agents
 
-Build real-time voice agents with speech-to-text, text-to-speech, and transient conversation history. Audio streams over WebSocket — no SFU or meeting infrastructure required.
+Build real-time voice agents with speech-to-text, text-to-speech, and configurable conversation history. Audio streams over WebSocket — no SFU or meeting infrastructure required.
 
 ## Overview
 
 `@cloudflare/voice` provides two server-side mixins and matching React hooks:
 
-| Export           | Import                     | Purpose                                                |
-| ---------------- | -------------------------- | ------------------------------------------------------ |
-| `withVoice`      | `@cloudflare/voice`        | Full voice agent: STT, LLM, TTS, and in-memory history |
-| `withVoiceInput` | `@cloudflare/voice`        | STT-only: transcription without response               |
-| `useVoiceAgent`  | `@cloudflare/voice/react`  | React hook for `withVoice` agents                      |
-| `useVoiceInput`  | `@cloudflare/voice/react`  | React hook for `withVoiceInput` agents                 |
-| `VoiceClient`    | `@cloudflare/voice/client` | Framework-agnostic client                              |
+| Export           | Import                     | Purpose                                      |
+| ---------------- | -------------------------- | -------------------------------------------- |
+| `withVoice`      | `@cloudflare/voice`        | Full voice agent: STT, LLM, TTS, and history |
+| `withVoiceInput` | `@cloudflare/voice`        | STT-only: transcription without response     |
+| `useVoiceAgent`  | `@cloudflare/voice/react`  | React hook for `withVoice` agents            |
+| `useVoiceInput`  | `@cloudflare/voice/react`  | React hook for `withVoiceInput` agents       |
+| `VoiceClient`    | `@cloudflare/voice/client` | Framework-agnostic client                    |
 
 Built on Cloudflare Durable Objects, you get:
 
 - **Real-time audio** — mic audio streams as binary WebSocket frames, TTS audio streams back
-- **Transient conversation history** — messages stay in memory for the active agent instance
+- **Configurable conversation history** — transient by default, with opt-in Durable Object SQLite persistence
 - **Streaming TTS** — LLM tokens are sentence-chunked and synthesized concurrently
 - **Interruption handling** — user speech during playback cancels the current response
 - **Continuous STT** — per-call transcriber session, model handles turn detection
@@ -261,13 +261,13 @@ export class MyAgent extends VoiceAgent<Env> {
 
 ### Convenience Methods
 
-| Method                     | Description                                     |
-| -------------------------- | ----------------------------------------------- |
-| `speak(connection, text)`  | Synthesize and send audio to one connection     |
-| `speakAll(text)`           | Synthesize and send audio to all connections    |
-| `forceEndCall(connection)` | Programmatically end a call                     |
-| `saveMessage(role, text)`  | Add a message to in-memory conversation history |
-| `getConversationHistory()` | Retrieve in-memory conversation history         |
+| Method                     | Description                                  |
+| -------------------------- | -------------------------------------------- |
+| `speak(connection, text)`  | Synthesize and send audio to one connection  |
+| `speakAll(text)`           | Synthesize and send audio to all connections |
+| `forceEndCall(connection)` | Programmatically end a call                  |
+| `saveMessage(role, text)`  | Add a message to conversation history        |
+| `getConversationHistory()` | Retrieve conversation history                |
 
 ### Configuration Options
 
@@ -276,9 +276,10 @@ Pass options to `withVoice()` as the second argument:
 ```typescript
 const VoiceAgent = withVoice(Agent, {
   historyLimit: 20, // Max messages loaded for context (default: 20)
+  persistMessages: false, // Persist messages in SQLite (default: false)
   audioFormat: "mp3", // Audio format sent to client (default: "mp3")
   sampleRate: 16000, // Sample rate (Hz) for raw pcm16 payloads (default: 16000)
-  maxMessageCount: 1000 // Max messages kept in memory (default: 1000)
+  maxMessageCount: 1000 // Max retained messages (default: 1000)
 });
 ```
 
@@ -705,23 +706,27 @@ const { metrics } = useVoiceAgent({ agent: "MyAgent" });
 
 ## Conversation History
 
-`withVoice` keeps conversation messages in memory. It does not write transcripts
-to Durable Object SQLite. In `onTurn()`, `context.messages` is a snapshot of the
-completed history before the current transcript. Append `transcript` exactly
-once when constructing the model request.
+`withVoice` keeps conversation messages for the current Durable Object instance
+by default. This transient history is lost when the object is evicted or
+restarted. Voice agents use `keepAlive` to prevent eviction during active calls.
+
+Set `persistMessages: true` to use the original Durable Object SQLite backend.
+Persistent history survives eviction and restart.
 
 ```typescript
-// Get the active instance's recent history
-const history = this.getConversationHistory(20);
-
-// Manually add a message
-this.saveMessage("assistant", "Welcome! How can I help?");
+const VoiceAgent = withVoice(Agent, {
+  persistMessages: true
+});
 ```
 
-History is lost when the Durable Object is evicted or restarted. Voice agents
-use `keepAlive` to prevent eviction during active calls. Persist completed calls
-explicitly from application lifecycle hooks when durable transcripts are
-required.
+In `onTurn()`, `context.messages` is a snapshot of the completed history before
+the current transcript. Append `transcript` exactly once when constructing the
+model request.
+
+```typescript
+const history = this.getConversationHistory(20);
+this.saveMessage("assistant", "Welcome! How can I help?");
+```
 
 ## Examples
 

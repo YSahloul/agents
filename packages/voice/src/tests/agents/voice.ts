@@ -479,6 +479,7 @@ const Pcm24kVoiceBase = withVoice(Agent, {
   audioFormat: "pcm16",
   sampleRate: 24000
 });
+const PersistentVoiceBase = withVoice(Agent, { persistMessages: true });
 
 /**
  * Test VoiceAgent with continuous transcriber.
@@ -861,6 +862,8 @@ export class TestVoiceAgent extends VoiceBase {
     return [...this.#audioTransport.events];
   }
 }
+/** VoiceAgent fixture with durable message persistence enabled. */
+export class TestPersistentVoiceAgent extends PersistentVoiceBase {}
 
 /**
  * Test VoiceAgent that returns empty strings from onTurn.

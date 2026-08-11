@@ -16,7 +16,7 @@ Pick the base class that matches what you are building. They share the same Dura
 | Stateful backend logic, real-time sync, custom protocols       | [`Agent`](./agent-class.md)                                                        | The core class: state, WebSockets, scheduling, SQL, and sub-agents. No opinions about chat or LLMs.                    |
 | A chat UI where you own the loop, the stream, and the response | [`AIChatAgent`](./chat-agents.md)                                                  | A thin chat-protocol adapter for `useAgentChat`. Bring your own agentic loop and custom streaming.                     |
 | A durable, general-purpose reasoning agent                     | [`Think`](https://github.com/cloudflare/agents/blob/main/docs/think/index.md)      | Opinionated runtime: agentic loop, sessions, tools, memory, compaction, recovery, and multi-channel delivery built in. |
-| A voice agent (speech in, speech out)                          | [Voice mixins](https://github.com/cloudflare/agents/blob/main/docs/voice/index.md) | `withVoice` adds real-time STT/TTS, interruption and barge-in, and transient conversation history to an agent.         |
+| A voice agent (speech in, speech out)                          | [Voice mixins](https://github.com/cloudflare/agents/blob/main/docs/voice/index.md) | `withVoice` adds real-time STT/TTS, interruption and barge-in, and configurable conversation history to an agent.      |
 | Durable multi-step processes (not chat)                        | [Workflows](./workflows.md)                                                        | Long-running, retryable step orchestration with Cloudflare Workflows.                                                  |
 
 Not sure? Start with [`Agent`](./agent-class.md) for raw building blocks, or [`Think`](https://github.com/cloudflare/agents/blob/main/docs/think/index.md) if you want a chat or reasoning agent that already handles the hard parts.
@@ -57,7 +57,7 @@ The differentiator is not "we have durable state" — it is what happens when a 
 - [Webhooks](./webhooks.md) - Receiving and sending webhook events
 - [Push Notifications](./push-notifications.md) - Browser push notifications via Web Push API and scheduled delivery
 - TODO: [SMS](./sms.md) - Text message integration (Twilio, etc.)
-- [Voice Agents](https://github.com/cloudflare/agents/blob/main/docs/voice/index.md) - Build voice agents with real-time speech-to-text, text-to-speech, and transient conversation history
+- [Voice Agents](https://github.com/cloudflare/agents/blob/main/docs/voice/index.md) - Build voice agents with real-time speech-to-text, text-to-speech, and configurable conversation history
 - [Chat SDK State](./chat-sdk.md) - Store Chat SDK subscriptions, locks, queues, and history in Agents sub-agents
 - TODO: [Messengers](./messengers.md) - Slack, Discord, Telegram, and other chat platforms
 

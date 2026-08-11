@@ -2,6 +2,6 @@
 "@cloudflare/voice": minor
 ---
 
-Keep `withVoice` conversation history in memory instead of automatically writing transcripts to Durable Object SQLite.
+Make `withVoice` conversation history transient by default while preserving the original Durable Object SQLite behavior behind `persistMessages: true`.
 
-Confirmed user and assistant messages remain available through `context.messages`, `saveMessage()`, and `getConversationHistory()` for the active agent instance. History is cleared by Durable Object eviction or restart. Applications that require durable call records must persist them explicitly from their lifecycle hooks.
+Confirmed user and assistant messages remain available through `context.messages`, `saveMessage()`, and `getConversationHistory()`. With the default `persistMessages: false`, history exists only for the current Durable Object instance. Set `persistMessages: true` when messages must survive eviction and restart.

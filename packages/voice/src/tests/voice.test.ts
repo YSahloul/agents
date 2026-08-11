@@ -3,7 +3,7 @@
  *
  * Tests cover: voice protocol, continuous STT pipeline flow,
  * multi-turn conversation, interruption handling (session survives),
- * text messages, in-memory conversation history, and beforeCallStart.
+ * text messages, transient conversation history, and beforeCallStart.
  */
 import { env } from "cloudflare:workers";
 import { createExecutionContext, runInDurableObject } from "cloudflare:test";

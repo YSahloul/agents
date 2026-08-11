@@ -22,7 +22,7 @@ npm install @cloudflare/voice
 
 ## Server: full voice agent (`withVoice`)
 
-Adds the complete voice pipeline: continuous STT, LLM turn handling, streaming TTS, interruption, and in-memory conversation history. LLM tokens stream straight into the TTS provider so speech can begin before the response completes, and speech start clears active LLM, TTS, and playback work for barge-in.
+Adds the complete voice pipeline: continuous STT, LLM turn handling, streaming TTS, interruption, and conversation history that is transient by default. LLM tokens stream straight into the TTS provider so speech can begin before the response completes, and speech start clears active LLM, TTS, and playback work for barge-in.
 
 ```typescript
 import { Agent } from "agents";
@@ -64,7 +64,17 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
 }
 ```
 
-`context.messages` contains completed in-memory conversation history before the current transcript. Append `transcript` exactly once when constructing the LLM request. During speculative turns, `onTurn()` runs before confirmation adds the current transcript to history, so `context.messages` is the authoritative snapshot for the request.
+`context.messages` contains completed conversation history before the current transcript. Append `transcript` exactly once when constructing the LLM request. During speculative turns, `onTurn()` runs before confirmation adds the current transcript to history, so `context.messages` is the authoritative snapshot for the request.
+
+Messages exist only for the current Durable Object instance by default. Enable
+the original SQLite-backed behavior when messages must survive eviction and
+restart:
+
+```typescript
+const VoiceAgent = withVoice(Agent, {
+  persistMessages: true
+});
+```
 
 ### Provider properties
 
@@ -98,8 +108,8 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
 - `speak(connection, text)` -- synthesize and send audio to one connection
 - `speakAll(text)` -- synthesize and send audio to all connections
 - `forceEndCall(connection)` -- programmatically end a call
-- `saveMessage(role, content)` -- add a message to in-memory conversation history
-- `getConversationHistory()` -- retrieve in-memory conversation history
+- `saveMessage(role, content)` -- add a message to conversation history
+- `getConversationHistory()` -- retrieve conversation history
 
 ## Bidirectional WebRTC audio (`withSFUVoice`)
 
