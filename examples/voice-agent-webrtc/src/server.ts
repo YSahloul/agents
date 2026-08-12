@@ -9,16 +9,10 @@ import {
   WorkersAIFluxSTT,
   WorkersAIRealtimeTTS,
   type SFUConfig,
-  type StreamingTTSProvider,
-  type TTSProvider,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { streamText, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
-import {
-  createElevenLabsVoiceTTS,
-  getMissingTtsProviderKey
-} from "./tts-providers";
 
 /** The catalog marks reasoning models with a `reasoning: true` property
  * (observed on GLM, Kimi, DeepSeek-R1, gpt-oss, Qwen3, Gemma 4, Nemotron).
@@ -74,16 +68,12 @@ If the user sounds upset or asks you to stop, drop the roast and respond support
 Never narrate actions, use stage directions, write emoji, or mention being an AI.`;
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  tts: TTSProvider & Partial<StreamingTTSProvider> = new WorkersAIRealtimeTTS(
-    this.env.AI,
-    {
-      model: "@cf/deepgram/aura-2-en",
-      speaker: "draco",
-      encoding: "linear16",
-      sampleRate: 24000
-    }
-  );
-  readonly #auraTts = this.tts;
+  tts = new WorkersAIRealtimeTTS(this.env.AI, {
+    model: "@cf/deepgram/aura-2-en",
+    speaker: "draco",
+    encoding: "linear16",
+    sampleRate: 24000
+  });
   transcriber = new WorkersAIFluxSTT(this.env.AI, {
     eotThreshold: 0.7,
     eagerEotThreshold: 0.7
@@ -114,12 +104,6 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   #greetingPlaying = false;
 
   beforeCallStart(connection: Connection): boolean {
-    const missingKey = getMissingTtsProviderKey(connection, this.env);
-    if (missingKey) {
-      connection.send(JSON.stringify({ type: "error", message: missingKey }));
-      return false;
-    }
-
     if (this.#activeSpeakerId && this.#activeSpeakerId !== connection.id) {
       connection.send(
         JSON.stringify({
@@ -130,7 +114,6 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
       );
       return false;
     }
-    this.tts = createElevenLabsVoiceTTS(connection, this.env) ?? this.#auraTts;
     this.#activeSpeakerId = connection.id;
     return true;
   }
