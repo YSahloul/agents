@@ -589,7 +589,9 @@ export class TestVoiceAgent extends VoiceBase {
       if (context.signal.aborted) {
         resolve();
       } else {
-        context.signal.addEventListener("abort", resolve, { once: true });
+        context.signal.addEventListener("abort", () => resolve(), {
+          once: true
+        });
       }
       await promise;
     }

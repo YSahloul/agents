@@ -43,14 +43,26 @@ function parseEvents(text) {
     let esc = false;
     for (; i < text.length; i++) {
       const c = text[i];
-      if (esc) { esc = false; continue; }
-      if (c === "\\") { esc = true; continue; }
-      if (c === '"') { inStr = !inStr; continue; }
+      if (esc) {
+        esc = false;
+        continue;
+      }
+      if (c === "\\") {
+        esc = true;
+        continue;
+      }
+      if (c === '"') {
+        inStr = !inStr;
+        continue;
+      }
       if (inStr) continue;
       if (c === "{") depth++;
       else if (c === "}") {
         depth--;
-        if (depth === 0) { i++; break; }
+        if (depth === 0) {
+          i++;
+          break;
+        }
       }
     }
     try {
@@ -88,13 +100,25 @@ function collect(events) {
         rows.push({ ts: at, kind: "trace", trace: parts[1] });
       } else if (head.startsWith("[SignalWireAdapter]")) {
         if (head.includes("duck")) continue; // per-frame noise
-        rows.push({ ts: at, kind: "adapter", text: [head, ...parts.slice(1)]
-          .map((p) => (typeof p === "object" ? JSON.stringify(p) : String(p)))
-          .join(" ") });
-      } else if (entry.level === "error" || head.includes("error") || head.includes("Error")) {
-        rows.push({ ts: at, kind: "error", text: parts
-          .map((p) => (typeof p === "object" ? JSON.stringify(p) : String(p)))
-          .join(" ") });
+        rows.push({
+          ts: at,
+          kind: "adapter",
+          text: [head, ...parts.slice(1)]
+            .map((p) => (typeof p === "object" ? JSON.stringify(p) : String(p)))
+            .join(" ")
+        });
+      } else if (
+        entry.level === "error" ||
+        head.includes("error") ||
+        head.includes("Error")
+      ) {
+        rows.push({
+          ts: at,
+          kind: "error",
+          text: parts
+            .map((p) => (typeof p === "object" ? JSON.stringify(p) : String(p)))
+            .join(" ")
+        });
       }
     }
   }
@@ -147,13 +171,19 @@ function printCall(call, index) {
           break;
         case "onTurn_call":
           turnStart = r.ts;
-          console.log(`${rel}  turn start (history: ${t.history?.length ?? 0} msgs)`);
+          console.log(
+            `${rel}  turn start (history: ${t.history?.length ?? 0} msgs)`
+          );
           break;
         case "model_first_delta":
-          console.log(`${rel}    model first token   ${t.elapsedMs ?? "?"}ms into turn`);
+          console.log(
+            `${rel}    model first token   ${t.elapsedMs ?? "?"}ms into turn`
+          );
           break;
         case "tts_sentence":
-          console.log(`${rel}    tts synth ${String(t.synthMs).padStart(5)}ms  "${t.text}"`);
+          console.log(
+            `${rel}    tts synth ${String(t.synthMs).padStart(5)}ms  "${t.text}"`
+          );
           break;
         case "tts_speak_sent":
           console.log(`${rel}    tts speak "${t.text}"`);
@@ -195,8 +225,10 @@ function printCall(call, index) {
     }
 
     if (r.kind === "adapter") {
-      if (r.text.includes("BARGE-IN")) console.log(`${rel}  ⟲ carrier barge-in`);
-      else if (r.text.includes("GATE RELEASED")) continue; // status echo, low value
+      if (r.text.includes("BARGE-IN"))
+        console.log(`${rel}  ⟲ carrier barge-in`);
+      else if (r.text.includes("GATE RELEASED"))
+        continue; // status echo, low value
       else console.log(`${rel}  ${r.text}`);
       continue;
     }
