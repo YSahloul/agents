@@ -138,6 +138,7 @@ describe("SFUVoiceTransport", () => {
     });
 
     const ttsSocket = upgrade(transport, "/voice/tts/subscribe");
+    const primedAudio = nextSocketMessage(ttsSocket);
     await transport.start("call", (audio) => received.push(audio));
 
     const publish = await transport.handleHttpRequest(
@@ -147,6 +148,9 @@ describe("SFUVoiceTransport", () => {
       )
     );
     expect(publish?.status).toBe(200);
+    expect(
+      new Uint8Array(extractPayloadFromProtobuf(await primedAudio)!)
+    ).toEqual(constantStereoFrame(0));
     const publishBody = (await publish!.json()) as { trackName: string };
     const ttsAdapterCall = calls.find((call) =>
       call.path.endsWith("/adapters/websocket/new")
@@ -578,6 +582,45 @@ describe("SFUVoiceTransport", () => {
     );
     expect(pull?.status).toBe(500);
     expect(await pull?.text()).toContain("TRACK_NOT_FOUND");
+  });
+
+  it("retries a pull while the primed TTS track propagates", async () => {
+    let attempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        attempts++;
+        return Response.json({
+          tracks:
+            attempts < 3
+              ? [{ errorCode: "empty_track_error" }]
+              : [{ trackName: "tts-track" }]
+        });
+      })
+    );
+    const transport = new SFUVoiceTransport({
+      config: CONFIG,
+      loadState: async () => ({
+        tts: {
+          sessionId: "tts-session",
+          adapterId: "tts-adapter",
+          trackName: "tts-track"
+        },
+        stt: {
+          sessionId: "rtc-session",
+          trackName: "mic-track",
+          callbackUrl: "wss://example.com/callback"
+        }
+      })
+    });
+
+    const pullPromise = transport.handleHttpRequest(
+      new Request("https://example.com/voice/rtc/pull", { method: "POST" })
+    );
+    await vi.advanceTimersByTimeAsync(60);
+
+    expect((await pullPromise)?.status).toBe(200);
+    expect(attempts).toBe(3);
   });
 
   it("rejects callback timeouts and a second active connection", async () => {

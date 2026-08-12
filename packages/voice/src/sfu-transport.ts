@@ -334,6 +334,11 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
 
       try {
         await this.#waitForTtsSocket(5_000);
+        // Realtime cannot pull a WebSocket-ingest track until it has received
+        // media. Prime it with one silent 20 ms frame before the browser pulls.
+        this.#requireTtsSocket().send(
+          encodePayloadToProtobuf(new Uint8Array(FRAME_BYTES))
+        );
         return Response.json({
           ...response,
           sessionId: firstTrack.sessionId,
@@ -410,24 +415,30 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
       return new Response("RTC session not connected yet", { status: 400 });
     }
 
-    const result = await addSFUTracks(this.#config, state.stt.sessionId, {
-      tracks: [
-        {
-          location: "remote",
-          sessionId: state.tts.sessionId,
-          trackName: state.tts.trackName,
-          kind: "audio"
-        }
-      ]
-    });
-    const response = this.#asResponse(result, "pull TTS track");
-    const firstTrack = this.#firstTrack(response, "pull TTS track");
-    if ("errorCode" in firstTrack) {
+    for (let attempt = 0; ; attempt++) {
+      const result = await addSFUTracks(this.#config, state.stt.sessionId, {
+        tracks: [
+          {
+            location: "remote",
+            sessionId: state.tts.sessionId,
+            trackName: state.tts.trackName,
+            kind: "audio"
+          }
+        ]
+      });
+      const response = this.#asResponse(result, "pull TTS track");
+      const firstTrack = this.#firstTrack(response, "pull TTS track");
+      if (!("errorCode" in firstTrack)) return Response.json(response);
+      if (firstTrack.errorCode === "empty_track_error" && attempt < 4) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, FRAME_INTERVAL_MS * (attempt + 1))
+        );
+        continue;
+      }
       throw new Error(
         `SFU pull TTS track failed: ${String(firstTrack.errorCode)}`
       );
     }
-    return Response.json(response);
   }
 
   async #renegotiateRtc(request: Request): Promise<Response> {
