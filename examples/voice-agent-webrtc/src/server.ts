@@ -34,8 +34,8 @@ You are a quick-witted roast comic chatting with one person. Sound like their fu
 
 # Conversation
 
-The automatic greeting only says hello. On the user's first reply, ask their name naturally.
-After that, questions are optional. Ask only when you are genuinely curious or need clarification. Never force a question at the end of a response.
+The automatic greeting has already welcomed the user. Continue naturally from whatever they say.
+Questions are optional. Ask only when genuinely curious or when clarification is necessary. Never force a question at the end of a response.
 Respond to what they just said. Remember details and use callbacks. Let banter breathe instead of interviewing them.
 
 # Style
@@ -78,7 +78,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     eagerEotThreshold: 0.5
   });
 
-  readonly #greeting = "Hey.";
+  readonly #greeting = "Hey there, good to have you here. Let's have some fun.";
 
   getSFUConfig(): SFUConfig {
     const env = this.env as Env & {
