@@ -487,7 +487,7 @@ describe("VoiceAgent — transcriber readiness", () => {
 
       expect(startupMessages).toContainEqual({
         type: "error",
-        message: "Speech recognition failed to start"
+        message: "Speech recognition failed to start: readiness failed"
       });
       expect(startupMessages.at(-1)).toEqual({
         type: "status",
@@ -539,7 +539,7 @@ describe("VoiceAgent — transcriber readiness", () => {
 
       expect(startupMessages).toContainEqual({
         type: "error",
-        message: "Speech recognition failed to start"
+        message: "Speech recognition failed to start: create session failed"
       });
       expect(startupMessages.at(-1)).toEqual({
         type: "status",
@@ -1754,8 +1754,12 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     await waitForTransportSendCount(ws, 1);
 
     const playbackInterrupt = waitForType(ws, "playback_interrupt");
-    sendJSON(ws, { type: "_emit_eager", text: "real interruption" });
+    ws.send(new ArrayBuffer(1));
     await playbackInterrupt;
+    await waitForMicrotasks();
+    expect(await getMessageCount(ws)).toBe(1);
+
+    sendJSON(ws, { type: "_emit_eager", text: "real interruption" });
     sendJSON(ws, { type: "_emit_end", text: "real interruption" });
     const events = await waitForTransportEventCount(ws, "interrupt", 1);
     const counts = await waitForInterruptCount(ws, 1);
@@ -1772,116 +1776,10 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     recording.stop();
     ws.close();
   });
-
-  it("keeps playing when the phone transcribes the active response", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    sendJSON(ws, { type: "_set_audio_transport", value: true });
-    await waitForAck(ws, "_set_audio_transport");
-    await setTtsMode(ws, "controlled");
-    await startCall(ws);
-    const recording = recordSocket(ws);
-
-    sendJSON(ws, { type: "_emit_end", text: "phone prompt" });
-    await waitForTransportSendCount(ws, 1);
-
-    sendJSON(ws, { type: "_emit_eager", text: "Echo phone prompt" });
-    sendJSON(ws, { type: "_emit_end", text: "Echo phone prompt" });
-    await waitForMicrotasks();
-
-    expect((await getCounts(ws)).interrupt).toBe(0);
-    expect(
-      recording.messages.filter(
-        (message) => message.type === "playback_interrupt"
-      )
-    ).toEqual([]);
-    expect(
-      (await getTransportEvents(ws)).filter((event) => event === "interrupt")
-    ).toEqual([]);
-    expect(await getTurnState(ws)).toEqual({
-      transcripts: ["phone prompt"],
-      abortCount: 0
-    });
-
-    const listening = waitForStatus(ws, "listening");
-    sendJSON(ws, { type: "_release_tts" });
-    await listening;
-    expect(await getMessageCount(ws)).toBe(2);
-
-    recording.stop();
-    ws.close();
-  });
-
-  it("force-interrupts confirmed audio when eager EOT beats cooldown", async () => {
-    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
-    const { ws } = await connectWS(uniquePath());
-    try {
-      await waitForStatus(ws, "idle");
-      sendJSON(ws, { type: "_set_audio_transport", value: true });
-      await waitForAck(ws, "_set_audio_transport");
-      await setTurnMode(ws, "until_abort");
-      await startCall(ws);
-
-      sendJSON(ws, { type: "text_message", text: "first response" });
-      await waitForStatus(ws, "thinking");
-      const firstPlaybackInterrupt = waitForType(ws, "playback_interrupt");
-      sendJSON(ws, { type: "_emit_eager", text: "first interruption" });
-      await firstPlaybackInterrupt;
-      await waitForTransportEventCount(ws, "interrupt", 1);
-      expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
-      sendJSON(ws, { type: "_emit_turn_resumed" });
-      await waitUntilTurnState(ws, (state) => state.abortCount === 2);
-
-      await setTurnMode(ws, "normal");
-      await setTtsMode(ws, "controlled");
-      const recording = recordSocket(ws);
-
-      sendJSON(ws, { type: "_emit_eager", text: "confirmed response" });
-      await waitUntilTurnState(ws, (state) => state.transcripts.length === 3);
-      sendJSON(ws, { type: "_emit_end", text: "confirmed response" });
-      await waitForTransportSendCount(ws, 1);
-
-      const interim = waitForType(ws, "transcript_interim");
-      ws.send(new ArrayBuffer(1));
-      await interim;
-      expect((await getCounts(ws)).interrupt).toBe(1);
-
-      const forcedPlaybackInterrupt = waitForType(ws, "playback_interrupt");
-      sendJSON(ws, { type: "_emit_eager", text: "next draft" });
-      await forcedPlaybackInterrupt;
-      const state = await waitUntilTurnState(
-        ws,
-        (value) => value.transcripts.length === 4
-      );
-      const events = await waitForTransportEventCount(ws, "interrupt", 2);
-      const counts = await waitForInterruptCount(ws, 2);
-
-      expect(state).toEqual({
-        transcripts: [
-          "first response",
-          "first interruption",
-          "confirmed response",
-          "next draft"
-        ],
-        abortCount: 3
-      });
-      expect(counts.interrupt).toBe(2);
-      expect(events.filter((event) => event === "interrupt")).toHaveLength(2);
-      expect(
-        recording.messages.filter(
-          (message) => message.type === "playback_interrupt"
-        )
-      ).toHaveLength(1);
-      recording.stop();
-    } finally {
-      ws.close();
-      now.mockRestore();
-    }
-  });
 });
 
 describe("VoiceAgent — interrupt", () => {
-  it("waits for transcribed speech before aborting an active pipeline", async () => {
+  it("aborts an active pipeline when speech starts", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
 
@@ -1894,11 +1792,11 @@ describe("VoiceAgent — interrupt", () => {
     sendJSON(ws, { type: "text_message", text: "long response" });
     await waitForStatus(ws, "thinking");
 
-    ws.send(new ArrayBuffer(5000));
-    await waitForType(ws, "transcript_interim");
-    expect((await getCounts(ws)).interrupt).toBe(0);
-
     const playbackInterrupt = waitForType(ws, "playback_interrupt");
+    ws.send(new ArrayBuffer(5000));
+    expect(await playbackInterrupt).toEqual({ type: "playback_interrupt" });
+    expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
+
     const transcript = waitForMessageMatching(
       ws,
       (message) =>
@@ -1911,8 +1809,6 @@ describe("VoiceAgent — interrupt", () => {
       ws.send(new ArrayBuffer(5000));
     }
 
-    expect(await playbackInterrupt).toEqual({ type: "playback_interrupt" });
-    expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
     expect(((await transcript) as Record<string, unknown>).text).toBe(
       "utterance 1 (20000 bytes)"
     );
@@ -1920,28 +1816,25 @@ describe("VoiceAgent — interrupt", () => {
     ws.close();
   });
 
-  it("debounces rapid transcript-confirmed barge-in", async () => {
+  it("interrupts each active pipeline without a cooldown", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
-
-    sendJSON(ws, { type: "_set_turn_delay", value: 1000 });
-    await waitForType(ws, "_ack");
-
-    sendJSON(ws, { type: "start_call" });
-    await waitForStatus(ws, "listening");
+    await setTurnMode(ws, "until_abort");
+    await startCall(ws);
 
     sendJSON(ws, { type: "text_message", text: "long response 1" });
     await waitForStatus(ws, "thinking");
-    sendJSON(ws, { type: "_emit_end", text: "first interruption" });
-    await waitForType(ws, "playback_interrupt");
+    const firstInterrupt = waitForType(ws, "playback_interrupt");
+    ws.send(new ArrayBuffer(1));
+    await firstInterrupt;
     expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
 
     sendJSON(ws, { type: "text_message", text: "long response 2" });
     await waitForStatus(ws, "thinking");
-    sendJSON(ws, { type: "_emit_end", text: "second interruption" });
-    await waitForMicrotasks();
-
-    expect((await getCounts(ws)).interrupt).toBe(1);
+    const secondInterrupt = waitForType(ws, "playback_interrupt");
+    ws.send(new ArrayBuffer(1));
+    await secondInterrupt;
+    expect((await waitForInterruptCount(ws, 2)).interrupt).toBe(2);
 
     ws.close();
   });

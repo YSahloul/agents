@@ -168,12 +168,6 @@ type SpeculativeCancelReason =
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
 const DEFAULT_SAMPLE_RATE = 16000;
-/** Minimum time between barge-ins per connection. Without this, a burst of
- * spurious `StartOfTurn` events (background noise, line static, a stray
- * syllable) can abort a turn the instant a new one starts — over and over —
- * so nothing ever gets a chance to finish. StartOfTurn has no confidence or
- * duration floor of its own; this is that floor. */
-const BARGE_IN_COOLDOWN_MS = 750;
 
 // --- Mixin ---
 
@@ -284,12 +278,6 @@ export function withVoice<TBase extends AgentLike>(
     #conversationHistory: Array<{ role: VoiceRole; content: string }> = [];
     // Speculative Flux responses wait for EndOfTurn before entering history.
     #speculativeTurns = new Map<string, SpeculativeTurn>();
-    // Latest generated assistant text per connection, available before the
-    // response reaches conversation history while audio is still playing.
-    #assistantEchoText = new Map<string, string>();
-
-    // Debounces barge-in: see BARGE_IN_COOLDOWN_MS.
-    #lastBargeInAt = new Map<string, number>();
 
     // Current async start_call identity per connection, used to ignore stale readiness.
     #startupTokens = new Map<string, symbol>();
@@ -349,7 +337,6 @@ export function withVoice<TBase extends AgentLike>(
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
         this.#startupTokens.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
-        this.#assistantEchoText.delete(connection.id);
         this.#cm.cleanup(connection.id);
         const transport = this.#audioTransports.get(connection.id);
         if (transport) {
@@ -359,7 +346,6 @@ export function withVoice<TBase extends AgentLike>(
           );
         }
         this.#cancelSpeculativeTurn(connection.id, "connection_closed");
-        this.#lastBargeInAt.delete(connection.id);
         return _onClose?.(connection, ...rest);
       };
 
@@ -467,34 +453,8 @@ export function withVoice<TBase extends AgentLike>(
 
     afterTranscribe(
       transcript: string,
-      connection: Connection
+      _connection: Connection
     ): string | null | Promise<string | null> {
-      const lastAssistant = this.getConversationHistory(1).find(
-        (message) => message.role === "assistant"
-      );
-      const assistantTexts = [
-        this.#assistantEchoText.get(connection.id),
-        lastAssistant?.content
-      ];
-
-      // Check if the transcript is the agent's own TTS looping back.
-      // 1. ≥3 consecutive words match an assistant response → echo.
-      // 2. ≥4 words match and ≥60% of heard words are assistant words → echo.
-      const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-      for (const text of assistantTexts) {
-        const assistant =
-          text
-            ?.toLowerCase()
-            .match(/[\p{L}\p{N}]+/gu)
-            ?.join(" ") ?? "";
-        if (!assistant) continue;
-        if (heard.length >= 3 && assistant.includes(heard.join(" ")))
-          return null;
-        const assistantWords = new Set(assistant.split(" "));
-        const hits = heard.filter((word) => assistantWords.has(word)).length;
-        if (hits >= 4 && hits / heard.length >= 0.6) return null;
-      }
-
       return transcript;
     }
 
@@ -821,11 +781,7 @@ export function withVoice<TBase extends AgentLike>(
             });
           },
           onSpeechStart: () => {
-            const turn = this.#cancelSpeculativeTurn(
-              connection.id,
-              "speech_start"
-            );
-            if (turn?.pipelineStarted) this.#cm.abortPipeline(connection.id);
+            this.#handleBargeIn(connection);
           },
           onEagerUtterance: (transcript: string) => {
             this.#startSpeculativeTurn(connection, transcript);
@@ -913,11 +869,12 @@ export function withVoice<TBase extends AgentLike>(
       startupToken: symbol,
       error: unknown
     ): Promise<void> {
+      const detail = error instanceof Error ? `: ${error.message}` : "";
       await this.#handleStartupFailure(
         connection,
         startupToken,
         error,
-        "Speech recognition failed to start",
+        `Speech recognition failed to start${detail}`,
         "[VoiceAgent] Transcriber startup failed:"
       );
     }
@@ -959,14 +916,11 @@ export function withVoice<TBase extends AgentLike>(
 
     async #handleEndCall(connection: Connection): Promise<void> {
       this.#startupTokens.delete(connection.id);
-      this.#cm.abortPipeline(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "end_call");
-      this.#lastBargeInAt.delete(connection.id);
-      this.#assistantEchoText.delete(connection.id);
+      this.#cm.cleanup(connection.id);
       try {
         await this.#stopAudioTransport(connection.id);
       } finally {
-        this.#cm.cleanup(connection.id);
         this.#releaseKeepAlive(connection.id);
         this.#sendJSON(connection, { type: "status", status: "idle" });
         await this.onCallEnd(connection);
@@ -974,10 +928,6 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     async #handleInterrupt(connection: Connection): Promise<void> {
-      console.log("[VoiceTrace]", {
-        event: "interrupt",
-        connectionId: connection.id
-      });
       this.#cm.abortPipeline(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "interrupt");
       this.#cm.clearAudioBuffer(connection.id);
@@ -991,25 +941,9 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
-    #handleBargeIn(
-      connection: Connection,
-      bypassCooldown = false,
-      cancelSpeculative = true
-    ): boolean {
-      const now = Date.now();
-      const lastBargeInAt = this.#lastBargeInAt.get(connection.id) ?? 0;
-      if (!bypassCooldown && now - lastBargeInAt < BARGE_IN_COOLDOWN_MS) {
-        return false;
-      }
-      if (!this.#cm.abortPipeline(connection.id)) return false;
-      if (cancelSpeculative) {
-        this.#cancelSpeculativeTurn(connection.id, "speech_start");
-      }
-      this.#lastBargeInAt.set(connection.id, now);
-      console.log("[VoiceTrace]", {
-        event: "barge_in",
-        connectionId: connection.id
-      });
+    #handleBargeIn(connection: Connection): void {
+      this.#cancelSpeculativeTurn(connection.id, "speech_start");
+      if (!this.#cm.abortPipeline(connection.id)) return;
       this.#sendJSON(connection, { type: "playback_interrupt" });
       this.#sendJSON(connection, { type: "status", status: "listening" });
       runBackground("barge_in", async () => {
@@ -1021,7 +955,6 @@ export function withVoice<TBase extends AgentLike>(
           await this.onInterrupt(connection);
         }
       });
-      return true;
     }
 
     // --- Internal: text message handling ---
@@ -1173,16 +1106,6 @@ export function withVoice<TBase extends AgentLike>(
           return;
         }
 
-        if (
-          this.#cm.hasActivePipeline(connection.id) &&
-          !this.#handleBargeIn(
-            connection,
-            speculative !== undefined,
-            !speculative
-          )
-        ) {
-          return;
-        }
         signal = this.#cm.createPipelineAbort(connection.id);
         if (speculative) speculative.pipelineStarted = true;
 
@@ -1258,12 +1181,7 @@ export function withVoice<TBase extends AgentLike>(
           signal
         );
 
-        if (signal.aborted) {
-          if (!fullText || fullText.trim().length === 0) return;
-          this.#cm.updateAgentContext(connection.id, fullText);
-          this.saveMessage("assistant", fullText);
-          return;
-        }
+        if (signal.aborted) return;
 
         if (!fullText || fullText.trim().length === 0) {
           console.log("[VoiceTrace]", {
@@ -1345,7 +1263,6 @@ export function withVoice<TBase extends AgentLike>(
       firstSentenceMs: number;
       firstAudioMs: number;
     }> {
-      this.#assistantEchoText.set(connection.id, "");
       if (typeof response === "string") {
         const llmMs = Date.now() - llmStart;
 
@@ -1359,7 +1276,6 @@ export function withVoice<TBase extends AgentLike>(
             firstAudioMs: 0
           };
         }
-        this.#assistantEchoText.set(connection.id, response);
 
         this.#sendJSON(connection, {
           type: "transcript_start",
@@ -1612,7 +1528,6 @@ export function withVoice<TBase extends AgentLike>(
         }
 
         fullText += token;
-        this.#assistantEchoText.set(connection.id, fullText);
         sendAssistantDelta(token);
 
         const sentences = chunker.add(token);

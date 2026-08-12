@@ -550,10 +550,13 @@ class FluxSession implements TranscriberSession {
 
       const ws = (resp as { webSocket?: WebSocket }).webSocket;
       if (!ws) {
-        const error = new Error(
-          "Workers AI Flux STT did not return a WebSocket"
-        );
-        console.error("[FluxSTT] Failed to establish WebSocket connection");
+        let message = "Workers AI Flux STT did not return a WebSocket";
+        if (resp instanceof Response) {
+          const body = await resp.text().catch(() => "");
+          message = `Workers AI Flux STT failed: HTTP ${resp.status}${body ? ` — ${body.slice(0, 500)}` : ""}`;
+        }
+        const error = new Error(message);
+        console.error("[FluxSTT] Failed to establish WebSocket:", error);
         this.#rejectReadiness(error);
         return;
       }

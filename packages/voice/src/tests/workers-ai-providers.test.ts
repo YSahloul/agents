@@ -47,7 +47,7 @@ class MockWebSocket {
 }
 
 class MockAi {
-  mode: "socket" | "throw" | "no_socket" = "socket";
+  mode: "socket" | "throw" | "no_socket" | "error_response" = "socket";
   deferRun = false;
   sockets: MockWebSocket[] = [];
   calls: Array<{
@@ -77,6 +77,16 @@ class MockAi {
     }
     if (this.mode === "throw") throw new Error("run failed");
     if (this.mode === "no_socket") return {};
+    if (this.mode === "error_response") {
+      return new Response(
+        JSON.stringify({
+          name: "AiError",
+          httpCode: 429,
+          message: "Capacity temporarily exceeded"
+        }),
+        { status: 429 }
+      );
+    }
     const webSocket = new MockWebSocket();
     this.sockets.push(webSocket);
     return { webSocket };
@@ -334,6 +344,22 @@ describe("WorkersAIFluxSTT", () => {
 
       await expect(session.waitUntilReady()).rejects.toThrow(
         "Workers AI Flux STT did not return a WebSocket"
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("includes the Workers AI response when Flux returns no WebSocket", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ai = new MockAi();
+    ai.mode = "error_response";
+    try {
+      const session = new WorkersAIFluxSTT(ai).createSession();
+      if (!session.waitUntilReady) throw new Error("expected readiness method");
+
+      await expect(session.waitUntilReady()).rejects.toThrow(
+        'Workers AI Flux STT failed: HTTP 429 — {"name":"AiError","httpCode":429,"message":"Capacity temporarily exceeded"}'
       );
     } finally {
       errorLog.mockRestore();
