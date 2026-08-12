@@ -341,6 +341,15 @@ describe("SFUVoiceAudioInput", () => {
     const start = input.start();
     const peer = await waitForPeer();
 
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith({
+      audio: {
+        sampleRate: 48000,
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
     expect(FakePeerConnection.instances).toHaveLength(1);
     expect(peer.transceiverCalls).toEqual([
       {
