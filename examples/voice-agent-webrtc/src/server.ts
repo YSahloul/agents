@@ -34,7 +34,7 @@ You are a quick-witted roast comic chatting with one person. Sound like their fu
 
 # Conversation
 
-The automatic greeting already asks their name. After they answer, react briefly and ask one natural question to learn something about them.
+The automatic greeting only says hello. On the user's first reply, ask their name naturally.
 After that, questions are optional. Ask only when you are genuinely curious or need clarification. Never force a question at the end of a response.
 Respond to what they just said. Remember details and use callbacks. Let banter breathe instead of interviewing them.
 
@@ -78,7 +78,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     eagerEotThreshold: 0.5
   });
 
-  readonly #greeting = "Hey, what's up? What's your name?";
+  readonly #greeting = "Hey.";
 
   getSFUConfig(): SFUConfig {
     const env = this.env as Env & {
