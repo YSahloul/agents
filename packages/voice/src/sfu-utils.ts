@@ -264,32 +264,18 @@ export function addSFUTracks(
   );
 }
 
-export async function renegotiateSFUSession(
+export function renegotiateSFUSession(
   config: SFUConfig,
   sessionId: string,
-  sdp: string
+  sessionDescription: { type?: string; sdp: string }
 ): Promise<unknown> {
-  const result = await requestSFU(
+  return requestSFU(
     config,
     "renegotiate session",
     `/sessions/${sessionId}/renegotiate`,
     "PUT",
-    { sessionDescription: { type: "offer", sdp } }
+    { sessionDescription }
   );
-  if (
-    typeof result !== "object" ||
-    result === null ||
-    !("sessionDescription" in result) ||
-    typeof result.sessionDescription !== "object" ||
-    result.sessionDescription === null ||
-    !("sdp" in result.sessionDescription) ||
-    typeof result.sessionDescription.sdp !== "string"
-  ) {
-    throw new Error(
-      "SFU renegotiate session response missing sessionDescription.sdp"
-    );
-  }
-  return result;
 }
 
 export function createSFUWebSocketAdapter(

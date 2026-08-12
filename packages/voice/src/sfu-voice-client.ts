@@ -39,11 +39,9 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   readonly #captureMicrophone: SFUVoiceAudioInputOptions["captureMicrophone"];
   readonly #jsonHeaders: Headers;
   #generation = 0;
-  #listenerPeer: RTCPeerConnection | null = null;
-  #microphonePeer: RTCPeerConnection | null = null;
+  #peer: RTCPeerConnection | null = null;
   #microphoneStream: MediaStream | null = null;
   #stopMicrophone: (() => void | Promise<void>) | null = null;
-  #publishedStream: MediaStream | null = null;
   #audioElement: HTMLAudioElement | null = null;
   #analyserContext: AudioContext | null = null;
   #animationFrame: number | null = null;
@@ -67,39 +65,6 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
       await this.#post("tts/publish");
       this.#assertCurrent(generation);
 
-      const listenerPeer = new RTCPeerConnection({
-        iceServers: this.#iceServers
-      });
-      listenerPeer.addTransceiver("audio", { direction: "recvonly" });
-      this.#listenerPeer = listenerPeer;
-
-      const audio = document.createElement("audio");
-      audio.autoplay = true;
-      audio.style.display = "none";
-      document.body.appendChild(audio);
-      this.#audioElement = audio;
-      listenerPeer.ontrack = (event) => {
-        if (
-          generation !== this.#generation ||
-          this.#listenerPeer !== listenerPeer
-        ) {
-          return;
-        }
-        audio.srcObject = event.streams[0] ?? new MediaStream([event.track]);
-        void audio.play().catch((error: unknown) => {
-          console.warn("[SFUVoiceAudioInput] Audio playback failed:", error);
-        });
-      };
-
-      const listenerOffer = await listenerPeer.createOffer();
-      this.#assertCurrent(generation);
-      await listenerPeer.setLocalDescription(listenerOffer);
-      this.#assertCurrent(generation);
-      const ttsAnswer = await this.#connectTts(listenerPeer, listenerOffer);
-      this.#assertCurrent(generation);
-      await listenerPeer.setRemoteDescription(ttsAnswer);
-      this.#assertCurrent(generation);
-
       const capture = this.#captureMicrophone
         ? await this.#captureMicrophone()
         : {
@@ -119,32 +84,78 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
         await capture.stop?.();
         throw new StaleStart();
       }
-      this.#stopMicrophone = capture.stop ?? null;
       this.#microphoneStream = microphoneStream;
-      const publishedStream = await this.#createMicrophoneBridge(
-        microphoneStream,
-        generation
-      );
-      this.#publishedStream = publishedStream;
+      this.#stopMicrophone = capture.stop ?? null;
 
-      const microphonePeer = new RTCPeerConnection({
-        iceServers: this.#iceServers
+      const microphoneTrack = microphoneStream.getAudioTracks()[0];
+      if (!microphoneTrack) {
+        throw new Error("Microphone stream has no audio track");
+      }
+
+      const peer = new RTCPeerConnection({ iceServers: this.#iceServers });
+      this.#peer = peer;
+      const microphoneTransceiver = peer.addTransceiver(microphoneTrack, {
+        direction: "sendonly",
+        streams: [microphoneStream]
       });
-      this.#microphonePeer = microphonePeer;
-      publishedStream
-        .getTracks()
-        .forEach((track) => microphonePeer.addTrack(track, publishedStream));
 
-      const microphoneOffer = await microphonePeer.createOffer();
+      const audio = document.createElement("audio");
+      audio.autoplay = true;
+      audio.style.display = "none";
+      document.body.appendChild(audio);
+      this.#audioElement = audio;
+      peer.ontrack = (event) => {
+        if (generation !== this.#generation || this.#peer !== peer) return;
+        audio.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+        void audio.play().catch((error: unknown) => {
+          console.warn("[SFUVoiceAudioInput] Audio playback failed:", error);
+        });
+      };
+
+      await this.#startAudioLevelAnalysis(microphoneStream, generation);
       this.#assertCurrent(generation);
-      await microphonePeer.setLocalDescription(microphoneOffer);
+
+      const offer = await peer.createOffer();
       this.#assertCurrent(generation);
-      const sttAnswer = await this.#connectStt(microphoneOffer);
+      await peer.setLocalDescription(offer);
       this.#assertCurrent(generation);
-      await microphonePeer.setRemoteDescription(sttAnswer);
+      const microphoneMid = microphoneTransceiver.mid;
+      if (microphoneMid === null) {
+        throw new Error(
+          "Microphone transceiver missing mid after local description"
+        );
+      }
+
+      const connectResponse = await this.#postJSON("rtc/connect", {
+        sessionDescription: offer,
+        microphoneMid
+      });
       this.#assertCurrent(generation);
-      await this.#waitForConnected(microphonePeer, generation);
+      const connectAnswer = this.#requireSessionDescription(
+        connectResponse,
+        "RTC connect"
+      );
+      await peer.setRemoteDescription(connectAnswer);
       this.#assertCurrent(generation);
+
+      await this.#waitForConnected(peer, generation);
+      this.#assertCurrent(generation);
+
+      const pullResponse = await this.#postJSON("rtc/pull", {});
+      this.#assertCurrent(generation);
+      const pullOffer = this.#requirePullOffer(pullResponse);
+      await peer.setRemoteDescription(pullOffer);
+      this.#assertCurrent(generation);
+
+      const answer = await peer.createAnswer();
+      this.#assertCurrent(generation);
+      await peer.setLocalDescription(answer);
+      this.#assertCurrent(generation);
+      await this.#postJSON("rtc/renegotiate", {
+        sessionDescription: answer
+      });
+      this.#assertCurrent(generation);
+
       await this.#post("stt/start-forwarding");
       this.#assertCurrent(generation);
     } catch (error) {
@@ -169,17 +180,13 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
       cancelAnimationFrame(this.#animationFrame);
       this.#animationFrame = null;
     }
-    this.#listenerPeer?.close();
-    this.#listenerPeer = null;
-    this.#microphonePeer?.close();
-    this.#microphonePeer = null;
+    this.#peer?.close();
+    this.#peer = null;
     this.#microphoneStream?.getTracks().forEach((track) => track.stop());
     this.#microphoneStream = null;
     const stopMicrophone = this.#stopMicrophone;
     this.#stopMicrophone = null;
     void Promise.resolve(stopMicrophone?.()).catch(() => {});
-    this.#publishedStream?.getTracks().forEach((track) => track.stop());
-    this.#publishedStream = null;
     void this.#analyserContext?.close().catch(() => {});
     this.#analyserContext = null;
     if (this.#audioElement) {
@@ -196,7 +203,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
 
   setMuted(muted: boolean): void {
     this.#microphoneStream
-      ?.getTracks()
+      ?.getAudioTracks()
       .forEach((track) => (track.enabled = !muted));
   }
 
@@ -213,36 +220,17 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     await audio.setSinkId(deviceId);
   }
 
-  async #connectTts(
-    listenerPeer: RTCPeerConnection,
-    offer: RTCSessionDescriptionInit
-  ): Promise<RTCSessionDescriptionInit> {
-    const response = await this.#postJSON("tts/connect", {
-      sessionDescription: offer
-    });
+  #requirePullOffer(response: SFUResponse): RTCSessionDescriptionInit {
     const description = this.#sessionDescription(response);
-    if (description) return description;
-    if (response.requiresImmediateRenegotiation !== true) {
-      throw new Error("TTS connect response missing sessionDescription.sdp");
+    if (
+      response.requiresImmediateRenegotiation !== true ||
+      description?.type !== "offer"
+    ) {
+      throw new Error(
+        "RTC pull response missing required offer sessionDescription.sdp"
+      );
     }
-
-    const reoffer = await listenerPeer.createOffer();
-    await listenerPeer.setLocalDescription(reoffer);
-    return this.#requireSessionDescription(
-      await this.#postJSON("tts/renegotiate", {
-        sessionDescription: reoffer
-      }),
-      "TTS renegotiate"
-    );
-  }
-
-  async #connectStt(
-    offer: RTCSessionDescriptionInit
-  ): Promise<RTCSessionDescriptionInit> {
-    return this.#requireSessionDescription(
-      await this.#postJSON("stt/connect", { sessionDescription: offer }),
-      "STT connect"
-    );
+    return description;
   }
 
   async #post(operation: string): Promise<Response> {
@@ -306,10 +294,10 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     return { type: type as RTCSdpType, sdp: value.sdp };
   }
 
-  async #createMicrophoneBridge(
+  async #startAudioLevelAnalysis(
     stream: MediaStream,
     generation: number
-  ): Promise<MediaStream> {
+  ): Promise<void> {
     const context = new AudioContext();
     this.#analyserContext = context;
     await context.resume();
@@ -317,10 +305,8 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
 
     const source = context.createMediaStreamSource(stream);
     const analyser = context.createAnalyser();
-    const destination = context.createMediaStreamDestination();
     analyser.fftSize = 2048;
     source.connect(analyser);
-    source.connect(destination);
     const samples = new Float32Array(analyser.fftSize);
 
     const measure = () => {
@@ -332,7 +318,6 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
       this.#animationFrame = requestAnimationFrame(measure);
     };
     this.#animationFrame = requestAnimationFrame(measure);
-    return destination.stream;
   }
 
   #waitForConnected(
@@ -344,7 +329,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         cleanup();
-        reject(new Error("Microphone WebRTC connection timed out"));
+        reject(new Error("SFU WebRTC connection timed out"));
       }, 15_000);
       const cleanup = () => {
         clearTimeout(timeout);
@@ -362,7 +347,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
           peer.connectionState === "closed"
         ) {
           cleanup();
-          reject(new Error("Microphone WebRTC connection failed"));
+          reject(new Error("SFU WebRTC connection failed"));
         }
       };
       peer.addEventListener("connectionstatechange", onStateChange);

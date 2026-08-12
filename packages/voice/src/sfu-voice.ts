@@ -70,9 +70,9 @@ export function withSFUVoice<TBase extends AgentLike>(
           request.method === "POST" &&
           [
             "tts/publish",
-            "tts/connect",
-            "tts/renegotiate",
-            "stt/connect",
+            "rtc/connect",
+            "rtc/pull",
+            "rtc/renegotiate",
             "stt/start-forwarding",
             "stt/stop-forwarding"
           ].some((operation) =>

@@ -1,6 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SFUVoiceAudioInput } from "../sfu-voice-client";
 
+declare global {
+  interface PromiseConstructor {
+    withResolvers<T>(): {
+      promise: Promise<T>;
+      resolve: (value: T | PromiseLike<T>) => void;
+      reject: (reason?: unknown) => void;
+    };
+  }
+}
+
 class FakeTrack {
   enabled = true;
   stopped = false;
@@ -11,10 +21,18 @@ class FakeTrack {
 }
 
 class FakeStream {
-  readonly track = new FakeTrack();
+  readonly track: FakeTrack | null;
+
+  constructor(hasAudio = true) {
+    this.track = hasAudio ? new FakeTrack() : null;
+  }
 
   getTracks(): MediaStreamTrack[] {
-    return [this.track as unknown as MediaStreamTrack];
+    return this.track ? [this.track as unknown as MediaStreamTrack] : [];
+  }
+
+  getAudioTracks(): MediaStreamTrack[] {
+    return this.getTracks();
   }
 }
 
@@ -55,7 +73,6 @@ class FakeAnalyser {
 class FakeAudioContext {
   static instances: FakeAudioContext[] = [];
   readonly analyser = new FakeAnalyser();
-  readonly destination = new FakeStream();
   readonly connections: unknown[] = [];
   resumed = false;
   closed = false;
@@ -78,27 +95,27 @@ class FakeAudioContext {
     } as unknown as MediaStreamAudioSourceNode;
   }
 
-  createMediaStreamDestination(): MediaStreamAudioDestinationNode {
-    return {
-      stream: this.destination as unknown as MediaStream
-    } as MediaStreamAudioDestinationNode;
-  }
-
   async close(): Promise<void> {
     this.closed = true;
   }
 }
 
+type TransceiverCall = {
+  track: MediaStreamTrack;
+  direction?: RTCRtpTransceiverDirection;
+  streams?: MediaStream[];
+};
+
 class FakePeerConnection {
   static instances: FakePeerConnection[] = [];
   static deferFirstOffer = false;
+  static transceiverMid: string | null = "0";
   readonly index: number;
   readonly configuration: RTCConfiguration;
   connectionState: RTCPeerConnectionState = "new";
   ontrack: ((event: RTCTrackEvent) => void) | null = null;
   closed = false;
-  transceiverDirection: RTCRtpTransceiverDirection | null = null;
-  tracks: MediaStreamTrack[] = [];
+  transceiverCalls: TransceiverCall[] = [];
   localDescriptions: RTCSessionDescriptionInit[] = [];
   remoteDescriptions: RTCSessionDescriptionInit[] = [];
   #listeners = new Set<() => void>();
@@ -115,24 +132,28 @@ class FakePeerConnection {
   }
 
   addTransceiver(
-    _trackOrKind: string,
+    track: MediaStreamTrack,
     init?: RTCRtpTransceiverInit
   ): RTCRtpTransceiver {
-    this.transceiverDirection = init?.direction ?? null;
-    return {} as RTCRtpTransceiver;
-  }
-
-  addTrack(track: MediaStreamTrack): RTCRtpSender {
-    this.tracks.push(track);
-    return {} as RTCRtpSender;
+    this.transceiverCalls.push({
+      track,
+      direction: init?.direction,
+      streams: init?.streams
+    });
+    return { mid: FakePeerConnection.transceiverMid } as RTCRtpTransceiver;
   }
 
   async createOffer(): Promise<RTCSessionDescriptionInit> {
     const offer = { type: "offer" as RTCSdpType, sdp: `offer-${this.index}` };
     if (this.index !== 0 || !FakePeerConnection.deferFirstOffer) return offer;
-    return new Promise((resolve) => {
-      this.#resolveOffer = resolve;
-    });
+    const { promise, resolve } =
+      Promise.withResolvers<RTCSessionDescriptionInit>();
+    this.#resolveOffer = resolve;
+    return promise;
+  }
+
+  async createAnswer(): Promise<RTCSessionDescriptionInit> {
+    return { type: "answer", sdp: `answer-${this.index}` };
   }
 
   resolveOffer(): void {
@@ -188,8 +209,10 @@ class FakePeerConnection {
 let stream: FakeStream;
 let audio: FakeAudioElement;
 let requests: string[];
+let requestBodies: unknown[];
 let requestHeaders: Headers[];
 let failOperation: string | null;
+let pullResponse: unknown;
 let animationFrames: Array<FrameRequestCallback | null>;
 const originalMediaDevices = Object.getOwnPropertyDescriptor(
   navigator,
@@ -201,6 +224,7 @@ function operation(input: RequestInfo | URL): string {
     .split("/voice/")
     .at(-1)!;
 }
+
 function mockResponse(body: unknown, status = 200): Response {
   return {
     ok: status >= 200 && status < 300,
@@ -221,30 +245,35 @@ async function waitFor(
   throw new Error(message);
 }
 
-async function waitForPeers(count: number): Promise<void> {
+async function waitForPeer(): Promise<FakePeerConnection> {
   await waitFor(
-    () => FakePeerConnection.instances.length >= count,
-    `Expected ${count} peer connections`
+    () => FakePeerConnection.instances.length === 1,
+    "Expected one peer connection"
   );
-}
-
-async function waitForMicrophonePeer(): Promise<void> {
-  await waitForPeers(2);
+  const peer = FakePeerConnection.instances[0];
   await waitFor(
-    () => FakePeerConnection.instances[1].connectionListenerCount > 0,
-    "Expected microphone connection listener"
+    () => peer.connectionListenerCount > 0,
+    "Expected SFU connection listener"
   );
+  return peer;
 }
 
 beforeEach(() => {
   stream = new FakeStream();
   audio = new FakeAudioElement();
   requests = [];
+  requestBodies = [];
   requestHeaders = [];
   failOperation = null;
+  pullResponse = {
+    requiresImmediateRenegotiation: true,
+    sessionDescription: { type: "offer", sdp: "rtc-pull-offer" },
+    tracks: [{ trackName: "tts-track" }]
+  };
   animationFrames = [];
   FakePeerConnection.instances = [];
   FakePeerConnection.deferFirstOffer = false;
+  FakePeerConnection.transceiverMid = "0";
   FakeAudioContext.instances = [];
 
   vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
@@ -272,15 +301,17 @@ beforeEach(() => {
       const name = operation(input);
       requests.push(name);
       requestHeaders.push(new Headers(init?.headers));
+      requestBodies.push(
+        typeof init?.body === "string" ? JSON.parse(init.body) : undefined
+      );
       if (name === failOperation) return mockResponse("failed", 500);
-      if (name === "tts/connect") {
-        return mockResponse({ requiresImmediateRenegotiation: true });
-      }
-      if (name === "tts/renegotiate" || name === "stt/connect") {
+      if (name === "rtc/connect") {
         return mockResponse({
-          sessionDescription: { type: "answer", sdp: `${name}-answer` }
+          sessionDescription: { type: "answer", sdp: "rtc-connect-answer" }
         });
       }
+      if (name === "rtc/pull") return mockResponse(pullResponse);
+      if (name === "rtc/renegotiate") return mockResponse({});
       return mockResponse("ok");
     })
   );
@@ -297,7 +328,7 @@ afterEach(() => {
 });
 
 describe("SFUVoiceAudioInput", () => {
-  it("negotiates in order, plays remote audio, reports RMS, mutes, and selects a sink", async () => {
+  it("uses one peer for the original microphone and remote TTS", async () => {
     const input = new SFUVoiceAudioInput({
       endpoint: "/agent/alice/voice/",
       headers: { Authorization: "Bearer mobile-token" }
@@ -308,45 +339,53 @@ describe("SFUVoiceAudioInput", () => {
     input.onAudioData = audioData;
 
     const start = input.start();
-    await waitForMicrophonePeer();
-    expect(FakePeerConnection.instances[0].transceiverDirection).toBe(
-      "recvonly"
-    );
-    expect(FakePeerConnection.instances[1].tracks).toHaveLength(1);
-    const microphoneContext = FakeAudioContext.instances[0];
-    expect(microphoneContext.resumed).toBe(true);
-    expect(microphoneContext.connections[0]).toBe(microphoneContext.analyser);
-    expect(
-      (microphoneContext.connections[1] as MediaStreamAudioDestinationNode)
-        .stream
-    ).toBe(microphoneContext.destination);
-    expect(FakePeerConnection.instances[1].tracks[0]).toBe(
-      microphoneContext.destination.track
-    );
-    expect(FakePeerConnection.instances[1].tracks[0]).not.toBe(stream.track);
+    const peer = await waitForPeer();
+
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(peer.transceiverCalls).toEqual([
+      {
+        track: stream.track,
+        direction: "sendonly",
+        streams: [stream]
+      }
+    ]);
+    const context = FakeAudioContext.instances[0];
+    expect(context.resumed).toBe(true);
+    expect(context.connections).toEqual([context.analyser]);
+    expect(requests).toEqual(["tts/publish", "rtc/connect"]);
+    expect(requestBodies[1]).toEqual({
+      sessionDescription: { type: "offer", sdp: "offer-0" },
+      microphoneMid: "0"
+    });
+
+    peer.connect();
+    await start;
+
     expect(requests).toEqual([
       "tts/publish",
-      "tts/connect",
-      "tts/renegotiate",
-      "stt/connect"
+      "rtc/connect",
+      "rtc/pull",
+      "rtc/renegotiate",
+      "stt/start-forwarding"
     ]);
     expect(
       requestHeaders.every(
         (headers) => headers.get("Authorization") === "Bearer mobile-token"
       )
     ).toBe(true);
-
-    FakePeerConnection.instances[1].connect();
-    await start;
-    expect(requests).toEqual([
-      "tts/publish",
-      "tts/connect",
-      "tts/renegotiate",
-      "stt/connect",
-      "stt/start-forwarding"
+    expect(peer.remoteDescriptions).toEqual([
+      { type: "answer", sdp: "rtc-connect-answer" },
+      { type: "offer", sdp: "rtc-pull-offer" }
     ]);
+    expect(peer.localDescriptions).toEqual([
+      { type: "offer", sdp: "offer-0" },
+      { type: "answer", sdp: "answer-0" }
+    ]);
+    expect(requestBodies[3]).toEqual({
+      sessionDescription: { type: "answer", sdp: "answer-0" }
+    });
 
-    FakePeerConnection.instances[0].emitTrack(stream as unknown as MediaStream);
+    peer.emitTrack(stream as unknown as MediaStream);
     await Promise.resolve();
     expect(audio.srcObject).toBe(stream);
     expect(audio.played).toBe(1);
@@ -356,19 +395,16 @@ describe("SFUVoiceAudioInput", () => {
     expect(audioData).not.toHaveBeenCalled();
 
     input.setMuted(true);
-    expect(stream.track.enabled).toBe(false);
+    expect(stream.track?.enabled).toBe(false);
     input.setMuted(false);
-    expect(stream.track.enabled).toBe(true);
+    expect(stream.track?.enabled).toBe(true);
     await input.setOutputDevice("speaker-1");
     expect(audio.sinkIds).toEqual(["speaker-1"]);
 
     input.stop();
-    expect(FakePeerConnection.instances.every((peer) => peer.closed)).toBe(
-      true
-    );
-    expect(stream.track.stopped).toBe(true);
-    expect(microphoneContext.destination.track.stopped).toBe(true);
-    expect(microphoneContext.closed).toBe(true);
+    expect(peer.closed).toBe(true);
+    expect(stream.track?.stopped).toBe(true);
+    expect(context.closed).toBe(true);
     expect(audio.paused).toBe(true);
     expect(audio.removed).toBe(true);
     expect(requests.at(-1)).toBe("stt/stop-forwarding");
@@ -376,15 +412,18 @@ describe("SFUVoiceAudioInput", () => {
 
   it("uses and stops a supplied platform microphone", async () => {
     const stop = vi.fn();
-    const captureMicrophone = vi.fn(async () => ({ stream, stop }));
+    const captureMicrophone = vi.fn(async () => ({
+      stream: stream as unknown as MediaStream,
+      stop
+    }));
     const input = new SFUVoiceAudioInput({
       endpoint: "/voice",
       captureMicrophone
     });
 
     const start = input.start();
-    await waitForMicrophonePeer();
-    FakePeerConnection.instances[1].connect();
+    const peer = await waitForPeer();
+    peer.connect();
     await start;
     input.stop();
     await Promise.resolve();
@@ -393,13 +432,85 @@ describe("SFUVoiceAudioInput", () => {
     expect(stop).toHaveBeenCalledOnce();
   });
 
+  it("cleans a late capture without replacing the current microphone", async () => {
+    const lateStream = new FakeStream();
+    const currentStream = new FakeStream();
+    const lateStop = vi.fn();
+    const currentStop = vi.fn();
+    const { promise: lateCapture, resolve: resolveLate } =
+      Promise.withResolvers<{
+        stream: MediaStream;
+        stop: () => void;
+      }>();
+    const captureMicrophone = vi
+      .fn<() => Promise<{ stream: MediaStream; stop: () => void }>>()
+      .mockReturnValueOnce(lateCapture)
+      .mockResolvedValueOnce({
+        stream: currentStream as unknown as MediaStream,
+        stop: currentStop
+      });
+    const input = new SFUVoiceAudioInput({
+      endpoint: "/voice",
+      captureMicrophone
+    });
+
+    const firstStart = input.start();
+    await waitFor(
+      () => captureMicrophone.mock.calls.length === 1,
+      "Expected deferred capture"
+    );
+    const secondStart = input.start();
+    const peer = await waitForPeer();
+    peer.connect();
+    await secondStart;
+
+    resolveLate({
+      stream: lateStream as unknown as MediaStream,
+      stop: lateStop
+    });
+    await firstStart;
+
+    expect(lateStream.track?.stopped).toBe(true);
+    expect(lateStop).toHaveBeenCalledOnce();
+    expect(currentStream.track?.stopped).toBe(false);
+    expect(currentStop).not.toHaveBeenCalled();
+    input.setMuted(true);
+    expect(currentStream.track?.enabled).toBe(false);
+
+    input.stop();
+    await Promise.resolve();
+    expect(currentStop).toHaveBeenCalledOnce();
+  });
+
+  it("cleans capture when the microphone stream has no audio track", async () => {
+    const emptyStream = new FakeStream(false);
+    const stop = vi.fn();
+    const input = new SFUVoiceAudioInput({
+      endpoint: "/voice",
+      captureMicrophone: async () => ({
+        stream: emptyStream as unknown as MediaStream,
+        stop
+      })
+    });
+
+    await expect(input.start()).rejects.toThrow(
+      "Microphone stream has no audio track"
+    );
+    await Promise.resolve();
+
+    expect(stop).toHaveBeenCalledOnce();
+    expect(FakePeerConnection.instances).toHaveLength(0);
+    expect(requests.at(-1)).toBe("stt/stop-forwarding");
+  });
+
   it("rolls back a failed start", async () => {
-    failOperation = "tts/connect";
+    failOperation = "rtc/connect";
     const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
     input.onAudioLevel = () => {};
 
-    await expect(input.start()).rejects.toThrow("tts/connect failed (500)");
+    await expect(input.start()).rejects.toThrow("rtc/connect failed (500)");
     expect(FakePeerConnection.instances[0].closed).toBe(true);
+    expect(stream.track?.stopped).toBe(true);
     expect(audio.removed).toBe(true);
     expect(input.onAudioLevel).toBeNull();
     expect(requests.at(-1)).toBe("stt/stop-forwarding");
@@ -409,7 +520,10 @@ describe("SFUVoiceAudioInput", () => {
     FakePeerConnection.deferFirstOffer = true;
     const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
     const start = input.start();
-    await waitForPeers(1);
+    await waitFor(
+      () => FakePeerConnection.instances.length === 1,
+      "Expected peer connection"
+    );
 
     input.stop();
     input.stop();
@@ -420,47 +534,81 @@ describe("SFUVoiceAudioInput", () => {
     expect(
       requests.filter((name) => name === "stt/stop-forwarding")
     ).toHaveLength(1);
-    expect(requests).not.toContain("tts/connect");
+    expect(requests).not.toContain("rtc/connect");
   });
 
-  it("rolls back when the microphone connection fails", async () => {
+  it("rolls back when the SFU connection fails", async () => {
     const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
     const start = input.start();
     const rejected = expect(start).rejects.toThrow(
-      "Microphone WebRTC connection failed"
+      "SFU WebRTC connection failed"
     );
-    await waitForMicrophonePeer();
-    FakePeerConnection.instances[1].fail();
+    const peer = await waitForPeer();
+    peer.fail();
 
     await rejected;
-    expect(FakePeerConnection.instances.every((peer) => peer.closed)).toBe(
-      true
-    );
-    expect(stream.track.stopped).toBe(true);
+    expect(peer.closed).toBe(true);
+    expect(stream.track?.stopped).toBe(true);
   });
 
-  it("times out a microphone connection after 15 seconds", async () => {
+  it("times out the SFU connection after 15 seconds", async () => {
     vi.useFakeTimers();
     const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
     const start = input.start();
     const rejected = expect(start).rejects.toThrow(
-      "Microphone WebRTC connection timed out"
+      "SFU WebRTC connection timed out"
     );
-    await waitForMicrophonePeer();
+    await waitForPeer();
     await vi.advanceTimersByTimeAsync(15_000);
 
     await rejected;
-    expect(FakePeerConnection.instances.every((peer) => peer.closed)).toBe(
-      true
+    expect(FakePeerConnection.instances[0].closed).toBe(true);
+  });
+
+  it.each([
+    [
+      "missing renegotiation flag",
+      { sessionDescription: { type: "offer", sdp: "pull-offer" } }
+    ],
+    [
+      "non-offer description",
+      {
+        requiresImmediateRenegotiation: true,
+        sessionDescription: { type: "answer", sdp: "pull-answer" }
+      }
+    ]
+  ])("rejects a pull response with %s", async (_name, response) => {
+    pullResponse = response;
+    const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
+    const start = input.start();
+    const rejected = expect(start).rejects.toThrow(
+      "RTC pull response missing required offer sessionDescription.sdp"
     );
+    const peer = await waitForPeer();
+    peer.connect();
+
+    await rejected;
+    expect(requests).not.toContain("rtc/renegotiate");
+    expect(requests).not.toContain("stt/start-forwarding");
+    expect(peer.closed).toBe(true);
+  });
+
+  it("rejects a missing microphone transceiver mid", async () => {
+    FakePeerConnection.transceiverMid = null;
+    const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
+
+    await expect(input.start()).rejects.toThrow(
+      "Microphone transceiver missing mid after local description"
+    );
+    expect(requests).not.toContain("rtc/connect");
   });
 
   it("throws NotSupportedError only for non-default sinks without setSinkId", async () => {
     Object.defineProperty(audio, "setSinkId", { value: undefined });
     const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
     const start = input.start();
-    await waitForMicrophonePeer();
-    FakePeerConnection.instances[1].connect();
+    const peer = await waitForPeer();
+    peer.connect();
     await start;
 
     await expect(input.setOutputDevice("default")).resolves.toBeUndefined();

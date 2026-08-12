@@ -91,9 +91,9 @@ describe("withSFUVoice", () => {
 
     const requests = [
       post("/voice/tts/publish"),
-      post("/voice/tts/connect", {}),
-      post("/voice/tts/renegotiate", {}),
-      post("/voice/stt/connect", {}),
+      post("/voice/rtc/connect", {}),
+      post("/voice/rtc/pull"),
+      post("/voice/rtc/renegotiate", {}),
       post("/voice/stt/start-forwarding"),
       post("/voice/stt/stop-forwarding")
     ];
@@ -167,7 +167,7 @@ describe("withSFUVoice", () => {
     const stub = missingConfigStub();
     await expect(
       runInDurableObject(stub, (instance) =>
-        instance.onRequest(post("/voice/stt/connect", {}))
+        instance.onRequest(post("/voice/rtc/connect", {}))
       )
     ).rejects.toThrow("SFU voice agent must implement getSFUConfig()");
     await expect(

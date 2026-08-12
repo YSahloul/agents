@@ -23,18 +23,29 @@ function createSfuFetchMock() {
         return Response.json({ sessionId: `session-${session}` });
       }
       if (path.endsWith("/tracks/new")) {
-        if (
+        const tracks =
           typeof body === "object" &&
           body !== null &&
-          "autoDiscover" in body
+          "tracks" in body &&
+          Array.isArray(body.tracks)
+            ? body.tracks
+            : [];
+        const firstTrack = tracks[0];
+        if (
+          typeof firstTrack === "object" &&
+          firstTrack !== null &&
+          "location" in firstTrack &&
+          firstTrack.location === "local"
         ) {
           return Response.json({
-            sessionDescription: { type: "answer", sdp: "stt-answer" },
-            tracks: [{ kind: "audio", trackName: "mic-track" }]
+            sessionDescription: { type: "answer", sdp: "rtc-answer" },
+            tracks
           });
         }
         return Response.json({
-          sessionDescription: { type: "answer", sdp: "tts-answer" }
+          requiresImmediateRenegotiation: true,
+          sessionDescription: { type: "offer", sdp: "rtc-pull-offer" },
+          tracks
         });
       }
       if (path.endsWith("/adapters/websocket/new")) {
@@ -57,11 +68,7 @@ function createSfuFetchMock() {
       if (path.endsWith("/adapters/websocket/close")) {
         return Response.json({});
       }
-      if (path.endsWith("/renegotiate")) {
-        return Response.json({
-          sessionDescription: { type: "answer", sdp: "renegotiated" }
-        });
-      }
+      if (path.endsWith("/renegotiate")) return Response.json({});
       return new Response("missing mock", { status: 500 });
     }
   );
@@ -99,6 +106,18 @@ function constantStereoFrame(value: number): Uint8Array {
   return new Uint8Array(samples.buffer);
 }
 
+function tracksFromBody(body: unknown): unknown[] {
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    !("tracks" in body) ||
+    !Array.isArray(body.tracks)
+  ) {
+    return [];
+  }
+  return body.tracks;
+}
+
 describe("SFUVoiceTransport", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => {
@@ -106,7 +125,7 @@ describe("SFUVoiceTransport", () => {
     vi.unstubAllGlobals();
   });
 
-  it("publishes, connects, forwards, and converts audio in both directions", async () => {
+  it("uses one browser session for microphone, TTS, and STT forwarding", async () => {
     const { calls, fetchMock } = createSfuFetchMock();
     vi.stubGlobal("fetch", fetchMock);
     const saved: Array<SFUVoiceState | null> = [];
@@ -145,34 +164,102 @@ describe("SFUVoiceTransport", () => {
       ]
     });
 
-    const ttsConnect = await transport.handleHttpRequest(
+    const connect = await transport.handleHttpRequest(
       new Request(
-        "https://example.com/agents/my-agent/alice/voice/tts/connect",
+        "https://example.com/agents/my-agent/alice/voice/rtc/connect",
         {
           method: "POST",
           body: JSON.stringify({
-            sessionDescription: { type: "offer", sdp: "listener-offer" }
+            sessionDescription: { type: "offer", sdp: "browser-offer" },
+            microphoneMid: "0"
           })
         }
       )
     );
-    expect(ttsConnect?.status).toBe(200);
+    expect(connect?.status).toBe(200);
 
-    const sttConnect = await transport.handleHttpRequest(
+    const pull = await transport.handleHttpRequest(
+      new Request("https://example.com/agents/my-agent/alice/voice/rtc/pull", {
+        method: "POST"
+      })
+    );
+    expect(pull?.status).toBe(200);
+    await expect(pull?.json()).resolves.toMatchObject({
+      requiresImmediateRenegotiation: true,
+      sessionDescription: { type: "offer", sdp: "rtc-pull-offer" }
+    });
+
+    const renegotiate = await transport.handleHttpRequest(
       new Request(
-        "https://example.com/agents/my-agent/alice/voice/stt/connect",
+        "https://example.com/agents/my-agent/alice/voice/rtc/renegotiate",
         {
           method: "POST",
           body: JSON.stringify({
-            sessionDescription: { type: "offer", sdp: "mic-offer" }
+            sessionDescription: { type: "answer", sdp: "browser-answer" }
           })
         }
       )
     );
-    expect(sttConnect?.status).toBe(200);
-    expect(saved.at(-1)?.stt?.callbackUrl).toBe(
-      "wss://example.com/agents/my-agent/alice/voice/stt/sfu-subscribe"
+    expect(renegotiate?.status).toBe(200);
+    await expect(renegotiate?.json()).resolves.toEqual({});
+
+    const sessionCalls = calls.filter((call) =>
+      call.path.endsWith("/sessions/new")
     );
+    expect(sessionCalls).toHaveLength(1);
+    const trackCalls = calls.filter((call) =>
+      call.path.endsWith("/tracks/new")
+    );
+    expect(trackCalls).toHaveLength(2);
+    expect(trackCalls[0]).toEqual({
+      path: "/v1/apps/app/sessions/session-1/tracks/new",
+      body: {
+        sessionDescription: { type: "offer", sdp: "browser-offer" },
+        tracks: [
+          {
+            location: "local",
+            mid: "0",
+            trackName: expect.stringMatching(/^stt-/),
+            kind: "audio"
+          }
+        ]
+      }
+    });
+    const microphoneTrack = tracksFromBody(trackCalls[0].body)[0];
+    if (
+      typeof microphoneTrack !== "object" ||
+      microphoneTrack === null ||
+      !("trackName" in microphoneTrack) ||
+      typeof microphoneTrack.trackName !== "string"
+    ) {
+      throw new Error("Expected local microphone track");
+    }
+    const microphoneTrackName = microphoneTrack.trackName;
+    expect(trackCalls[1]).toEqual({
+      path: "/v1/apps/app/sessions/session-1/tracks/new",
+      body: {
+        tracks: [
+          {
+            location: "remote",
+            sessionId: "tts-session",
+            trackName: publishBody.trackName,
+            kind: "audio"
+          }
+        ]
+      }
+    });
+    expect(calls.find((call) => call.path.endsWith("/renegotiate"))).toEqual({
+      path: "/v1/apps/app/sessions/session-1/renegotiate",
+      body: {
+        sessionDescription: { type: "answer", sdp: "browser-answer" }
+      }
+    });
+    expect(saved.at(-1)?.stt).toEqual({
+      sessionId: "session-1",
+      trackName: microphoneTrackName,
+      callbackUrl:
+        "wss://example.com/agents/my-agent/alice/voice/stt/sfu-subscribe"
+    });
 
     const forwarding = await transport.handleHttpRequest(
       new Request(
@@ -181,6 +268,28 @@ describe("SFUVoiceTransport", () => {
       )
     );
     expect(forwarding?.status).toBe(200);
+    const sttAdapterCall = calls.find((call) => {
+      const firstTrack = tracksFromBody(call.body)[0];
+      return (
+        call.path.endsWith("/adapters/websocket/new") &&
+        typeof firstTrack === "object" &&
+        firstTrack !== null &&
+        "location" in firstTrack &&
+        firstTrack.location === "remote"
+      );
+    });
+    expect(sttAdapterCall?.body).toEqual({
+      tracks: [
+        {
+          location: "remote",
+          sessionId: "session-1",
+          trackName: microphoneTrackName,
+          endpoint:
+            "wss://example.com/agents/my-agent/alice/voice/stt/sfu-subscribe",
+          outputCodec: "pcm"
+        }
+      ]
+    });
 
     const sttSocket = upgrade(transport, "/voice/stt/sfu-subscribe");
     sttSocket.send(encodePayloadToProtobuf(constantStereoFrame(1234)));
@@ -325,7 +434,7 @@ describe("SFUVoiceTransport", () => {
     expect(state?.stt?.adapterId).toBeUndefined();
   });
 
-  it("falls through unmatched routes and returns 400 for missing state or SDP", async () => {
+  it("falls through unmatched routes and validates RTC route state", async () => {
     const transport = new SFUVoiceTransport({ config: CONFIG });
     await expect(
       transport.handleHttpRequest(
@@ -343,21 +452,79 @@ describe("SFUVoiceTransport", () => {
       )
     ).toBeNull();
 
-    const connect = await transport.handleHttpRequest(
-      new Request("https://example.com/voice/tts/connect", {
-        method: "POST",
-        body: JSON.stringify({})
-      })
-    );
-    expect(connect?.status).toBe(400);
+    for (const body of [
+      {},
+      { sessionDescription: { sdp: "" }, microphoneMid: "0" },
+      { sessionDescription: { sdp: "offer" } },
+      { sessionDescription: { sdp: "offer" }, microphoneMid: "" }
+    ]) {
+      const connect = await transport.handleHttpRequest(
+        new Request("https://example.com/voice/rtc/connect", {
+          method: "POST",
+          body: JSON.stringify(body)
+        })
+      );
+      expect(connect?.status).toBe(400);
+      await expect(connect?.text()).resolves.toBe(
+        "Missing sessionDescription.sdp or microphoneMid"
+      );
+    }
 
-    const stt = await transport.handleHttpRequest(
-      new Request("https://example.com/voice/stt/connect", {
+    const pull = await transport.handleHttpRequest(
+      new Request("https://example.com/voice/rtc/pull", { method: "POST" })
+    );
+    expect(pull?.status).toBe(400);
+    await expect(pull?.text()).resolves.toBe("TTS not published yet");
+
+    const renegotiate = await transport.handleHttpRequest(
+      new Request("https://example.com/voice/rtc/renegotiate", {
         method: "POST",
         body: JSON.stringify({})
       })
     );
-    expect(stt?.status).toBe(400);
+    expect(renegotiate?.status).toBe(400);
+    await expect(renegotiate?.text()).resolves.toBe(
+      "No RTC session to renegotiate. Call connect first."
+    );
+
+    const publishedOnly = new SFUVoiceTransport({
+      config: CONFIG,
+      loadState: async () => ({
+        tts: {
+          sessionId: "tts-session",
+          adapterId: "tts-adapter",
+          trackName: "tts-track"
+        }
+      })
+    });
+    const missingRtc = await publishedOnly.handleHttpRequest(
+      new Request("https://example.com/voice/rtc/pull", { method: "POST" })
+    );
+    expect(missingRtc?.status).toBe(400);
+    await expect(missingRtc?.text()).resolves.toBe(
+      "RTC session not connected yet"
+    );
+
+    const connected = new SFUVoiceTransport({
+      config: CONFIG,
+      loadState: async () => ({
+        stt: {
+          sessionId: "rtc-session",
+          trackName: "mic",
+          callbackUrl: "wss://example.com/callback"
+        }
+      })
+    });
+    const missingSdp = await connected.handleHttpRequest(
+      new Request("https://example.com/voice/rtc/renegotiate", {
+        method: "POST",
+        body: JSON.stringify({})
+      })
+    );
+    expect(missingSdp?.status).toBe(400);
+    await expect(missingSdp?.text()).resolves.toBe(
+      "Missing sessionDescription.sdp"
+    );
   });
 
   it("returns 500 for SFU failures and malformed successful responses", async () => {
@@ -384,6 +551,33 @@ describe("SFUVoiceTransport", () => {
     expect(await malformed?.text()).toContain(
       "tracks[0].sessionId or tracks[0].adapterId"
     );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({ tracks: [{ errorCode: "TRACK_NOT_FOUND" }] })
+      )
+    );
+    const pullTransport = new SFUVoiceTransport({
+      config: CONFIG,
+      loadState: async () => ({
+        tts: {
+          sessionId: "tts-session",
+          adapterId: "tts-adapter",
+          trackName: "tts-track"
+        },
+        stt: {
+          sessionId: "rtc-session",
+          trackName: "mic-track",
+          callbackUrl: "wss://example.com/callback"
+        }
+      })
+    });
+    const pull = await pullTransport.handleHttpRequest(
+      new Request("https://example.com/voice/rtc/pull", { method: "POST" })
+    );
+    expect(pull?.status).toBe(500);
+    expect(await pull?.text()).toContain("TRACK_NOT_FOUND");
   });
 
   it("rejects callback timeouts and a second active connection", async () => {
@@ -411,10 +605,10 @@ describe("SFUVoiceTransport", () => {
     const publishPromise = transport.handleHttpRequest(
       new Request("https://example.com/voice/tts/publish", { method: "POST" })
     );
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(15_000);
     const publish = await publishPromise;
     expect(publish?.status).toBe(500);
-    expect(await publish?.text()).toContain("callback timeout after 5s");
+    expect(await publish?.text()).toContain("callback timeout after all retry");
     expect(loadState).toHaveBeenCalledTimes(1);
   });
 });

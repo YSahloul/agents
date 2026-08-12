@@ -322,11 +322,7 @@ describe("SFU API helpers", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("uses a custom API base and PUT for renegotiation", async () => {
-    const fetchMock = vi.fn(async () =>
-      Response.json({
-        sessionDescription: { type: "answer", sdp: "answer" }
-      })
-    );
+    const fetchMock = vi.fn(async () => Response.json({}));
     vi.stubGlobal("fetch", fetchMock);
 
     await renegotiateSFUSession(
@@ -336,7 +332,7 @@ describe("SFU API helpers", () => {
         apiBase: "https://example.com/realtime"
       },
       "session",
-      "offer"
+      { type: "answer", sdp: "answer" }
     );
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -344,7 +340,7 @@ describe("SFU API helpers", () => {
       expect.objectContaining({
         method: "PUT",
         body: JSON.stringify({
-          sessionDescription: { type: "offer", sdp: "offer" }
+          sessionDescription: { type: "answer", sdp: "answer" }
         })
       })
     );
@@ -358,15 +354,6 @@ describe("SFU API helpers", () => {
     await expect(
       createSFUSession({ appId: "app", apiToken: "token" })
     ).rejects.toThrow("SFU create session response missing sessionId");
-    await expect(
-      renegotiateSFUSession(
-        { appId: "app", apiToken: "token" },
-        "session",
-        "offer"
-      )
-    ).rejects.toThrow(
-      "SFU renegotiate session response missing sessionDescription.sdp"
-    );
   });
 
   it("includes the operation, status, and body in API errors", async () => {

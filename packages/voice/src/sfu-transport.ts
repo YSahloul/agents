@@ -23,7 +23,6 @@ export interface SFUVoiceState {
     sessionId: string;
     adapterId: string;
     trackName: string;
-    playerSessionId?: string;
   };
   stt?: {
     sessionId: string;
@@ -244,16 +243,16 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     if (path.endsWith(this.#route("tts/publish"))) {
       return this.#respond("TTS publish", () => this.#publishTts(request));
     }
-    if (path.endsWith(this.#route("tts/connect"))) {
-      return this.#respond("TTS connect", () => this.#connectTts(request));
+    if (path.endsWith(this.#route("rtc/connect"))) {
+      return this.#respond("RTC connect", () => this.#connectRtc(request));
     }
-    if (path.endsWith(this.#route("tts/renegotiate"))) {
-      return this.#respond("TTS renegotiate", () =>
-        this.#renegotiateTts(request)
+    if (path.endsWith(this.#route("rtc/pull"))) {
+      return this.#respond("RTC pull", () => this.#pullTts());
+    }
+    if (path.endsWith(this.#route("rtc/renegotiate"))) {
+      return this.#respond("RTC renegotiate", () =>
+        this.#renegotiateRtc(request)
       );
-    }
-    if (path.endsWith(this.#route("stt/connect"))) {
-      return this.#respond("STT connect", () => this.#connectStt(request));
     }
     if (path.endsWith(this.#route("stt/start-forwarding"))) {
       return this.#respond("STT start forwarding", () =>
@@ -358,19 +357,60 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     throw new Error("SFU TTS callback timeout after all retry attempts");
   }
 
-  async #connectTts(request: Request): Promise<Response> {
+  async #connectRtc(request: Request): Promise<Response> {
+    const connect = await this.#readRtcConnect(request);
+    if (!connect) {
+      return new Response("Missing sessionDescription.sdp or microphoneMid", {
+        status: 400
+      });
+    }
+
+    const { sessionId } = await createSFUSession(this.#config);
+    const microphoneTrackName = `stt-${crypto.randomUUID()}`;
+    const result = await addSFUTracks(this.#config, sessionId, {
+      sessionDescription: connect.sessionDescription,
+      tracks: [
+        {
+          location: "local",
+          mid: connect.microphoneMid,
+          trackName: microphoneTrackName,
+          kind: "audio"
+        }
+      ]
+    });
+    const response = this.#asResponse(result, "connect RTC session");
+    if (!this.#normalizeSessionDescription(response)) {
+      throw new Error(
+        "SFU connect RTC session response missing sessionDescription.sdp"
+      );
+    }
+
+    const callbackUrl = this.#callbackUrl(
+      request,
+      "rtc/connect",
+      "stt/sfu-subscribe"
+    );
+    await this.#updateState((current) => ({
+      ...(current ?? {}),
+      stt: {
+        sessionId,
+        trackName: microphoneTrackName,
+        callbackUrl
+      }
+    }));
+    return Response.json(response);
+  }
+
+  async #pullTts(): Promise<Response> {
     const state = await this.#loadState();
     if (!state?.tts) {
       return new Response("TTS not published yet", { status: 400 });
     }
-    const description = await this.#readSessionDescription(request);
-    if (!description) {
-      return new Response("Missing sessionDescription.sdp", { status: 400 });
+    if (!state.stt) {
+      return new Response("RTC session not connected yet", { status: 400 });
     }
 
-    const { sessionId: playerSessionId } = await createSFUSession(this.#config);
-    const result = await addSFUTracks(this.#config, playerSessionId, {
-      sessionDescription: description,
+    const result = await addSFUTracks(this.#config, state.stt.sessionId, {
       tracks: [
         {
           location: "remote",
@@ -380,29 +420,21 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
         }
       ]
     });
-    const response = this.#asResponse(result, "connect TTS track");
-    const hasDescription = this.#normalizeSessionDescription(response);
-    if (!hasDescription && response.requiresImmediateRenegotiation !== true) {
+    const response = this.#asResponse(result, "pull TTS track");
+    const firstTrack = this.#firstTrack(response, "pull TTS track");
+    if ("errorCode" in firstTrack) {
       throw new Error(
-        "SFU connect TTS track response missing sessionDescription.sdp or requiresImmediateRenegotiation"
+        `SFU pull TTS track failed: ${String(firstTrack.errorCode)}`
       );
     }
-
-    await this.#updateState((current) => {
-      if (!current?.tts) return current;
-      return {
-        ...current,
-        tts: { ...current.tts, playerSessionId }
-      };
-    });
     return Response.json(response);
   }
 
-  async #renegotiateTts(request: Request): Promise<Response> {
+  async #renegotiateRtc(request: Request): Promise<Response> {
     const state = await this.#loadState();
-    if (!state?.tts?.playerSessionId) {
+    if (!state?.stt?.sessionId) {
       return new Response(
-        "No player session to renegotiate. Call connect first.",
+        "No RTC session to renegotiate. Call connect first.",
         { status: 400 }
       );
     }
@@ -412,60 +444,10 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     }
     const result = await renegotiateSFUSession(
       this.#config,
-      state.tts.playerSessionId,
-      description.sdp
+      state.stt.sessionId,
+      description
     );
     return Response.json(result);
-  }
-
-  async #connectStt(request: Request): Promise<Response> {
-    const description = await this.#readSessionDescription(request);
-    if (!description) {
-      return new Response("Missing sessionDescription.sdp", { status: 400 });
-    }
-
-    const { sessionId } = await createSFUSession(this.#config);
-    const result = await addSFUTracks(this.#config, sessionId, {
-      autoDiscover: true,
-      sessionDescription: description
-    });
-    const response = this.#asResponse(result, "connect STT track");
-    if (!this.#normalizeSessionDescription(response)) {
-      throw new Error(
-        "SFU connect STT track response missing sessionDescription.sdp"
-      );
-    }
-    const tracks = Array.isArray(response.tracks) ? response.tracks : [];
-    const audioTrack = tracks.find(
-      (track) =>
-        typeof track === "object" &&
-        track !== null &&
-        "trackName" in track &&
-        (track.kind === "audio" || !("kind" in track))
-    );
-    if (
-      typeof audioTrack !== "object" ||
-      audioTrack === null ||
-      !("trackName" in audioTrack) ||
-      typeof audioTrack.trackName !== "string"
-    ) {
-      throw new Error("SFU connect STT track response missing audio trackName");
-    }
-
-    const callbackUrl = this.#callbackUrl(
-      request,
-      "stt/connect",
-      "stt/sfu-subscribe"
-    );
-    await this.#updateState((current) => ({
-      ...(current ?? {}),
-      stt: {
-        sessionId,
-        trackName: audioTrack.trackName as string,
-        callbackUrl
-      }
-    }));
-    return Response.json(response);
   }
 
   async #startSttForwarding(): Promise<Response> {
@@ -726,6 +708,42 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     });
     this.#stateWrite = write.catch(() => {});
     return write;
+  }
+
+  async #readRtcConnect(request: Request): Promise<{
+    sessionDescription: SessionDescription;
+    microphoneMid: string;
+  } | null> {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return null;
+    }
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      !("sessionDescription" in body) ||
+      typeof body.sessionDescription !== "object" ||
+      body.sessionDescription === null ||
+      !("sdp" in body.sessionDescription) ||
+      typeof body.sessionDescription.sdp !== "string" ||
+      body.sessionDescription.sdp.length === 0 ||
+      !("microphoneMid" in body) ||
+      typeof body.microphoneMid !== "string" ||
+      body.microphoneMid.length === 0
+    ) {
+      return null;
+    }
+    const type =
+      "type" in body.sessionDescription &&
+      typeof body.sessionDescription.type === "string"
+        ? body.sessionDescription.type
+        : undefined;
+    return {
+      sessionDescription: { type, sdp: body.sessionDescription.sdp },
+      microphoneMid: body.microphoneMid
+    };
   }
 
   async #readSessionDescription(

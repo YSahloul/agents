@@ -14,23 +14,6 @@ import {
 import { streamText, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
-/** Stops the agent answering its own TTS, which an open mic/speaker (no
- * headset) or SFU loopback can pick up as if it were user speech. Local to
- * this example — not a library concern. */
-function isEchoOf(transcript: string, assistantText: string): boolean {
-  if (!assistantText) return false;
-  const a =
-    assistantText
-      .toLowerCase()
-      .match(/[\p{L}\p{N}]+/gu)
-      ?.join(" ") ?? "";
-  const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-  if (heard.length >= 3 && a.includes(heard.join(" "))) return true;
-  const aWords = new Set(a.split(" "));
-  const hits = heard.filter((w) => aWords.has(w)).length;
-  return hits >= 4 && hits / heard.length >= 0.6;
-}
-
 /** The catalog marks reasoning models with a `reasoning: true` property
  * (observed on GLM, Kimi, DeepSeek-R1, gpt-oss, Qwen3, Gemma 4, Nemotron).
  * That is the authoritative flag — the model page's "Reasoning: Yes" maps to
@@ -48,17 +31,17 @@ const VoiceAgent = withSFUVoice(Agent);
 const SYSTEM_PROMPT = `You are a playful roast host getting to know the user through a natural voice conversation. Sound like their funniest close friend at game night: curious, quick, confident, and obviously on their side.
 
 CONVERSATION FLOW:
-- The user always speaks first.
-- On your first reply, react briefly to what they said, then ask their name. That must be the only question in your first reply. If they already gave their name, use it and ask one question about them instead.
+- The agent opens the call with a fixed greeting before you are invoked.
+- On your first reply, react briefly to the user's answer, then continue with one natural question.
 - Ask one question at a time. Learn about their habits, hobbies, work or school, guilty pleasures, recent failures, questionable opinions, and harmless overconfidence.
 - Base each roast on specific details the user actually shared. React to their answer, land a playful jab, then ask a natural follow-up question.
 - Remember earlier details and use callbacks. The conversation should feel connected, not like a questionnaire.
 - After you know enough about them, let the exchange become natural banter instead of forcing another question every turn.
 
 VOICE STYLE:
-- Use one to three short, conversational sentences. Multiple sentences are welcome when they improve the rhythm.
-- Keep questions easy to answer aloud. Ask only one question per turn.
-- Get to the point without greetings, disclaimers, long explanations, or repeated setup.
+- Use one or two short, conversational sentences.
+- Lead with one sharp reaction or punchline, then ask one easy question.
+- Skip setup and extra explanation. Stop as soon as the joke and question land.
 - Contractions, fragments, dry delivery, and playful exaggeration are good.
 - Never narrate actions, use stage directions, write emoji, or mention being an AI.
 - If speech-to-text is unclear, make one playful guess or ask one short clarification.
@@ -77,6 +60,8 @@ KEEP IT FRIENDLY:
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   tts = new WorkersAITTS(this.env.AI, {
+    model: "@cf/deepgram/aura-2-en",
+    speaker: "draco",
     encoding: "linear16",
     container: "none",
     sampleRate: 24000
@@ -85,6 +70,8 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     eotThreshold: 0.7,
     eagerEotThreshold: 0.5
   });
+
+  readonly #greeting = "Hey, what's up? What's your name?";
 
   getSFUConfig(): SFUConfig {
     const env = this.env as Env & {
@@ -106,6 +93,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   // can still observe transcripts and send text messages.
 
   #activeSpeakerId: string | null = null;
+  #greetingPlaying = false;
 
   beforeCallStart(connection: Connection): boolean {
     if (this.#activeSpeakerId && this.#activeSpeakerId !== connection.id) {
@@ -181,6 +169,10 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
         message: "Previous speaker has been disconnected. You can start a call."
       })
     );
+  }
+
+  receiveAudio(connectionId: string, audio: ArrayBuffer): void {
+    if (!this.#greetingPlaying) super.receiveAudio(connectionId, audio);
   }
 
   // --- Voice agent logic ---
@@ -293,11 +285,15 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     })();
   }
 
-  // No auto-greeting on call start: the greeting fired on every reconnect
-  // (persisted history made it say "Welcome back!" mid-conversation), which
-  // interjected into in-flight turns. The agent only speaks in response to
-  // the user now.
-  async onCallStart(_connection: Connection) {}
+  async onCallStart(connection: Connection) {
+    this.#greetingPlaying = true;
+    try {
+      await this.speak(connection, this.#greeting);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    } finally {
+      this.#greetingPlaying = false;
+    }
+  }
 }
 
 export default {

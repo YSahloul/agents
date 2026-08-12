@@ -93,11 +93,10 @@ export async function handleSFURequest(
         sessionId: string;
         sdp: string;
       };
-      const result = await renegotiateSFUSession(
-        config,
-        body.sessionId,
-        body.sdp
-      );
+      const result = await renegotiateSFUSession(config, body.sessionId, {
+        type: "answer",
+        sdp: body.sdp
+      });
       return Response.json(result);
     } catch (error) {
       return Response.json(

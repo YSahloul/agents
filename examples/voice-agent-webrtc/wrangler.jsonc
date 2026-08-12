@@ -4,6 +4,7 @@
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
+  "routes": [{ "pattern": "roast.sahloul.io", "custom_domain": true }],
   "ai": {
     "binding": "AI",
     "remote": true
