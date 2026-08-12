@@ -344,7 +344,7 @@ describe("SFUVoiceAudioInput", () => {
     expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith({
       audio: {
         sampleRate: 48000,
-        channelCount: 1,
+        channelCount: 2,
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true

@@ -30,20 +30,27 @@ the selectable LLM models. ElevenLabs is available as an optional TTS provider.
 
 ## Key pattern
 
-The server combines `withSFUVoice`, Flux turn detection, and a TTS provider
-selected from connection settings:
+The server keeps the default Aura provider on its original path. Only an
+explicit ElevenLabs selection replaces it for that call:
 
 ```ts
 const VoiceAgent = withSFUVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  tts = createDefaultVoiceTTS(this.env);
+  tts = new WorkersAITTS(this.env.AI, {
+    model: "@cf/deepgram/aura-2-en",
+    speaker: "draco",
+    encoding: "linear16",
+    container: "none",
+    sampleRate: 24000
+  });
+  readonly #auraTts = this.tts;
   transcriber = new WorkersAIFluxSTT(this.env.AI, {
     eotThreshold: 0.7
   });
 
   beforeCallStart(connection: Connection) {
-    this.tts = createVoiceTTS(connection, this.env);
+    this.tts = createElevenLabsVoiceTTS(connection, this.env) ?? this.#auraTts;
     return true;
   }
 

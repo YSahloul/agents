@@ -7,14 +7,16 @@ import {
 import {
   withSFUVoice,
   WorkersAIFluxSTT,
+  WorkersAITTS,
   type SFUConfig,
+  type StreamingTTSProvider,
+  type TTSProvider,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { streamText, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import {
-  createDefaultVoiceTTS,
-  createVoiceTTS,
+  createElevenLabsVoiceTTS,
   getMissingTtsProviderKey
 } from "./tts-providers";
 
@@ -72,7 +74,17 @@ If the user sounds upset or asks you to stop, drop the roast and respond support
 Never narrate actions, use stage directions, write emoji, or mention being an AI.`;
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  tts = createDefaultVoiceTTS(this.env);
+  tts: TTSProvider & Partial<StreamingTTSProvider> = new WorkersAITTS(
+    this.env.AI,
+    {
+      model: "@cf/deepgram/aura-2-en",
+      speaker: "draco",
+      encoding: "linear16",
+      container: "none",
+      sampleRate: 24000
+    }
+  );
+  readonly #auraTts = this.tts;
   transcriber = new WorkersAIFluxSTT(this.env.AI, {
     eotThreshold: 0.7,
     eagerEotThreshold: 0.5
@@ -119,7 +131,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
       );
       return false;
     }
-    this.tts = createVoiceTTS(connection, this.env);
+    this.tts = createElevenLabsVoiceTTS(connection, this.env) ?? this.#auraTts;
     this.#activeSpeakerId = connection.id;
     return true;
   }

@@ -3,20 +3,15 @@ import type { Connection } from "agents";
 import { createElevenLabsTTS } from "./tts-providers/elevenlabs";
 import type { TtsProvider } from "./tts-providers/types";
 import { getEnvString } from "./tts-providers/utils";
-import { createWorkersAITTS } from "./tts-providers/workers-ai";
 
-export function createDefaultVoiceTTS(env: Env): TTSProvider {
-  return createWorkersAITTS(env, new URL("http://localhost"));
-}
-
-export function createVoiceTTS(
+export function createElevenLabsVoiceTTS(
   connection: Connection,
   env: Env
-): TTSProvider & Partial<StreamingTTSProvider> {
+): (TTSProvider & StreamingTTSProvider) | null {
   const url = new URL(connection.uri ?? "http://localhost");
   return getTtsProvider(url) === "elevenlabs"
     ? createElevenLabsTTS(env, url)
-    : createWorkersAITTS(env, url);
+    : null;
 }
 
 export function getMissingTtsProviderKey(
