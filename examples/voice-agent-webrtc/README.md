@@ -19,21 +19,33 @@ REALTIME_SFU_APP_ID=...
 REALTIME_SFU_BEARER_TOKEN=...
 ```
 
-Workers AI provides Flux turn detection, Aura TTS, and the
-selectable LLM models.
+To use ElevenLabs TTS, set its optional API key:
+
+```bash
+ELEVENLABS_API_KEY=...
+```
+
+Workers AI provides Flux turn detection, the default Aura TTS provider, and
+the selectable LLM models. ElevenLabs is available as an optional TTS provider.
 
 ## Key pattern
 
-The server combines `withSFUVoice`, Flux turn detection, and batch Aura TTS:
+The server combines `withSFUVoice`, Flux turn detection, and a TTS provider
+selected from connection settings:
 
 ```ts
 const VoiceAgent = withSFUVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  tts = new WorkersAITTS(this.env.AI);
+  tts = createDefaultVoiceTTS(this.env);
   transcriber = new WorkersAIFluxSTT(this.env.AI, {
     eotThreshold: 0.7
   });
+
+  beforeCallStart(connection: Connection) {
+    this.tts = createVoiceTTS(connection, this.env);
+    return true;
+  }
 
   getSFUConfig() {
     return {

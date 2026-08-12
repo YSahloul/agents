@@ -23,6 +23,12 @@ import {
 import { Button, Input, Select, Surface, Text } from "@cloudflare/kumo";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  DEFAULT_TTS_SETTINGS,
+  getTtsQuery,
+  TtsProviderSettings,
+  type TtsSettings
+} from "./tts-settings";
 import "./styles.css";
 
 // --- Session ID ---
@@ -128,6 +134,8 @@ function App() {
     "@cf/meta/llama-4-scout-17b-16e-instruct"
   );
   const [reasoning, setReasoning] = useState<ReasoningEffort>("off");
+  const [ttsSettings, setTtsSettings] =
+    useState<TtsSettings>(DEFAULT_TTS_SETTINGS);
   const [outputDeviceId, setOutputDeviceId] = useState("default");
   const audioInput = useMemo(
     () =>
@@ -156,7 +164,7 @@ function App() {
   } = useVoiceAgent({
     agent: "my-voice-agent",
     name: sessionId,
-    query: { llm: llmModel, reasoning },
+    query: { llm: llmModel, reasoning, ...getTtsQuery(ttsSettings) },
     audioInput,
     outputDeviceId,
     onReconnect: () => {
@@ -489,11 +497,17 @@ function App() {
           </Button>
         </form>
 
-        <details hidden className="mt-6 border-t border-kumo-line pt-4">
+        <details className="mt-6 border-t border-kumo-line pt-4">
           <summary className="cursor-pointer select-none text-sm text-kumo-secondary">
             Advanced settings
           </summary>
           <div className="mt-4 flex flex-col gap-4">
+            <TtsProviderSettings
+              settings={ttsSettings}
+              disabled={isInCall}
+              onChange={setTtsSettings}
+            />
+
             <div className="flex flex-col gap-2">
               <span className="text-xs text-kumo-secondary">Model</span>
               <Select
@@ -600,7 +614,6 @@ function App() {
             </div>
           </div>
         </details>
-
       </Surface>
     </div>
   );
