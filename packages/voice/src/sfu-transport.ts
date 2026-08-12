@@ -91,6 +91,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
 
   #queue: QueueItem[] = [];
   #partialFrame = new Uint8Array();
+  #partialInputByte: number | null = null;
   #pacingTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: SFUVoiceTransportOptions) {
@@ -116,6 +117,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#onAudio = onAudio;
     this.#sttFrameCount = 0;
     this.#sttPeak = 0;
+    this.#partialInputByte = null;
     try {
       await this.#waitForTtsSocket(10_000);
     } catch (error) {
@@ -131,7 +133,25 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#requireActiveConnection(connectionId);
     this.#requireTtsSocket();
 
-    const converted = resampleMonoTo48kStereo(audio, this.#inputSampleRate);
+    const input = new Uint8Array(audio);
+    let alignedAudio = audio;
+    if (this.#partialInputByte !== null) {
+      const combined = new Uint8Array(input.byteLength + 1);
+      combined[0] = this.#partialInputByte;
+      combined.set(input, 1);
+      const alignedLength = combined.byteLength - (combined.byteLength % 2);
+      this.#partialInputByte =
+        alignedLength < combined.byteLength ? combined[alignedLength] : null;
+      alignedAudio = combined.slice(0, alignedLength).buffer;
+    } else if (input.byteLength % 2 !== 0) {
+      this.#partialInputByte = input[input.byteLength - 1];
+      alignedAudio = input.slice(0, -1).buffer;
+    }
+
+    const converted = resampleMonoTo48kStereo(
+      alignedAudio,
+      this.#inputSampleRate
+    );
     if (converted.byteLength === 0) return;
 
     const combined = new Uint8Array(
@@ -152,6 +172,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
   flush(connectionId: string): Promise<void> {
     this.#requireActiveConnection(connectionId);
     this.#requireTtsSocket();
+    this.#partialInputByte = null;
     if (this.#partialFrame.byteLength > 0) {
       const frame = new Uint8Array(FRAME_BYTES);
       frame.set(this.#partialFrame);
@@ -180,6 +201,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#clearPacing();
     this.#rejectQueue(new Error("SFU output interrupted"));
     this.#partialFrame = new Uint8Array();
+    this.#partialInputByte = null;
     socket.send(encodePayloadToProtobuf(new Uint8Array()));
     console.log("[VoiceTrace]", {
       event: "sfu_interrupt",
@@ -196,6 +218,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#clearPacing();
     this.#rejectQueue(new Error("SFU voice transport stopped"));
     this.#partialFrame = new Uint8Array();
+    this.#partialInputByte = null;
     this.#rejectSocketWaiters(new Error("SFU voice transport stopped"));
 
     if (this.#ttsSocket) {
@@ -638,6 +661,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#clearPacing();
     this.#rejectQueue(new Error("SFU TTS socket closed"));
     this.#partialFrame = new Uint8Array();
+    this.#partialInputByte = null;
   }
 
   #requireActiveConnection(connectionId: string): void {

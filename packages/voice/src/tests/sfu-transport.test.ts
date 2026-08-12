@@ -304,7 +304,9 @@ describe("SFUVoiceTransport", () => {
     const outgoing = nextSocketMessage(ttsSocket);
     const mono24k = new Int16Array(480);
     mono24k.fill(2345);
-    transport.send("call", mono24k.buffer);
+    const bytes = new Uint8Array(mono24k.buffer);
+    transport.send("call", bytes.slice(0, 501).buffer);
+    transport.send("call", bytes.slice(501).buffer);
     await vi.advanceTimersByTimeAsync(20);
     const packet = await outgoing;
     const payload = extractPayloadFromProtobuf(packet);
