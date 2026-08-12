@@ -132,33 +132,34 @@ Each voice-provider package follows the same structure: `src/index.ts` (main exp
 
 ### Source Code (`src/`)
 
-| File                      | Role                                                                  | Size   | Exported Symbols                                                                                 |
-| ------------------------- | --------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------ |
-| `voice.ts`                | Core pipeline: `withVoice` mixin, WS protocol handler, TTS dispatcher | 53.7KB | `withVoice`, re-exports all public surface                                                       |
-| `voice-input.ts`          | STT-only pipeline: `withVoiceInput` for transcription agents          | 12.9KB | `withVoiceInput`                                                                                 |
-| `voice-client.ts`         | Browser/client-side transport over PartySocket / WebSocket            | 38.9KB | `VoiceClient`, `VoiceClientTransport`                                                            |
-| `voice-react.tsx`         | React hooks for voice integration in browser UIs                      | 14.2KB | `useVoiceAgent`, `useVoiceInput`                                                                 |
-| `sfu-voice.ts`            | Composes `withVoice` with SFU transport, pins pcm16                   | 3.9KB  | `withSFUVoice`                                                                                   |
-| `sfu-transport.ts`        | Server-side WebRTC/SFU transport layer                                | 24.8KB | `VoiceServerAudioTransport`                                                                      |
-| `sfu-voice-client.ts`     | Client-side WebRTC/SFU transport                                      | 12.1KB | `SFUVoiceClient`                                                                                 |
-| `sfu-utils.ts`            | WebRTC utilities (SDP, ICE, codec negotiation)                        | 9.2KB  | SFU utility functions                                                                            |
-| `types.ts`                | Provider interfaces & protocol message types                          | 10.9KB | `TTSProvider`, `StreamingTTSProvider`, `RealtimeTTSProvider`, `STTProvider`, `VoiceAgentOptions` |
-| `workers-ai-providers.ts` | Workers AI binding implementations                                    | 28.7KB | `WorkersAITTS`, `WorkersAIMulawRealtimeTTS`, `WorkersAIFluxSTT`, `WorkersAINova3STT`             |
-| `audio-pipeline.ts`       | Audio processing (VAD, resampling)                                    | 6.6KB  | `AudioPipeline`                                                                                  |
-| `text-stream.ts`          | Text streaming helpers for LLM output                                 | 8.5KB  | `TextStream`                                                                                     |
-| `sentence-chunker.ts`     | Sentence boundary detection                                           | 3.4KB  | `SentenceChunker`                                                                                |
+| File                      | Role                                                                  | Size   | Exported Symbols                                                                |
+| ------------------------- | --------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------- |
+| `voice.ts`                | Core pipeline: `withVoice` mixin, WS protocol handler, TTS dispatcher | 53.7KB | `withVoice`, re-exports all public surface                                      |
+| `voice-input.ts`          | STT-only pipeline: `withVoiceInput` for transcription agents          | 12.9KB | `withVoiceInput`                                                                |
+| `voice-client.ts`         | Browser/client-side transport over PartySocket / WebSocket            | 38.9KB | `VoiceClient`, `VoiceClientTransport`                                           |
+| `voice-react.tsx`         | React hooks for voice integration in browser UIs                      | 14.2KB | `useVoiceAgent`, `useVoiceInput`                                                |
+| `sfu-voice.ts`            | Composes `withVoice` with SFU transport, pins pcm16                   | 3.9KB  | `withSFUVoice`                                                                  |
+| `sfu-transport.ts`        | Server-side WebRTC/SFU transport layer                                | 24.8KB | `VoiceServerAudioTransport`                                                     |
+| `sfu-voice-client.ts`     | Client-side WebRTC/SFU transport                                      | 12.1KB | `SFUVoiceClient`                                                                |
+| `sfu-utils.ts`            | WebRTC utilities (SDP, ICE, codec negotiation)                        | 9.2KB  | SFU utility functions                                                           |
+| `types.ts`                | Provider interfaces & protocol message types                          | 10.9KB | `TTSProvider`, `StreamingTTSProvider`, `STTProvider`, `VoiceAgentOptions`       |
+| `workers-ai-providers.ts` | Workers AI binding implementations                                    | 28.7KB | `WorkersAITTS`, `WorkersAIRealtimeTTS`, `WorkersAIFluxSTT`, `WorkersAINova3STT` |
+| `audio-pipeline.ts`       | Audio processing (VAD, resampling)                                    | 6.6KB  | `AudioPipeline`                                                                 |
+| `text-stream.ts`          | Text streaming helpers for LLM output                                 | 8.5KB  | `TextStream`                                                                    |
+| `sentence-chunker.ts`     | Sentence boundary detection                                           | 3.4KB  | `SentenceChunker`                                                               |
 
 ### TTS Provider Architecture
 
-The package defines **three provider interfaces** with automatic dispatch:
+The package defines two provider interfaces with automatic dispatch:
 
-| Interface              | Method                   | Capability                    | Built-in                    |
-| ---------------------- | ------------------------ | ----------------------------- | --------------------------- |
-| `TTSProvider`          | `synthesize(text)`       | Batch (whole-sentence blob)   | `WorkersAITTS`              |
-| `StreamingTTSProvider` | `synthesizeStream(text)` | Per-sentence async generator  | ElevenLabs, Telnyx          |
-| `RealtimeTTSProvider`  | `createSession(opts)`    | Token-granular, bidirectional | `WorkersAIMulawRealtimeTTS` |
+| Interface              | Method                   | Capability                   | Built-in                                   |
+| ---------------------- | ------------------------ | ---------------------------- | ------------------------------------------ |
+| `TTSProvider`          | `synthesize(text)`       | Batch whole-sentence blob    | `WorkersAITTS`                             |
+| `StreamingTTSProvider` | `synthesizeStream(text)` | Per-sentence async generator | `WorkersAIRealtimeTTS`, external providers |
 
-Dispatcher precedence: realtime session → `synthesizeStream` → batch `synthesize()`.
+Dispatcher precedence: `synthesizeStream()` → batch `synthesize()`.
+`WorkersAIRealtimeTTS` opens one WebSocket per sentence and supports browser
+PCM16/24 kHz explicitly or phone μ-law/8 kHz by default.
 
 ### Tests (`src/tests/`, `src/react-tests/`)
 
@@ -263,7 +264,7 @@ All provider interfaces are in `src/types.ts`. There is no separate `interfaces/
 ### Entry Points
 
 1. **New contributor start here**: `src/voice.ts` — the `withVoice` mixin is the central pipeline; read from the top for the architecture
-2. **Provider interfaces**: `src/types.ts` — understand `TTSProvider`, `StreamingTTSProvider`, `RealtimeTTSProvider`, `STTProvider`
+2. **Provider interfaces**: `src/types.ts` — understand `TTSProvider`, `StreamingTTSProvider`, and `STTProvider`
 3. **Adding a new carrier**: study `voice-providers/plivo/src/index.ts` — it imports `withVoice` from `@cloudflare/voice`, implements the provider interfaces
 4. **Build pipeline**: `scripts/build.ts` — tsdown with 3 entrypoints, declaration generation, doc copying
 
@@ -289,7 +290,7 @@ voice-react.tsx ──→ voice-client.ts ──→ PartySocket
 voice.ts ◄──── types.ts ──── workers-ai-providers.ts
   │                              │
   ├── voice-input.ts             ├── WorkersAITTS
-  ├── sfu-voice.ts               ├── WorkersAIMulawRealtimeTTS
+  ├── sfu-voice.ts               ├── WorkersAIRealtimeTTS
   ├── audio-pipeline.ts          ├── WorkersAIFluxSTT
   ├── text-stream.ts             └── WorkersAINova3STT
   └── sentence-chunker.ts
@@ -362,20 +363,20 @@ The package has no environment-specific builds. All builds are production ESM. T
 
 ### Provider Extension Model
 
-The package uses a **runtime duck-typing dispatch** for TTS providers rather than a class hierarchy:
+The package uses runtime capability detection for TTS providers:
 
 ```typescript
-// In voice.ts — runtime capability detection, not instanceof
-if (typeof tts.createSession === "function") {
-  // realtime path
-} else if (typeof tts.synthesizeStream === "function") {
-  // streaming path
-} else if (typeof tts.synthesize === "function") {
-  // batch path
+// In voice.ts — prefer streaming when the provider exposes it.
+if (typeof tts.synthesizeStream === "function") {
+  // per-sentence streaming path
+} else {
+  // batch synthesize() path
 }
 ```
 
-A provider only needs to implement the methods corresponding to its capabilities; the framework auto-selects the best available path. New voice-provider packages (SignalWire, Plivo, Twilio, etc.) implement one or more of these interfaces and pass their instance to `withVoice(options)`.
+Every TTS provider implements `TTSProvider`; streaming providers additionally
+implement `StreamingTTSProvider`. The framework selects the best available
+path without requiring a shared provider class.
 
 ### React Hooks
 

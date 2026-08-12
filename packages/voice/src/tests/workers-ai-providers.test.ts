@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   WorkersAIFluxSTT,
-  WorkersAIMulawRealtimeTTS,
+  WorkersAIRealtimeTTS,
   WorkersAINova3STT,
   WorkersAITTS
 } from "../workers-ai-providers";
@@ -91,10 +91,10 @@ async function waitForConnect(ai: MockAi): Promise<MockWebSocket> {
   return socket;
 }
 
-describe("WorkersAIMulawRealtimeTTS", () => {
+describe("WorkersAIRealtimeTTS", () => {
   it("does not connect until the stream is iterated", async () => {
     const ai = new MockAi();
-    const tts = new WorkersAIMulawRealtimeTTS(ai);
+    const tts = new WorkersAIRealtimeTTS(ai);
     tts.synthesizeStream("hello");
     await Promise.resolve();
     expect(ai.calls).toHaveLength(0);
@@ -102,7 +102,7 @@ describe("WorkersAIMulawRealtimeTTS", () => {
 
   it("requests mulaw/8000 and yields 20 ms frames, ending on Flushed", async () => {
     const ai = new MockAi();
-    const tts = new WorkersAIMulawRealtimeTTS(ai, { speaker: "luna" });
+    const tts = new WorkersAIRealtimeTTS(ai, { speaker: "luna" });
     expect(tts.audioFormat).toBe("mulaw");
     expect(tts.sampleRate).toBe(8000);
 
@@ -140,9 +140,78 @@ describe("WorkersAIMulawRealtimeTTS", () => {
     expect(socket.closed).toBe(true);
   });
 
+  it("streams linear16/24000 across odd socket fragments", async () => {
+    const ai = new MockAi();
+    const tts = new WorkersAIRealtimeTTS(ai, {
+      encoding: "linear16",
+      sampleRate: 24000,
+      speaker: "draco"
+    });
+    expect(tts.audioFormat).toBe("pcm16");
+    expect(tts.sampleRate).toBe(24000);
+
+    const frames: Uint8Array[] = [];
+    const done = (async () => {
+      for await (const frame of tts.synthesizeStream("hello")) {
+        frames.push(new Uint8Array(frame));
+      }
+    })();
+
+    const socket = await waitForConnect(ai);
+    expect(ai.calls[0].model).toBe("@cf/deepgram/aura-2-en");
+    expect(ai.calls[0].input).toMatchObject({
+      encoding: "linear16",
+      sample_rate: "24000",
+      speaker: "draco",
+      container: "none"
+    });
+
+    const audio = Uint8Array.from({ length: 1200 }, (_, index) => index % 256);
+    socket.message(audio.slice(0, 601).buffer);
+    socket.message(audio.slice(601).buffer);
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    expect(frames[0]).toHaveLength(960);
+
+    socket.message(JSON.stringify({ type: "Flushed" }));
+    await done;
+    expect(frames.map((frame) => frame.byteLength)).toEqual([960, 240]);
+    expect(frames.flatMap((frame) => [...frame])).toEqual([...audio]);
+  });
+
+  it("rejects unsupported encoding and sample-rate pairs", () => {
+    const ai = new MockAi();
+    expect(
+      () =>
+        new WorkersAIRealtimeTTS(ai, {
+          encoding: "linear16",
+          sampleRate: 8000
+        } as never)
+    ).toThrow(
+      "Workers AI realtime TTS supports only mulaw/8000 or linear16/24000"
+    );
+  });
+
+  it("rejects an incomplete linear16 sample on Flushed", async () => {
+    const ai = new MockAi();
+    const tts = new WorkersAIRealtimeTTS(ai, { encoding: "linear16" });
+    const consumed = (async () => {
+      for await (const _frame of tts.synthesizeStream("hello")) {
+        // drain
+      }
+    })();
+
+    const socket = await waitForConnect(ai);
+    socket.message(new Uint8Array([1]).buffer);
+    socket.message(JSON.stringify({ type: "Flushed" }));
+
+    await expect(consumed).rejects.toThrow(
+      "Workers AI realtime TTS returned incomplete linear16 sample"
+    );
+  });
+
   it("throws instead of hanging when the socket dies before Flushed", async () => {
     const ai = new MockAi();
-    const tts = new WorkersAIMulawRealtimeTTS(ai);
+    const tts = new WorkersAIRealtimeTTS(ai);
 
     const consumed = (async () => {
       for await (const _frame of tts.synthesizeStream("interrupted")) {
@@ -159,7 +228,7 @@ describe("WorkersAIMulawRealtimeTTS", () => {
 
   it("surfaces a socket error rather than stalling the turn", async () => {
     const ai = new MockAi();
-    const tts = new WorkersAIMulawRealtimeTTS(ai);
+    const tts = new WorkersAIRealtimeTTS(ai);
 
     const consumed = (async () => {
       for await (const _frame of tts.synthesizeStream("boom")) {
@@ -175,7 +244,7 @@ describe("WorkersAIMulawRealtimeTTS", () => {
 
   it("closes the socket when the consumer abandons the stream", async () => {
     const ai = new MockAi();
-    const tts = new WorkersAIMulawRealtimeTTS(ai);
+    const tts = new WorkersAIRealtimeTTS(ai);
     const stream = tts.synthesizeStream("partial");
 
     const first = stream.next();
@@ -189,7 +258,7 @@ describe("WorkersAIMulawRealtimeTTS", () => {
 
   it("yields nothing for empty text or an already-aborted signal", async () => {
     const ai = new MockAi();
-    const tts = new WorkersAIMulawRealtimeTTS(ai);
+    const tts = new WorkersAIRealtimeTTS(ai);
 
     for await (const _frame of tts.synthesizeStream("")) {
       throw new Error("expected no frames");
@@ -210,7 +279,7 @@ describe("WorkersAIMulawRealtimeTTS", () => {
       ok: true,
       arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer
     }));
-    const tts = new WorkersAIMulawRealtimeTTS({
+    const tts = new WorkersAIRealtimeTTS({
       run
     } as unknown as ConstructorParameters<typeof WorkersAITTS>[0]);
     await tts.synthesize("hi");

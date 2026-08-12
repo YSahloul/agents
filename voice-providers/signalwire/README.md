@@ -58,18 +58,17 @@ VoiceAgent PCM16 back to SignalWire PCMU.
 The default `WorkersAITTS` emits MP3 and is not compatible. Configure a TTS
 provider that returns raw signed 16-bit little-endian PCM at the same rate.
 
-Because the carrier leg is always 8 kHz, `WorkersAIMulawRealtimeTTS` is pinned
-to 8 kHz μ-law — its `sampleRate` reaches the bridge through the agent's
-`audio_config`, and `agentAudioFormat: "mulaw"` (see Options) forwards those
-bytes verbatim. Running STT at 8 kHz too removes resampling from both
-directions:
+`WorkersAIRealtimeTTS` defaults to 8 kHz μ-law — its `sampleRate` reaches the
+bridge through the agent's `audio_config`, and `agentAudioFormat: "mulaw"` (see
+Options) forwards those bytes verbatim. Running STT at 8 kHz too removes
+resampling from both directions:
 
 ```ts
 const VoiceAgent = withVoice(Agent);
 
 class MyAgent extends VoiceAgent<Env> {
   transcriber = new WorkersAIFluxSTT(this.env.AI, { sampleRate: 8000 });
-  tts = new WorkersAIMulawRealtimeTTS(this.env.AI);
+  tts = new WorkersAIRealtimeTTS(this.env.AI);
 }
 ```
 

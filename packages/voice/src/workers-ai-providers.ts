@@ -98,58 +98,73 @@ export class WorkersAITTS implements TTSProvider {
   }
 }
 
-export interface WorkersAIMulawRealtimeTTSOptions {
+export type WorkersAIRealtimeTTSOptions = {
   /** TTS model name. @default "@cf/deepgram/aura-2-en" */
   model?: string;
   /** TTS speaker voice. @default "asteria" */
   speaker?: string;
-}
+} & (
+  | { encoding?: "mulaw"; sampleRate?: 8000 }
+  | { encoding: "linear16"; sampleRate?: 24000 }
+);
 
 /**
  * Workers AI text-to-speech over the binding's native WebSocket mode
- * (`env.AI.run(model, input, { websocket: true })`), fixed to 8 kHz μ-law —
- * the encoding a phone carrier's wire format expects, so audio forwards
- * byte-for-byte with no resampling.
+ * (`env.AI.run(model, input, { websocket: true })`).
  *
  * Implements {@link StreamingTTSProvider}: one socket per sentence, and the
- * generator returning *is* completion. There is no session to keep alive, no
- * Speak/Flush/Clear protocol to reconcile, and no acknowledgement to lose — a
- * socket that dies mid-utterance throws into the caller's `for await` instead
- * of leaving a pending promise nobody settles. Interruption is the consumer
- * abandoning the iterator (or aborting the signal), which closes the socket.
+ * generator returning *is* completion. Interruption is the consumer abandoning
+ * the iterator (or aborting the signal), which closes the socket.
  *
  * Inherits {@link WorkersAITTS.synthesize} as the non-streaming fallback.
  *
  * @example
  * ```ts
  * class MyAgent extends VoiceAgent<Env> {
- *   tts = new WorkersAIMulawRealtimeTTS(this.env.AI);
+ *   tts = new WorkersAIRealtimeTTS(this.env.AI);
  * }
  * ```
  */
-export class WorkersAIMulawRealtimeTTS
+export class WorkersAIRealtimeTTS
   extends WorkersAITTS
   implements StreamingTTSProvider
 {
-  readonly audioFormat: VoiceAudioFormat = "mulaw";
-  readonly sampleRate = 8000;
+  readonly audioFormat: VoiceAudioFormat;
+  readonly sampleRate: number;
   #ai: AiLike;
   #model: string;
   #speaker: string;
+  #encoding: "mulaw" | "linear16";
 
-  constructor(ai: AiLike, options?: WorkersAIMulawRealtimeTTSOptions) {
+  constructor(ai: AiLike, options?: WorkersAIRealtimeTTSOptions) {
     const model = options?.model ?? "@cf/deepgram/aura-2-en";
     const speaker = options?.speaker ?? "asteria";
+    const encoding = options?.encoding ?? "mulaw";
+    const sampleRate =
+      options?.sampleRate ?? (encoding === "mulaw" ? 8000 : 24000);
+    if (
+      !(
+        (encoding === "mulaw" && sampleRate === 8000) ||
+        (encoding === "linear16" && sampleRate === 24000)
+      )
+    ) {
+      throw new Error(
+        "Workers AI realtime TTS supports only mulaw/8000 or linear16/24000"
+      );
+    }
     super(ai, {
       model,
       speaker,
-      encoding: "mulaw",
-      sampleRate: 8000,
+      encoding,
+      sampleRate,
       container: "none"
     });
+    this.audioFormat = encoding === "mulaw" ? "mulaw" : "pcm16";
+    this.sampleRate = sampleRate;
     this.#ai = ai;
     this.#model = model;
     this.#speaker = speaker;
+    this.#encoding = encoding;
   }
 
   async *synthesizeStream(
@@ -159,7 +174,9 @@ export class WorkersAIMulawRealtimeTTS
     if (!text || signal?.aborted) return;
 
     const ws = await this.#open();
-    const frames = new MulawFrameStream();
+    const sampleBytes = this.#encoding === "mulaw" ? 1 : 2;
+    const frameBytes = (this.sampleRate * FRAME_MS * sampleBytes) / 1000;
+    const frames = new AudioFrameStream(frameBytes, sampleBytes);
 
     ws.addEventListener("message", (event: MessageEvent) => {
       if (typeof event.data === "string") {
@@ -192,14 +209,14 @@ export class WorkersAIMulawRealtimeTTS
     ws.addEventListener("close", (event: CloseEvent) => {
       frames.fail(
         new Error(
-          `Workers AI mulaw TTS socket closed before flush (code ${event.code}${
+          `Workers AI realtime TTS socket closed before flush (code ${event.code}${
             event.reason ? `: ${event.reason}` : ""
           })`
         )
       );
     });
     ws.addEventListener("error", () => {
-      frames.fail(new Error("Workers AI mulaw TTS socket error"));
+      frames.fail(new Error("Workers AI realtime TTS socket error"));
     });
 
     try {
@@ -239,8 +256,8 @@ export class WorkersAIMulawRealtimeTTS
     const response = await this.#ai.run(
       this.#model,
       {
-        encoding: "mulaw",
-        sample_rate: "8000",
+        encoding: this.#encoding,
+        sample_rate: String(this.sampleRate),
         speaker: this.#speaker,
         container: "none"
       },
@@ -252,7 +269,7 @@ export class WorkersAIMulawRealtimeTTS
       !("webSocket" in response) ||
       !isWebSocket(response.webSocket)
     ) {
-      throw new Error("Workers AI mulaw TTS did not return a WebSocket");
+      throw new Error("Workers AI realtime TTS did not return a WebSocket");
     }
     const ws = response.webSocket;
     ws.accept();
@@ -261,34 +278,33 @@ export class WorkersAIMulawRealtimeTTS
   }
 }
 
-/** 20 ms of 8 kHz μ-law. */
-const FRAME_BYTES = 160;
 const FRAME_MS = 20;
 
 /**
- * Bridges the TTS socket's events into an async iterable of 20 ms μ-law
- * frames.
- *
- * Aura's WebSocket messages are transport fragments, not audio frames — it
- * splits μ-law into arbitrary-sized pieces — so bytes are coalesced to 160 and
- * any remainder is emitted when the server acknowledges the flush. The
- * iterator ends on `Flushed` and throws if the socket dies first, so a
- * consumer can never be left waiting on an acknowledgement that is not coming.
+ * Bridges the TTS socket's arbitrary fragments into fixed-duration audio
+ * frames, with any complete-sample remainder emitted on `Flushed`.
  */
-class MulawFrameStream {
-  #frame = new Uint8Array(FRAME_BYTES);
+class AudioFrameStream {
+  #frame: Uint8Array;
   #frameLength = 0;
   #queue: ArrayBuffer[] = [];
   #done = false;
   #error: Error | null = null;
   #wake: (() => void) | null = null;
 
+  constructor(
+    private readonly frameBytes: number,
+    private readonly sampleBytes: 1 | 2
+  ) {
+    this.#frame = new Uint8Array(frameBytes);
+  }
+
   push(chunk: Uint8Array): void {
     if (this.#done) return;
     let offset = 0;
     while (offset < chunk.byteLength) {
       const copied = Math.min(
-        FRAME_BYTES - this.#frameLength,
+        this.frameBytes - this.#frameLength,
         chunk.byteLength - offset
       );
       this.#frame.set(
@@ -297,9 +313,9 @@ class MulawFrameStream {
       );
       this.#frameLength += copied;
       offset += copied;
-      if (this.#frameLength === FRAME_BYTES) {
+      if (this.#frameLength === this.frameBytes) {
         this.#queue.push(this.#frame.buffer as ArrayBuffer);
-        this.#frame = new Uint8Array(FRAME_BYTES);
+        this.#frame = new Uint8Array(this.frameBytes);
         this.#frameLength = 0;
       }
     }
@@ -309,6 +325,12 @@ class MulawFrameStream {
   /** Server acknowledged the flush: emit the partial frame and end. */
   finish(): void {
     if (this.#done) return;
+    if (this.#frameLength % this.sampleBytes !== 0) {
+      this.fail(
+        new Error("Workers AI realtime TTS returned incomplete linear16 sample")
+      );
+      return;
+    }
     if (this.#frameLength > 0) {
       this.#queue.push(this.#frame.slice(0, this.#frameLength).buffer);
       this.#frameLength = 0;

@@ -2,7 +2,7 @@ import { Agent, routeAgentRequest, type Connection } from "agents";
 import {
   withVoice,
   WorkersAIFluxSTT,
-  WorkersAIMulawRealtimeTTS,
+  WorkersAIRealtimeTTS,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
@@ -23,7 +23,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   // WebSocket μ-law TTS (the rebuilt synthesizeStream path): one socket per
   // sentence, audio streams out as it synthesizes and forwards byte-for-byte
   // (mulaw/8000 straight to the carrier — no resample, no adapter encode).
-  tts = new WorkersAIMulawRealtimeTTS(this.env.AI);
+  tts = new WorkersAIRealtimeTTS(this.env.AI);
   #workersAi = createWorkersAI({ binding: this.env.AI });
 
   async onCallStart(connection: Connection) {
@@ -32,11 +32,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
 
   async onTurn(transcript: string, context: VoiceTurnContext) {
     const result = streamText({
-      // llama-3.3-70b-fp8-fast / llama-4-scout / llama-3.2-3b stutter via the
-      // AI binding: binding returns non-streaming JSON, workers-ai-provider's
-      // fallback emits every word twice ("YesYes, I can, I can hear you. hear
-      // you."). 3.2-1b streams cleanly + is non-reasoning + fast (~180ms).
-      model: this.#workersAi("@cf/meta/llama-3.2-1b-instruct", {
+      model: this.#workersAi("@cf/meta/llama-4-scout-17b-16e-instruct", {
         sessionAffinity: this.sessionAffinity
       }),
       system: SYSTEM_PROMPT,

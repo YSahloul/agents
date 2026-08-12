@@ -7,7 +7,7 @@ import {
 import {
   withSFUVoice,
   WorkersAIFluxSTT,
-  WorkersAITTS,
+  WorkersAIRealtimeTTS,
   type SFUConfig,
   type StreamingTTSProvider,
   type TTSProvider,
@@ -74,20 +74,19 @@ If the user sounds upset or asks you to stop, drop the roast and respond support
 Never narrate actions, use stage directions, write emoji, or mention being an AI.`;
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  tts: TTSProvider & Partial<StreamingTTSProvider> = new WorkersAITTS(
+  tts: TTSProvider & Partial<StreamingTTSProvider> = new WorkersAIRealtimeTTS(
     this.env.AI,
     {
       model: "@cf/deepgram/aura-2-en",
       speaker: "draco",
       encoding: "linear16",
-      container: "none",
       sampleRate: 24000
     }
   );
   readonly #auraTts = this.tts;
   transcriber = new WorkersAIFluxSTT(this.env.AI, {
     eotThreshold: 0.7,
-    eagerEotThreshold: 0.5
+    eagerEotThreshold: 0.7
   });
 
   readonly #greeting = "Hi, how are you doing?";

@@ -14,73 +14,43 @@ voice protocol. Optional SFU/WebRTC transport.
 - `sfu-voice.ts` — `withSFUVoice`: composes `withVoice`, pins pcm16, and wires
   `createAudioTransport` to the SFU transport. Not a parallel pipeline.
 - `workers-ai-providers.ts` — Workers AI binding wrappers: `WorkersAITTS`,
-  `WorkersAIMulawRealtimeTTS`, `WorkersAIFluxSTT`, `WorkersAINova3STT`.
+  `WorkersAIRealtimeTTS`, `WorkersAIFluxSTT`, `WorkersAINova3STT`.
 - `types.ts` — provider interfaces and protocol types.
 - `sfu-transport.ts`, `sfu-voice-client.ts`, `sfu-utils.ts` — SFU/WebRTC stack.
 - `audio-pipeline.ts`, `sentence-chunker.ts`, `text-stream.ts` — internals.
 
-## TTS providers — the three shapes (read before touching TTS)
+## TTS providers — the two shapes (read before touching TTS)
 
-ONE job (text → audio), THREE provider interfaces, each a different
-**capability**. A class implements whichever its engine can do; the framework
-auto-selects the best path.
+One job (text → audio), two provider interfaces:
 
-| Interface              | Method                   | What it is                                                                  | Built-in implementor        |
-| ---------------------- | ------------------------ | --------------------------------------------------------------------------- | --------------------------- |
-| `TTSProvider`          | `synthesize(text)`       | **batch** — whole-sentence blob                                             | `WorkersAITTS`              |
-| `StreamingTTSProvider` | `synthesizeStream(text)` | **per-sentence stream** — stateless async generator (HTTP-style)            | (elevenlabs, telnyx)        |
-| `RealtimeTTSProvider`  | `createSession(opts)`    | **live session** — stateful, bidirectional, `speak`/`flush`/`clear`/`close` | `WorkersAIMulawRealtimeTTS` |
+| Interface              | Method                   | Capability                   | Built-in implementor                       |
+| ---------------------- | ------------------------ | ---------------------------- | ------------------------------------------ |
+| `TTSProvider`          | `synthesize(text)`       | Batch whole-sentence blob    | `WorkersAITTS`                             |
+| `StreamingTTSProvider` | `synthesizeStream(text)` | Per-sentence async generator | `WorkersAIRealtimeTTS`, external providers |
 
-### Dispatcher precedence (auto-selected from what the provider implements)
+### Dispatcher precedence
 
-`voice.ts` picks ONE path per provider:
+`voice.ts` selects the streaming path when
+`typeof tts.synthesizeStream === "function"`; otherwise it calls batch
+`synthesize()`. `SentenceChunker` completes a sentence before either method is
+called. There is no token-granular TTS session interface.
 
-1. **realtime session** — if `createSession` exists (`#startRealtimeTTS`,
-   guarded by `typeof tts.createSession === "function"`) → `#realtimeTTSPipeline`.
-2. **synthesizeStream** — else if `synthesizeStream` exists →
-   `#streamingTTSPipeline` per-sentence branch.
-3. **batch** — else `synthesize()` → `#streamingTTSPipeline` batch branch, or
-   `#synthesizeWithHooks` for string `onTurn` returns.
+### `WorkersAITTS` vs `WorkersAIRealtimeTTS`
 
-The mixin types `tts` as `TTSProvider & Partial<RealtimeTTSProvider> &
-Partial<StreamingTTSProvider>`; the dispatcher does runtime
-`typeof ... === "function"` checks. Conditionally exposing a method is the
-intended extension model — a provider only gets a path if it implements the
-method.
+- `WorkersAITTS` is batch and supports the model's configured encoding, sample
+  rate, and container.
+- `WorkersAIRealtimeTTS extends WorkersAITTS` adds a stateless
+  `synthesizeStream()` implementation. Each sentence lazily opens a Workers AI
+  WebSocket, sends `Speak` then `Flush`, yields 20 ms audio frames until
+  `Flushed`, and closes when completed, aborted, or abandoned. Its inherited
+  `synthesize()` is the batch fallback.
+- Browser WebRTC/SFU uses `{ encoding: "linear16", sampleRate: 24000 }`, which
+  declares PCM16 at 24 kHz for `SFUVoiceTransport`.
+- Phone carriers use the no-options default: 8 kHz μ-law, forwarded
+  byte-for-byte when the adapter selects μ-law output.
 
-### sentence-granular vs token-granular (why two streaming mechanisms exist)
-
-- `synthesizeStream` runs **per sentence**: the pipeline's `SentenceChunker`
-  waits for a full sentence, then calls `synthesizeStream(sentence)`. Audio for
-  a sentence can't start until that sentence is fully generated.
-- The realtime session runs **per token**: `#realtimeTTSPipeline` calls
-  `session.speak(token)` on every LLM token. Audio can start from the first
-  token, and `clear()` gives mid-utterance barge-in.
-
-That token-granular + interruptible profile is the entire reason
-`RealtimeTTS*` exists alongside upstream's `StreamingTTSProvider`.
-
-### `WorkersAITTS` vs `WorkersAIMulawRealtimeTTS`
-
-- `WorkersAITTS` — batch, config-driven (`model`, `encoding` ∈
-  linear16/mulaw/mp3/opus/…, `sampleRate`, `container`). General-purpose.
-- `WorkersAIMulawRealtimeTTS extends WorkersAITTS` — adds `createSession`,
-  **pinned** to μ-law 8 kHz, token-granular, with 20 ms frame pacing for
-  telephony. Connect-on-use WebSocket (NOT always-on — allowed to close between
-  turns; persistent sockets hit 1011 errors in production). **One consumer: the
-  SignalWire phone example.**
-
-`VoiceServerAudioTransport` (server-side egress) is a distinct layer from
-upstream's client-side `VoiceTransport` — not competing abstractions.
-
-### Picking a TTS
-
-- **Browser (WebRTC/SFU)**: `WorkersAITTS` with pcm16 (batch today; no pcm16
-  realtime/streaming provider exists in-tree).
-- **Phone trunk (SignalWire)**: `WorkersAIMulawRealtimeTTS` (μ-law realtime
-  session).
-- **HTTP streaming TTS (elevenlabs/telnyx)**: their `StreamingTTSProvider`
-  implementations.
+`VoiceServerAudioTransport` (server-side egress) is distinct from the
+client-side `VoiceTransport`; they are not competing abstractions.
 
 ## Build & test
 

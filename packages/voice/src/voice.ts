@@ -105,13 +105,13 @@ export type { SFUVoiceAgentOptions } from "./sfu-voice";
 // Re-export Workers AI providers
 export {
   WorkersAITTS,
-  WorkersAIMulawRealtimeTTS,
+  WorkersAIRealtimeTTS,
   WorkersAIFluxSTT,
   WorkersAINova3STT
 } from "./workers-ai-providers";
 export type {
   WorkersAITTSOptions,
-  WorkersAIMulawRealtimeTTSOptions,
+  WorkersAIRealtimeTTSOptions,
   WorkersAIFluxSTTOptions,
   WorkersAINova3STTOptions
 } from "./workers-ai-providers";

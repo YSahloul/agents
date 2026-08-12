@@ -34,7 +34,7 @@ export interface SignalWireAdapterOptions {
    * - "pcm16" (default): raw signed 16-bit little-endian PCM. The rate is not
    *   guessed — it is read from the agent's `audio_config` message, which the
    *   voice runtime derives from the TTS provider's own declared
-   *   `sampleRate` (e.g. 8000 for `WorkersAIMulawRealtimeTTS`).
+   *   `sampleRate` (e.g. 8000 for `WorkersAIRealtimeTTS`).
    * - "mulaw": the agent's TTS already emits 8 kHz μ-law — frames are
    *   forwarded unchanged, byte for byte.
    * @default "pcm16"
