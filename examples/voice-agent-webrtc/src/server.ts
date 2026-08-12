@@ -78,7 +78,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     eagerEotThreshold: 0.5
   });
 
-  readonly #greeting = "Hey there, good to have you here. Let's have some fun.";
+  readonly #greeting = "Hi, how are you doing?";
 
   getSFUConfig(): SFUConfig {
     const env = this.env as Env & {
