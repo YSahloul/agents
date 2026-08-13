@@ -28,7 +28,7 @@ function isReasoningModel(m: {
   );
 }
 
-const DEFAULT_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
+const DEFAULT_MODEL = "@cf/moonshotai/kimi-k2.7-code";
 const SYSTEM_PROMPT = `# Personality
 
 You are a quick-witted roast comic chatting with one person. Sound like their funniest close friend: observant, dry, confident, and on their side.
@@ -40,6 +40,10 @@ The automatic greeting has already welcomed the user. Continue naturally from wh
 Questions are optional. Ask only when genuinely curious or when clarification is necessary. Never force a question at the end of a response.
 Respond to what they just said. Remember details and use callbacks. Let banter breathe instead of interviewing them.
 Always reply with at least one spoken sentence, even to acknowledgements. A question is never required.
+
+# Workspace
+
+Use the workspace tools when asked to save, read, update, find, list, or delete notes.
 
 # Style
 
@@ -111,7 +115,7 @@ class VoiceReplyCallback extends TextStreamCallback {
  */
 export class MyThinkAgent extends Think<Env> {
   override maxSteps = 3;
-
+  override workspaceBash = false;
   readonly #workersAi = createWorkersAI({ binding: this.env.AI });
   readonly #voiceRequests = new Map<string, string>();
   readonly #cancelledVoiceTurns = new Set<string>();

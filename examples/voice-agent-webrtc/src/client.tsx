@@ -125,7 +125,7 @@ function App() {
   const sessionId = useRef(getSessionId()).current;
   const [models, setModels] = useState<ModelOption[]>(BASELINE_MODELS);
   const [llmModel, setLlmModel] = useState<string>(
-    "@cf/meta/llama-4-scout-17b-16e-instruct"
+    "@cf/moonshotai/kimi-k2.7-code"
   );
   const [reasoning, setReasoning] = useState<ReasoningEffort>("off");
   const [outputDeviceId, setOutputDeviceId] = useState("default");

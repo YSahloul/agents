@@ -35,7 +35,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   async onTurn(transcript: string, context: VoiceTurnContext) {
     const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
     return brain.runVoiceTurn(crypto.randomUUID(), transcript, {
-      model: "@cf/meta/llama-4-scout-17b-16e-instruct"
+      model: "@cf/moonshotai/kimi-k2.7-code"
     });
   }
 }
@@ -46,17 +46,22 @@ The Think agent remains the canonical conversation:
 ```ts
 export class MyThinkAgent extends Think<Env> {
   getModel() {
-    return "@cf/meta/llama-4-scout-17b-16e-instruct";
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   getSystemPrompt() {
     return SYSTEM_PROMPT;
   }
+
+  workspaceBash = false;
 }
 ```
 
 `runVoiceTurn()` calls `Think.chat()`, collects its text, and maps the external
 voice turn id to Think's request id so WebRTC barge-in can call `cancelChat()`.
+
+The Think-provided workspace tools let voice turns create, read, update, search,
+and delete durable files. Shell execution stays disabled.
 
 The Voice agent does not replay its transient `VoiceTurnContext.messages` into
 Think. This prevents duplicate history. Eager end-of-turn speculation is also
