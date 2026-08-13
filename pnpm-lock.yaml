@@ -2888,6 +2888,9 @@ importers:
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
+      '@cloudflare/think':
+        specifier: '*'
+        version: link:../../packages/think
       '@cloudflare/voice':
         specifier: '*'
         version: link:../../packages/voice
@@ -2897,9 +2900,6 @@ importers:
       agents:
         specifier: '*'
         version: link:../../packages/agents
-      ai:
-        specifier: ^7.0.0
-        version: 7.0.18(zod@4.4.3)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -2909,9 +2909,6 @@ importers:
       workers-ai-provider:
         specifier: ^4.0.0
         version: 4.0.0(patch_hash=3d85735844cd282fd787963340f5c196e4d6faed238d3d3929120d6317b21b54)(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
-      zod:
-        specifier: ^4.4.3
-        version: 4.4.3
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.48.0

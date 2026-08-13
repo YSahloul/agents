@@ -1,8 +1,8 @@
-# WebRTC Voice Agent
+# Think WebRTC Voice Agent
 
-A real-time, bidirectional voice agent using the reusable voice pipeline and
-WebRTC transport from `@cloudflare/voice`. LLM tokens stream straight into TTS as they arrive,
-and microphone plus assistant audio travel through Cloudflare Realtime SFU.
+A Think agent that uses a separate `@cloudflare/voice` Durable Object as its
+WebRTC audio gateway. Think owns the transcript, model, tools, memory, and
+workspace; Voice only handles STT, TTS, and Cloudflare Realtime SFU transport.
 
 ## Run it
 
@@ -24,31 +24,43 @@ LLM models.
 
 ## Key pattern
 
-The server uses realtime Workers AI Aura TTS with PCM16 audio at 24 kHz:
+`MyVoiceAgent` is directly routed so the Voice WebSocket lifecycle stays on one
+Durable Object. Each confirmed transcript is delegated by RPC to the
+same-named `MyThinkAgent`:
 
 ```ts
 const VoiceAgent = withSFUVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  tts = new WorkersAIRealtimeTTS(this.env.AI, {
-    model: "@cf/deepgram/aura-2-en",
-    speaker: "draco",
-    encoding: "linear16",
-    sampleRate: 24000
-  });
-  transcriber = new WorkersAIFluxSTT(this.env.AI, {
-    eotThreshold: 0.7,
-    eagerEotThreshold: 0.7
-  });
-
-  getSFUConfig() {
-    return {
-      appId: this.env.REALTIME_SFU_APP_ID,
-      apiToken: this.env.REALTIME_SFU_BEARER_TOKEN
-    };
+  async onTurn(transcript: string, context: VoiceTurnContext) {
+    const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
+    return brain.runVoiceTurn(crypto.randomUUID(), transcript, {
+      model: "@cf/meta/llama-4-scout-17b-16e-instruct"
+    });
   }
 }
 ```
+
+The Think agent remains the canonical conversation:
+
+```ts
+export class MyThinkAgent extends Think<Env> {
+  getModel() {
+    return "@cf/meta/llama-4-scout-17b-16e-instruct";
+  }
+
+  getSystemPrompt() {
+    return SYSTEM_PROMPT;
+  }
+}
+```
+
+`runVoiceTurn()` calls `Think.chat()`, collects its text, and maps the external
+voice turn id to Think's request id so WebRTC barge-in can call `cancelChat()`.
+
+The Voice agent does not replay its transient `VoiceTurnContext.messages` into
+Think. This prevents duplicate history. Eager end-of-turn speculation is also
+disabled so provisional transcripts cannot start tool calls.
 
 The React client gives `useVoiceAgent` the library-owned WebRTC audio input:
 

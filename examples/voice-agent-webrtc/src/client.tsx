@@ -296,7 +296,8 @@ function App() {
 
         <Surface className="mb-4 rounded-xl bg-kumo-fill px-4 py-3">
           <Text size="sm">
-            Say anything. Your new worst best friend will fire back.
+            Speak over WebRTC. Voice handles audio while Think owns the
+            conversation, memory, and tools.
           </Text>
         </Surface>
 

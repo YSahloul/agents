@@ -1,5 +1,8 @@
+import { TextStreamCallback } from "@cloudflare/think/messengers";
+import { Think, type ChatStartEvent, type TurnConfig } from "@cloudflare/think";
 import {
   Agent,
+  getAgentByName,
   routeAgentRequest,
   type Connection,
   type WSMessage
@@ -11,7 +14,6 @@ import {
   type SFUConfig,
   type VoiceTurnContext
 } from "@cloudflare/voice";
-import { streamText, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
 /** The catalog marks reasoning models with a `reasoning: true` property
@@ -26,8 +28,7 @@ function isReasoningModel(m: {
   );
 }
 
-const VoiceAgent = withSFUVoice(Agent);
-
+const DEFAULT_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
 const SYSTEM_PROMPT = `# Personality
 
 You are a quick-witted roast comic chatting with one person. Sound like their funniest close friend: observant, dry, confident, and on their side.
@@ -66,6 +67,124 @@ Never target identity, protected traits, appearance, disability, health, trauma,
 No threats, slurs, sexual humiliation, harassment, or encouragement of harm.
 If the user sounds upset or asks you to stop, drop the roast and respond supportively without announcing the change.
 Never narrate actions, use stage directions, write emoji, or mention being an AI.`;
+
+type ReasoningEffort = "low" | "medium" | "high" | null;
+
+interface VoiceTurnOptions extends Record<string, unknown> {
+  model: string;
+  reasoningEffort?: ReasoningEffort;
+}
+
+function reasoningEffort(value: unknown): ReasoningEffort | undefined {
+  if (value === null) return null;
+  return value === "low" || value === "medium" || value === "high"
+    ? value
+    : undefined;
+}
+
+class VoiceReplyCallback extends TextStreamCallback {
+  #failure?: Error;
+
+  constructor(private readonly registerRequest: (requestId: string) => void) {
+    super();
+  }
+
+  override onStart(event: ChatStartEvent): void {
+    super.onStart(event);
+    this.registerRequest(event.requestId);
+  }
+
+  override onError(error: string): void {
+    this.#failure = new Error(error);
+    super.onError(error);
+  }
+
+  get failure(): Error | undefined {
+    return this.#failure;
+  }
+}
+
+/**
+ * Canonical conversation agent. It owns the transcript, model, tools, memory,
+ * and workspace. The voice agent below only translates audio to and from this
+ * agent over RPC.
+ */
+export class MyThinkAgent extends Think<Env> {
+  override maxSteps = 3;
+
+  readonly #workersAi = createWorkersAI({ binding: this.env.AI });
+  readonly #voiceRequests = new Map<string, string>();
+  readonly #cancelledVoiceTurns = new Set<string>();
+
+  override getModel() {
+    return DEFAULT_MODEL;
+  }
+
+  override getSystemPrompt() {
+    return SYSTEM_PROMPT;
+  }
+
+  override beforeTurn(): TurnConfig {
+    const metadata = this.activeTurnMetadata;
+    const model =
+      typeof metadata?.model === "string" && metadata.model.startsWith("@cf/")
+        ? metadata.model
+        : DEFAULT_MODEL;
+    const effort = reasoningEffort(metadata?.reasoningEffort);
+
+    return {
+      model: this.#workersAi(model, {
+        sessionAffinity: this.sessionAffinity,
+        ...(effort !== undefined && {
+          reasoning_effort: effort,
+          ...(effort === null && {
+            chat_template_kwargs: { enable_thinking: false }
+          })
+        })
+      }),
+      maxOutputTokens: 8192,
+      sendReasoning: false
+    };
+  }
+
+  async runVoiceTurn(
+    turnId: string,
+    transcript: string,
+    options: VoiceTurnOptions
+  ): Promise<string> {
+    const callback = new VoiceReplyCallback((requestId) => {
+      this.#voiceRequests.set(turnId, requestId);
+      if (this.#cancelledVoiceTurns.delete(turnId)) {
+        this.cancelChat(requestId, "Voice turn interrupted");
+      }
+    });
+
+    try {
+      await this.chat(transcript, callback, {
+        metadata: options
+      });
+      if (callback.failure) throw callback.failure;
+      if (callback.wasInterrupted()) {
+        throw new Error("Voice turn interrupted");
+      }
+      return callback.textSoFar().trim();
+    } finally {
+      this.#voiceRequests.delete(turnId);
+      this.#cancelledVoiceTurns.delete(turnId);
+    }
+  }
+
+  cancelVoiceTurn(turnId: string): void {
+    const requestId = this.#voiceRequests.get(turnId);
+    if (requestId) {
+      this.cancelChat(requestId, "Voice turn interrupted");
+    } else {
+      this.#cancelledVoiceTurns.add(turnId);
+    }
+  }
+}
+
+const VoiceAgent = withSFUVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   tts = new WorkersAIRealtimeTTS(this.env.AI, {
@@ -185,112 +304,36 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
 
   // --- Voice agent logic ---
 
-  async onTurn(transcript: string, context: VoiceTurnContext) {
-    const workersAi = createWorkersAI({ binding: this.env.AI });
-
+  async onTurn(transcript: string, context: VoiceTurnContext): Promise<string> {
     const url = new URL(context.connection.uri ?? "http://localhost");
-    // `llm` is a full Workers AI model id (@cf/...). Accept any @cf/... id so
-    // the UI dropdown can pick any catalog model; default to Llama 4 Scout.
-    // Unknown ids are rejected by the binding at run time — no allowlist needed.
-    const llmParam = url.searchParams.get("llm");
-    const llmModel =
-      llmParam && llmParam.startsWith("@cf/")
-        ? llmParam
-        : "@cf/meta/llama-4-scout-17b-16e-instruct";
-    // Reasoning effort for reasoning models. 'off' disables reasoning
-    // (reasoning_effort: null → no chain-of-thought, lowest latency);
-    // 'low'|'medium'|'high' sets the budget. Absent = model default.
-    const reasoning = url.searchParams.get("reasoning");
-    const reasoningEffort: "low" | "medium" | "high" | null | undefined =
-      reasoning === "low" || reasoning === "medium" || reasoning === "high"
-        ? reasoning
-        : reasoning === "off"
-          ? null
-          : undefined;
+    const modelParam = url.searchParams.get("llm");
+    const model =
+      modelParam?.startsWith("@cf/") === true ? modelParam : DEFAULT_MODEL;
+    const requestedReasoning = url.searchParams.get("reasoning");
+    const effort =
+      requestedReasoning === "off" ? null : reasoningEffort(requestedReasoning);
 
-    const messages = [
-      ...context.messages.map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content
-      })),
-      { role: "user" as const, content: transcript }
-    ];
+    const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
+    const turnId = crypto.randomUUID();
+    const cancel = () => {
+      void brain.cancelVoiceTurn(turnId).catch((error) => {
+        console.error("[VoiceAgent] Failed to cancel Think turn:", error);
+      });
+    };
 
-    // Log the EXACT request sent to the LLM — full message array, system
-    // prompt, model, and generation config. Without this, "why did the model
-    // say X" is unanswerable from logs. rawMessagesJson is JSON.stringify'd
-    // (not console.log's object inspector) so duplicate entries are visible
-    // as literal repeated text, not collapsed/summarized in any way.
-    console.log("[VoiceTrace]", {
-      event: "llm_request",
-      connectionId: context.connection.id,
-      model: llmModel,
-      maxOutputTokens: 8192,
-      reasoningEffort,
-      stopWhenSteps: 3,
-      messageCount: messages.length,
-      system: SYSTEM_PROMPT,
-      messages,
-      rawMessagesJson: JSON.stringify(messages)
-    });
+    context.signal.addEventListener("abort", cancel, { once: true });
+    if (context.signal.aborted) cancel();
 
-    const result = streamText({
-      model: workersAi(llmModel, {
-        sessionAffinity: this.sessionAffinity,
-        ...(reasoningEffort !== undefined && {
-          reasoning_effort: reasoningEffort,
-          // GLM/Kimi expose thinking via the chat template, not reasoning_effort
-          // (verified: enable_thinking: false → 0 reasoning tokens on GLM;
-          // reasoning_effort: null alone still burns ~7.6k reasoning chars).
-          // gpt-oss ignores this knob but respects reasoning_effort (low → ~400).
-          ...(reasoningEffort === null && {
-            chat_template_kwargs: { enable_thinking: false }
-          })
-        })
-      }),
-      // Reasoning models (GLM, gpt-oss-20b) burn output tokens on chain-of-thought
-      // before emitting the answer. GLM-4.7-flash burns ~3500+ reasoning tokens;
-      // 1024 exhausts mid-reasoning and the agent goes silent (finishReason 'length', text '').
-      maxOutputTokens: 8192,
-      system: SYSTEM_PROMPT,
-      messages,
-      onStepFinish: ({ finishReason, text, usage }) => {
-        console.log("[VoiceTrace]", {
-          event: "llm_step_finish",
-          connectionId: context.connection.id,
-          finishReason,
-          textLen: text.length,
-          text,
-          usage
-        });
-      },
-      stopWhen: stepCountIs(3),
-      abortSignal: context.signal
-    });
-
-    return (async function* () {
-      // Log the RAW model output — every part of the stream, including
-      // reasoning/thinking tokens (invisible in onStepFinish's text field).
-      let streamText_ = "";
-      let streamReasoning = "";
-      for await (const part of result.fullStream) {
-        if (part.type === "text-delta") streamText_ += part.text;
-        if (part.type === "reasoning-delta") streamReasoning += part.text;
-        if (part.type === "finish") {
-          console.log("[VoiceTrace]", {
-            event: "llm_response_raw",
-            connectionId: context.connection.id,
-            finishReason: part.finishReason,
-            totalUsage: part.totalUsage,
-            textLen: streamText_.length,
-            text: streamText_,
-            reasoningLen: streamReasoning.length,
-            reasoning: streamReasoning
-          });
-        }
-        yield part;
-      }
-    })();
+    try {
+      return (
+        (await brain.runVoiceTurn(turnId, transcript, {
+          model,
+          ...(effort !== undefined && { reasoningEffort: effort })
+        })) || "Sorry, I didn't catch a response."
+      );
+    } finally {
+      context.signal.removeEventListener("abort", cancel);
+    }
   }
 
   async onCallStart(connection: Connection) {
