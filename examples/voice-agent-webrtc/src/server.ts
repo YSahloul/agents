@@ -1,13 +1,12 @@
-import { TextStreamCallback } from "@cloudflare/think/messengers";
 import {
   Think,
-  type ChatStartEvent,
   type StepContext,
   type StreamCallback,
   type ToolCallContext,
   type ToolCallResultContext,
   type TurnConfig
 } from "@cloudflare/think";
+import { agentTool } from "agents/agent-tools";
 import {
   Agent,
   getAgentByName,
@@ -16,6 +15,7 @@ import {
   type WSMessage
 } from "agents";
 import {
+  streamRpcVoiceTurn,
   withSFUVoice,
   WorkersAIFluxSTT,
   WorkersAIRealtimeTTS,
@@ -23,6 +23,9 @@ import {
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { createWorkersAI } from "workers-ai-provider";
+import type { ToolSet } from "ai";
+import { tool } from "ai";
+import { z } from "zod";
 
 /** The catalog marks reasoning models with a `reasoning: true` property
  * (observed on GLM, Kimi, DeepSeek-R1, gpt-oss, Qwen3, Gemma 4, Nemotron).
@@ -41,7 +44,7 @@ const SYSTEM_PROMPT = `You are a helpful assistant with access to a persistent w
 
 You are speaking in a live WebRTC voice chat, so keep responses concise and natural for text-to-speech. Always return speakable text.
 
-Use the workspace tools to create, read, update, find, list, and delete files when requested. Confirm completed workspace actions briefly.`;
+Use the Researcher sub-agent whenever the user asks you to delegate or research a topic. Use the workspace tools to create, read, update, find, list, and delete files when requested. Confirm completed actions briefly.`;
 
 type ReasoningEffort = "low" | "medium" | "high" | null;
 
@@ -57,36 +60,75 @@ function reasoningEffort(value: unknown): ReasoningEffort | undefined {
     : undefined;
 }
 
-class VoiceReplyCallback extends TextStreamCallback {
-  constructor(private readonly registerRequest: (requestId: string) => void) {
-    super();
-  }
+type ResearchInput = { query: string };
 
-  override onStart(event: ChatStartEvent): void {
-    super.onStart(event);
-    this.registerRequest(event.requestId);
+function inputText(input: unknown): string {
+  if (typeof input === "string") return input;
+  if (input && typeof input === "object") {
+    const query = (input as Record<string, unknown>).query;
+    if (typeof query === "string") return query;
   }
+  return JSON.stringify(input, null, 2);
 }
 
-async function* streamVoiceReply(
-  callback: TextStreamCallback,
-  completion: Promise<void>,
-  cleanup: () => void
-): AsyncGenerator<string> {
-  void completion.catch((error) => callback.fail(error));
+/** Copied from the agents-as-tools example: a retained Think helper agent. */
+export class Researcher extends Think<Env> {
+  override getModel() {
+    return DEFAULT_MODEL;
+  }
 
-  try {
-    yield* callback.stream();
-    await completion;
+  override getSystemPrompt(): string {
+    return [
+      "You are a focused research helper agent.",
+      "Use web_search once, then return a concise three-bullet summary."
+    ].join(" ");
+  }
 
-    if (callback.wasInterrupted()) {
-      throw new Error("Voice turn interrupted");
-    }
-    if (!callback.hasText()) {
-      yield "Sorry, I didn't catch a response.";
-    }
-  } finally {
-    cleanup();
+  override formatAgentToolInput(input: unknown) {
+    return {
+      id: crypto.randomUUID(),
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: inputText(input) }]
+    };
+  }
+
+  override getTools(): ToolSet {
+    return {
+      web_search: tool({
+        description:
+          "Search for information on a topic. Returns simulated results for the demo.",
+        inputSchema: z.object({ query: z.string().min(2) }),
+        execute: async ({ query }) => {
+          await this.reportProgress({
+            phase: "searching",
+            fraction: 0.25,
+            message: `Searching for "${query}"…`
+          });
+          await this.reportProgress({
+            phase: "synthesizing",
+            fraction: 0.75,
+            message: "Synthesizing findings…"
+          });
+          return {
+            query,
+            results: [
+              {
+                title: `Background on "${query}"`,
+                snippet:
+                  `A concise overview of ${query}, including its main ` +
+                  "trade-offs and production considerations."
+              },
+              {
+                title: `Recent changes related to "${query}"`,
+                snippet:
+                  `Recent developments around ${query} and lessons from ` +
+                  "open-source infrastructure deployments."
+              }
+            ]
+          };
+        }
+      })
+    };
   }
 }
 
@@ -128,6 +170,16 @@ export class MyThinkAgent extends Think<Env> {
       }),
       maxOutputTokens: 8192,
       sendReasoning: false
+    };
+  }
+  override getTools(): ToolSet {
+    return {
+      research: agentTool<ResearchInput>(Researcher, {
+        description:
+          "Dispatch a Researcher sub-agent to investigate a topic in depth.",
+        displayName: "Researcher",
+        inputSchema: z.object({ query: z.string().min(3) })
+      })
     };
   }
 
@@ -328,36 +380,22 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
 
     const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
     const turnId = crypto.randomUUID();
-    const cancelRequest = (requestId: string) => {
-      void brain
-        .cancelChat(requestId, "Voice turn interrupted")
-        .catch((error) => {
-          console.error("[VoiceAgent] Failed to cancel Think turn:", error);
+    return streamRpcVoiceTurn({
+      signal: context.signal,
+      run: (callback) =>
+        brain.runVoiceTurn(turnId, transcript, callback, {
+          model,
+          ...(effort !== undefined && { reasoningEffort: effort })
+        }),
+      cancel: (requestId, reason) => brain.cancelChat(requestId, reason),
+      onRequestId: (requestId) => {
+        console.log("[ThinkTrace]", {
+          event: "request_start",
+          turnId,
+          requestId
         });
-    };
-    const callback = new VoiceReplyCallback((requestId) => {
-      console.log("[ThinkTrace]", {
-        event: "request_start",
-        turnId,
-        requestId
-      });
-      if (context.signal.aborted) cancelRequest(requestId);
-    });
-    const cancel = () => {
-      const requestId = callback.requestId();
-      if (requestId) cancelRequest(requestId);
-    };
-
-    context.signal.addEventListener("abort", cancel, { once: true });
-    if (context.signal.aborted) cancel();
-
-    const completion = brain.runVoiceTurn(turnId, transcript, callback, {
-      model,
-      ...(effort !== undefined && { reasoningEffort: effort })
-    });
-
-    return streamVoiceReply(callback, completion, () => {
-      context.signal.removeEventListener("abort", cancel);
+      },
+      emptyResponse: "Sorry, I didn't catch a response."
     });
   }
 

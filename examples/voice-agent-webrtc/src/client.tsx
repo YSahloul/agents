@@ -3,6 +3,8 @@ import {
   useVoiceAgent,
   type VoiceStatus
 } from "@cloudflare/voice/react";
+import { useAgent, useAgentToolEvents } from "agents/react";
+import type { AgentToolRunState } from "agents/chat";
 import {
   MicrophoneIcon,
   MicrophoneSlashIcon,
@@ -18,7 +20,8 @@ import {
   UserSwitchIcon,
   PaperPlaneRightIcon,
   MoonIcon,
-  SunIcon
+  SunIcon,
+  RobotIcon
 } from "@phosphor-icons/react";
 import { Button, Input, Select, Surface, Text } from "@cloudflare/kumo";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -119,10 +122,46 @@ function getAudioOutputLabel(device: MediaDeviceInfo, index: number) {
   return device.label || `Speaker ${index + 1}`;
 }
 
+function helperQuery(run: AgentToolRunState): string {
+  let preview = run.inputPreview;
+  if (typeof preview === "string") {
+    const text = preview;
+    try {
+      preview = JSON.parse(text);
+    } catch {
+      return text;
+    }
+  }
+  if (
+    preview &&
+    typeof preview === "object" &&
+    "query" in preview &&
+    typeof preview.query === "string"
+  ) {
+    return preview.query;
+  }
+  return "Research task";
+}
+
+function helperStatus(run: AgentToolRunState): string {
+  if (run.status === "completed") return "Done";
+  if (run.status === "running") return run.progress?.message ?? "Working…";
+  return run.error ?? run.status;
+}
+
 // --- Main App ---
 
 function App() {
   const sessionId = useRef(getSessionId()).current;
+  const thinkAgent = useAgent({
+    agent: "my-think-agent",
+    name: sessionId
+  });
+  const { runsByToolCallId } = useAgentToolEvents({ agent: thinkAgent });
+  const helperRuns = useMemo(
+    () => Object.values(runsByToolCallId).flat(),
+    [runsByToolCallId]
+  );
   const [models, setModels] = useState<ModelOption[]>(BASELINE_MODELS);
   const [llmModel, setLlmModel] = useState<string>(
     "@cf/moonshotai/kimi-k2.7-code"
@@ -300,6 +339,62 @@ function App() {
             conversation, memory, and tools.
           </Text>
         </Surface>
+
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <Text size="xs" variant="secondary">
+            Run the same Researcher sub-agent used by the agents-as-tools
+            example.
+          </Text>
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<RobotIcon size={16} />}
+            disabled={!connected || status === "thinking"}
+            onClick={() =>
+              sendText(
+                "Delegate to the Researcher sub-agent: compare WebRTC voice and WebSocket voice in three concise bullets."
+              )
+            }
+          >
+            Try sub-agent
+          </Button>
+        </div>
+
+        {helperRuns.length > 0 && (
+          <Surface className="mb-4 rounded-xl p-4 ring ring-kumo-line">
+            <div className="mb-3 flex items-center gap-2">
+              <RobotIcon size={18} className="text-kumo-accent" />
+              <Text size="sm" bold>
+                Sub-agent activity
+              </Text>
+            </div>
+            <div className="space-y-3">
+              {helperRuns.map((run) => (
+                <div key={run.runId} className="rounded-lg bg-kumo-fill p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <Text size="xs" bold>
+                      {run.display?.name ?? run.agentType}
+                    </Text>
+                    <span className="flex items-center gap-1 text-xs text-kumo-secondary">
+                      {run.status === "running" && (
+                        <SpinnerGapIcon size={13} className="animate-spin" />
+                      )}
+                      {helperStatus(run)}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs text-kumo-secondary">
+                    {helperQuery(run)}
+                  </div>
+                  {run.summary && (
+                    <div className="mt-2 text-xs text-kumo-default">
+                      {run.summary}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Surface>
+        )}
 
         {/* Toast notification */}
         {toast && (

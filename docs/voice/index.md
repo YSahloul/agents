@@ -215,6 +215,44 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
 }
 ```
 
+### Stream a remote Agent over RPC
+
+Use `streamRpcVoiceTurn()` when a separate Agent owns the model turn,
+conversation, or tools. The Voice Agent keeps the audio lifecycle while the
+remote Agent streams text through a Workers RPC callback:
+
+```typescript
+import { Think } from "@cloudflare/think";
+import {
+  streamRpcVoiceTurn,
+  type VoiceRpcCallback,
+  type VoiceTurnContext
+} from "@cloudflare/voice";
+import { getAgentByName } from "agents";
+
+export class Brain extends Think<Env> {
+  runVoiceTurn(
+    transcript: string,
+    callback: VoiceRpcCallback
+  ): Promise<void> {
+    return this.chat(transcript, callback);
+  }
+}
+
+async onTurn(transcript: string, context: VoiceTurnContext) {
+  const brain = await getAgentByName(this.env.BRAIN, this.name);
+  return streamRpcVoiceTurn({
+    signal: context.signal,
+    run: (callback) => brain.runVoiceTurn(transcript, callback),
+    cancel: (requestId, reason) => brain.cancelChat(requestId, reason)
+  });
+}
+```
+
+`VoiceRpcCallback.onEvent()` accepts JSON-serialized AI SDK stream events. A
+custom RPC target can call `onText()` for each text delta, then `onDone()` or
+`onError()`. Call `onStart({ requestId })` when the target supports cancellation.
+
 The `context` object provides:
 
 | Field        | Type                                       | Description                             |

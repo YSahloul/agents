@@ -14,11 +14,11 @@ npm install @cloudflare/voice
 
 ## Exports
 
-| Export path                | What it provides                                                                                        |
-| -------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `@cloudflare/voice`        | Server-side mixins (`withVoice`, `withVoiceInput`), provider types, Workers AI providers, SFU utilities |
-| `@cloudflare/voice/react`  | React hooks (`useVoiceAgent`, `useVoiceInput`)                                                          |
-| `@cloudflare/voice/client` | Framework-agnostic `VoiceClient` class                                                                  |
+| Export path                | What it provides                                                                             |
+| -------------------------- | -------------------------------------------------------------------------------------------- |
+| `@cloudflare/voice`        | Server mixins, the RPC turn adapter, provider types, Workers AI providers, and SFU utilities |
+| `@cloudflare/voice/react`  | React hooks (`useVoiceAgent`, `useVoiceInput`)                                               |
+| `@cloudflare/voice/client` | Framework-agnostic `VoiceClient` class                                                       |
 
 ## Server: full voice agent (`withVoice`)
 
@@ -63,6 +63,47 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
   return result.fullStream;
 }
 ```
+
+### Stream from another Agent over RPC
+
+Use `streamRpcVoiceTurn()` when a separate Agent owns the model turn,
+conversation, or tools. The helper passes a Workers `RpcTarget` callback to the
+remote Agent, returns its text immediately to Voice, and forwards interruption
+to the remote request:
+
+```typescript
+import { Think } from "@cloudflare/think";
+import {
+  streamRpcVoiceTurn,
+  type VoiceRpcCallback,
+  type VoiceTurnContext
+} from "@cloudflare/voice";
+import { getAgentByName } from "agents";
+
+export class Brain extends Think<Env> {
+  runVoiceTurn(
+    transcript: string,
+    callback: VoiceRpcCallback
+  ): Promise<void> {
+    return this.chat(transcript, callback);
+  }
+}
+
+async onTurn(transcript: string, context: VoiceTurnContext) {
+  const brain = await getAgentByName(this.env.BRAIN, this.name);
+  return streamRpcVoiceTurn({
+    signal: context.signal,
+    run: (callback) => brain.runVoiceTurn(transcript, callback),
+    cancel: (requestId, reason) => brain.cancelChat(requestId, reason)
+  });
+}
+```
+
+`VoiceRpcCallback.onEvent()` accepts JSON-serialized AI SDK stream events, so it
+can be passed directly to Think or another compatible stream producer. A custom
+RPC target can instead call `onText()` for each text delta, followed by
+`onDone()` or `onError()`. Call `onStart({ requestId })` when the target supports
+remote cancellation.
 
 `context.messages` contains completed conversation history before the current transcript. Append `transcript` exactly once when constructing the LLM request. During speculative turns, `onTurn()` runs before confirmation adds the current transcript to history, so `context.messages` is the authoritative snapshot for the request.
 

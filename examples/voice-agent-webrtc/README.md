@@ -4,6 +4,10 @@ A Think agent that uses a separate `@cloudflare/voice` Durable Object as its
 WebRTC audio gateway. Think owns the transcript, model, tools, memory, and
 workspace; Voice only handles STT, TTS, and Cloudflare Realtime SFU transport.
 
+The demo also dispatches the same retained Researcher sub-agent used by the
+`agents-as-tools` example. Its live status and final summary appear beside the
+voice transcript.
+
 ## Run it
 
 ```bash
@@ -34,14 +38,14 @@ const VoiceAgent = withSFUVoice(Agent);
 export class MyVoiceAgent extends VoiceAgent<Env> {
   async onTurn(transcript: string, context: VoiceTurnContext) {
     const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
-    const callback = new VoiceReplyCallback(/* register request for abort */);
-    const completion = brain.runVoiceTurn(
-      crypto.randomUUID(),
-      transcript,
-      callback,
-      { model: "@cf/moonshotai/kimi-k2.7-code" }
-    );
-    return streamVoiceReply(callback, completion);
+    return streamRpcVoiceTurn({
+      signal: context.signal,
+      run: (callback) =>
+        brain.runVoiceTurn(crypto.randomUUID(), transcript, callback, {
+          model: "@cf/moonshotai/kimi-k2.7-code"
+        }),
+      cancel: (requestId, reason) => brain.cancelChat(requestId, reason)
+    });
   }
 }
 ```
@@ -62,14 +66,19 @@ export class MyThinkAgent extends Think<Env> {
 }
 ```
 
-`runVoiceTurn()` starts `Think.chat()` with an RPC callback. `MyVoiceAgent`
-returns the callback's async text stream immediately, so Voice can synthesize
-and send the first complete sentence over WebRTC while Think continues the
-turn. The callback also exposes Think's request id so barge-in can call
-`cancelChat()`.
+`runVoiceTurn()` starts `Think.chat()` with the library-provided RPC callback.
+`streamRpcVoiceTurn()` returns its async text stream immediately, so Voice can
+synthesize and send the first complete sentence over WebRTC while Think
+continues the turn. It also forwards barge-in to `cancelChat()` after Think
+exposes the request id.
 
 The Think-provided workspace tools let voice turns create, read, update, search,
 and delete durable files. Shell execution stays disabled.
+
+`MyThinkAgent.getTools()` exposes `agentTool(Researcher, ...)`. The React client
+opens a second, same-session connection to `MyThinkAgent` and folds its
+`agent-tool-event` frames with `useAgentToolEvents()`, making the helper's
+running and completed states visible while Voice continues handling audio.
 
 `[ThinkTrace]` worker logs record turn timing, step usage, and each server-side
 tool call, input, result, and duration. Reasoning text remains hidden.

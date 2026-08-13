@@ -78,6 +78,12 @@ export { withVoiceInput } from "./voice-input";
 
 // Re-export text stream utility
 export { iterateText, type TextSource } from "./text-stream";
+export {
+  VoiceRpcCallback,
+  streamRpcVoiceTurn,
+  type VoiceRpcCallbackOptions,
+  type RpcVoiceTurnOptions
+} from "./rpc-voice";
 
 // Re-export SFU utility functions
 export {
