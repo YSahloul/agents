@@ -275,7 +275,7 @@ function App() {
               className="text-kumo-brand"
             />
             <Text variant="heading1" as="h1">
-              Talk Smack
+              Think Voice
             </Text>
           </div>
           <div className="flex items-center gap-3">
@@ -376,7 +376,7 @@ function App() {
                 {isInCall
                   ? "Start speaking..."
                   : connected
-                    ? "Start a roast when you're ready"
+                    ? "Start a voice session when you're ready"
                     : "Connecting to agent..."}
               </Text>
             </div>
@@ -434,7 +434,7 @@ function App() {
               disabled={!connected || speakerConflict}
               icon={<PhoneIcon size={20} weight="fill" />}
             >
-              {connected ? "Start roasting" : "Connecting..."}
+              {connected ? "Start talking" : "Connecting..."}
             </Button>
           ) : (
             <>
