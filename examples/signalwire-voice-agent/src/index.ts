@@ -37,7 +37,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
       }),
       system: SYSTEM_PROMPT,
       messages: [
-        ...context.messages.slice(-6).map((m) => ({
+        ...context.messages.map((m) => ({
           role: m.role as "user" | "assistant",
           content: m.content
         })),
