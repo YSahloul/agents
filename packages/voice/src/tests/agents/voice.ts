@@ -474,7 +474,10 @@ function isJsonValue(value: unknown): boolean {
 
 // --- Test agents ---
 
-const VoiceBase = withVoice(Agent, { filterEchoedTranscripts: true });
+const VoiceBase = withVoice(Agent, {
+  filterEchoedTranscripts: true,
+  listenDuringCallStart: false
+});
 const Pcm24kVoiceBase = withVoice(Agent, {
   audioFormat: "pcm16",
   sampleRate: 24000
@@ -503,6 +506,7 @@ export class TestVoiceAgent extends VoiceBase {
   #lastReadySession: ControlledReadyTranscriberSession | null = null;
   #readySessions: ControlledReadyTranscriberSession[] = [];
   #keepAliveAcquiredCount = 0;
+  #callStartGate: { promise: Promise<void>; resolve: () => void } | null = null;
   #keepAliveReleasedCount = 0;
   #useAudioTransport = false;
   #audioTransport = new TestAudioTransport();
@@ -615,8 +619,9 @@ export class TestVoiceAgent extends VoiceBase {
     return this.#beforeCallStartResult;
   }
 
-  onCallStart(_connection: Connection) {
+  async onCallStart(_connection: Connection) {
     this.#callStartCount++;
+    await this.#callStartGate?.promise;
   }
 
   onCallEnd(_connection: Connection) {
@@ -640,6 +645,25 @@ export class TestVoiceAgent extends VoiceBase {
           } else if (parsed.value === "throw") {
             this.#beforeCallStartResult = "throw";
           }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_hold_call_start":
+          {
+            let resolve = () => {};
+            const promise = new Promise<void>((done) => {
+              resolve = done;
+            });
+            this.#callStartGate = { promise, resolve };
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_release_call_start":
+          this.#callStartGate?.resolve();
+          this.#callStartGate = null;
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
           );

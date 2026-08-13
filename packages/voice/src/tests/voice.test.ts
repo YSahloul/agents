@@ -388,6 +388,40 @@ describe("VoiceAgent — protocol", () => {
     expect(msg).toEqual({ type: "status", status: "listening" });
     ws.close();
   });
+  it("drops inbound audio while the opening hook runs when configured", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "_hold_call_start" });
+    await waitForAck(ws, "_hold_call_start");
+    await startCall(ws);
+
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+    await waitForMicrotasks();
+    expect((await getTurnState(ws)).transcripts).toEqual([]);
+
+    sendJSON(ws, { type: "_release_call_start" });
+    await waitForAck(ws, "_release_call_start");
+    await waitForMicrotasks();
+
+    const transcript = waitForMessageMatching(
+      ws,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        (message as Record<string, unknown>).type === "transcript" &&
+        (message as Record<string, unknown>).role === "user"
+    );
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+    expect((await transcript) as Record<string, unknown>).toMatchObject({
+      text: "utterance 1 (20000 bytes)"
+    });
+    ws.close();
+  });
 
   it("sends idle status on end_call", async () => {
     const { ws } = await connectWS(uniquePath());

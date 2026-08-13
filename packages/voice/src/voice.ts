@@ -154,6 +154,12 @@ export interface VoiceAgentOptions {
    * @default false
    */
   filterEchoedTranscripts?: boolean;
+  /**
+   * Accept inbound audio while `onCallStart()` runs. Disable when the hook
+   * plays an opening greeting and the transport can loop that audio back into
+   * STT. The opening hook is not interruptible while disabled. @default true
+   */
+  listenDuringCallStart?: boolean;
 }
 
 interface SpeculativeTurn {
@@ -298,6 +304,8 @@ export function withVoice<TBase extends AgentLike>(
     #conversationHistory: Array<{ role: VoiceRole; content: string }> = [];
     // Speculative Flux responses wait for EndOfTurn before entering history.
     #speculativeTurns = new Map<string, SpeculativeTurn>();
+    // Connections whose opening hook should not feed inbound audio to STT.
+    #callStartInputSuppressed = new Set<string>();
 
     // Current async start_call identity per connection, used to ignore stale readiness.
     #startupTokens = new Map<string, symbol>();
@@ -356,6 +364,7 @@ export function withVoice<TBase extends AgentLike>(
       // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- overwriting lifecycle
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
         this.#startupTokens.delete(connection.id);
+        this.#callStartInputSuppressed.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
         this.#cm.cleanup(connection.id);
         const transport = this.#audioTransports.get(connection.id);
@@ -460,6 +469,7 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     receiveAudio(connectionId: string, audio: ArrayBuffer): void {
+      if (this.#callStartInputSuppressed.has(connectionId)) return;
       this.#cm.bufferAudio(connectionId, audio);
     }
 
@@ -881,7 +891,14 @@ export function withVoice<TBase extends AgentLike>(
       this.#startupTokens.delete(connection.id);
 
       this.#sendJSON(connection, { type: "status", status: "listening" });
-      await this.onCallStart(connection);
+      if (!opt("listenDuringCallStart", true)) {
+        this.#callStartInputSuppressed.add(connection.id);
+      }
+      try {
+        await this.onCallStart(connection);
+      } finally {
+        this.#callStartInputSuppressed.delete(connection.id);
+      }
     }
 
     #isCurrentStartup(connectionId: string, startupToken: symbol): boolean {

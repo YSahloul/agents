@@ -2446,6 +2446,46 @@ importers:
         specifier: ^4.115.0
         version: 4.115.0(@cloudflare/workers-types@5.20260729.1)
 
+  examples/signalwire-mcp-voice-agent:
+    dependencies:
+      '@cloudflare/voice':
+        specifier: '*'
+        version: link:../../packages/voice
+      '@cloudflare/voice-signalwire':
+        specifier: '*'
+        version: link:../../voice-providers/signalwire
+      '@modelcontextprotocol/client':
+        specifier: 2.0.0
+        version: 2.0.0
+      '@modelcontextprotocol/sdk':
+        specifier: 1.30.0
+        version: 1.30.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      '@modelcontextprotocol/server':
+        specifier: 2.0.0
+        version: 2.0.0
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      ai:
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.4.3)
+      workers-ai-provider:
+        specifier: ^4.0.0
+        version: 4.0.0(patch_hash=3d85735844cd282fd787963340f5c196e4d6faed238d3d3929120d6317b21b54)(@ai-sdk/anthropic@4.0.10(zod@4.4.3))(@ai-sdk/google@4.0.10(zod@4.4.3))(@ai-sdk/openai@4.0.9(zod@4.4.3))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.4.3))
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20260729.1
+        version: 5.20260729.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.115.0
+        version: 4.115.0(@cloudflare/workers-types@5.20260729.1)
+
   examples/signalwire-voice-agent:
     dependencies:
       '@cloudflare/voice':
