@@ -474,7 +474,7 @@ function isJsonValue(value: unknown): boolean {
 
 // --- Test agents ---
 
-const VoiceBase = withVoice(Agent);
+const VoiceBase = withVoice(Agent, { filterEchoedTranscripts: true });
 const Pcm24kVoiceBase = withVoice(Agent, {
   audioFormat: "pcm16",
   sampleRate: 24000

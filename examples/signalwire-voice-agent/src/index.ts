@@ -11,7 +11,7 @@ import { createWorkersAI } from "workers-ai-provider";
 
 const SYSTEM_PROMPT = `You are a phone voice assistant. Respond in 1-2 short sentences. Be direct and natural. Never exceed 30 words unless asked for detail.`;
 
-const VoiceAgent = withVoice(Agent);
+const VoiceAgent = withVoice(Agent, { filterEchoedTranscripts: true });
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   transcriber = new WorkersAIFluxSTT(this.env.AI, {

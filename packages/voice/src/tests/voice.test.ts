@@ -1377,6 +1377,34 @@ describe("VoiceAgent — multi-turn", () => {
     ws.close();
   });
 
+  it("filters transcript echo without blocking later caller speech", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    await startCall(ws);
+
+    let responseDone = waitForType(ws, "transcript_end");
+    let listening = waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "_emit_end", text: "weather in Paris" });
+    await responseDone;
+    await listening;
+
+    sendJSON(ws, { type: "_emit_end", text: "weather in Paris" });
+
+    responseDone = waitForType(ws, "transcript_end");
+    listening = waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "_emit_end", text: "book a table tonight" });
+    await responseDone;
+    await listening;
+
+    expect(await getTurnState(ws)).toEqual({
+      transcripts: ["weather in Paris", "book a table tonight"],
+      abortCount: 0
+    });
+    expect(await getMessageCount(ws)).toBe(4);
+
+    ws.close();
+  });
+
   it("retains conversation messages across turns in memory", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");

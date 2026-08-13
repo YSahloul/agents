@@ -148,6 +148,12 @@ export interface VoiceAgentOptions {
   persistMessages?: boolean;
   /** Max conversation messages to retain. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
+  /**
+   * Drop transcriptions that closely match the previous assistant message.
+   * This suppresses speakerphone echo after STT without disabling barge-in.
+   * @default false
+   */
+  filterEchoedTranscripts?: boolean;
 }
 
 interface SpeculativeTurn {
@@ -168,6 +174,20 @@ type SpeculativeCancelReason =
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
 const DEFAULT_SAMPLE_RATE = 16000;
+
+function isEchoOf(transcript: string, assistantText: string): boolean {
+  if (!assistantText) return false;
+  const assistant =
+    assistantText
+      .toLowerCase()
+      .match(/[\p{L}\p{N}]+/gu)
+      ?.join(" ") ?? "";
+  const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  if (heard.length >= 3 && assistant.includes(heard.join(" "))) return true;
+  const assistantWords = new Set(assistant.split(" "));
+  const hits = heard.filter((word) => assistantWords.has(word)).length;
+  return hits >= 4 && hits / heard.length >= 0.6;
+}
 
 // --- Mixin ---
 
@@ -455,6 +475,13 @@ export function withVoice<TBase extends AgentLike>(
       transcript: string,
       _connection: Connection
     ): string | null | Promise<string | null> {
+      if (!opt("filterEchoedTranscripts", false)) return transcript;
+      const history = this.getConversationHistory();
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i].role === "assistant") {
+          return isEchoOf(transcript, history[i].content) ? null : transcript;
+        }
+      }
       return transcript;
     }
 
