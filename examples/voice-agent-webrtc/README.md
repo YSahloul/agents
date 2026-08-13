@@ -34,9 +34,14 @@ const VoiceAgent = withSFUVoice(Agent);
 export class MyVoiceAgent extends VoiceAgent<Env> {
   async onTurn(transcript: string, context: VoiceTurnContext) {
     const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
-    return brain.runVoiceTurn(crypto.randomUUID(), transcript, {
-      model: "@cf/moonshotai/kimi-k2.7-code"
-    });
+    const callback = new VoiceReplyCallback(/* register request for abort */);
+    const completion = brain.runVoiceTurn(
+      crypto.randomUUID(),
+      transcript,
+      callback,
+      { model: "@cf/moonshotai/kimi-k2.7-code" }
+    );
+    return streamVoiceReply(callback, completion);
   }
 }
 ```
@@ -57,11 +62,17 @@ export class MyThinkAgent extends Think<Env> {
 }
 ```
 
-`runVoiceTurn()` calls `Think.chat()`, collects its text, and maps the external
-voice turn id to Think's request id so WebRTC barge-in can call `cancelChat()`.
+`runVoiceTurn()` starts `Think.chat()` with an RPC callback. `MyVoiceAgent`
+returns the callback's async text stream immediately, so Voice can synthesize
+and send the first complete sentence over WebRTC while Think continues the
+turn. The callback also exposes Think's request id so barge-in can call
+`cancelChat()`.
 
 The Think-provided workspace tools let voice turns create, read, update, search,
 and delete durable files. Shell execution stays disabled.
+
+`[ThinkTrace]` worker logs record turn timing, step usage, and each server-side
+tool call, input, result, and duration. Reasoning text remains hidden.
 
 The Voice agent does not replay its transient `VoiceTurnContext.messages` into
 Think. This prevents duplicate history. Eager end-of-turn speculation is also

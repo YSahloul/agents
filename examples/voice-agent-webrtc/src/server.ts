@@ -1,5 +1,13 @@
 import { TextStreamCallback } from "@cloudflare/think/messengers";
-import { Think, type ChatStartEvent, type TurnConfig } from "@cloudflare/think";
+import {
+  Think,
+  type ChatStartEvent,
+  type StepContext,
+  type StreamCallback,
+  type ToolCallContext,
+  type ToolCallResultContext,
+  type TurnConfig
+} from "@cloudflare/think";
 import {
   Agent,
   getAgentByName,
@@ -50,8 +58,6 @@ function reasoningEffort(value: unknown): ReasoningEffort | undefined {
 }
 
 class VoiceReplyCallback extends TextStreamCallback {
-  #failure?: Error;
-
   constructor(private readonly registerRequest: (requestId: string) => void) {
     super();
   }
@@ -60,14 +66,27 @@ class VoiceReplyCallback extends TextStreamCallback {
     super.onStart(event);
     this.registerRequest(event.requestId);
   }
+}
 
-  override onError(error: string): void {
-    this.#failure = new Error(error);
-    super.onError(error);
-  }
+async function* streamVoiceReply(
+  callback: TextStreamCallback,
+  completion: Promise<void>,
+  cleanup: () => void
+): AsyncGenerator<string> {
+  void completion.catch((error) => callback.fail(error));
 
-  get failure(): Error | undefined {
-    return this.#failure;
+  try {
+    yield* callback.stream();
+    await completion;
+
+    if (callback.wasInterrupted()) {
+      throw new Error("Voice turn interrupted");
+    }
+    if (!callback.hasText()) {
+      yield "Sorry, I didn't catch a response.";
+    }
+  } finally {
+    cleanup();
   }
 }
 
@@ -80,8 +99,6 @@ export class MyThinkAgent extends Think<Env> {
   override maxSteps = 3;
   override workspaceBash = false;
   readonly #workersAi = createWorkersAI({ binding: this.env.AI });
-  readonly #voiceRequests = new Map<string, string>();
-  readonly #cancelledVoiceTurns = new Set<string>();
 
   override getModel() {
     return DEFAULT_MODEL;
@@ -114,39 +131,66 @@ export class MyThinkAgent extends Think<Env> {
     };
   }
 
+  override beforeToolCall(ctx: ToolCallContext): void {
+    console.log("[ThinkTrace]", {
+      event: "tool_call",
+      toolCallId: ctx.toolCallId,
+      toolName: ctx.toolName,
+      stepNumber: ctx.stepNumber,
+      input: ctx.input
+    });
+  }
+
+  override afterToolCall(ctx: ToolCallResultContext): void {
+    console.log("[ThinkTrace]", {
+      event: "tool_result",
+      toolCallId: ctx.toolCallId,
+      toolName: ctx.toolName,
+      stepNumber: ctx.stepNumber,
+      durationMs: ctx.toolExecutionMs,
+      ...(ctx.toolOutput.type === "tool-result"
+        ? { output: ctx.toolOutput.output }
+        : { error: ctx.toolOutput.error })
+    });
+  }
+
+  override onStepEnd(ctx: StepContext): void {
+    console.log("[ThinkTrace]", {
+      event: "step_end",
+      finishReason: ctx.finishReason,
+      usage: ctx.usage
+    });
+  }
+
   async runVoiceTurn(
     turnId: string,
     transcript: string,
+    callback: StreamCallback,
     options: VoiceTurnOptions
-  ): Promise<string> {
-    const callback = new VoiceReplyCallback((requestId) => {
-      this.#voiceRequests.set(turnId, requestId);
-      if (this.#cancelledVoiceTurns.delete(turnId)) {
-        this.cancelChat(requestId, "Voice turn interrupted");
-      }
+  ): Promise<void> {
+    const startedAt = Date.now();
+    console.log("[ThinkTrace]", {
+      event: "turn_start",
+      turnId,
+      model: options.model,
+      reasoningEffort: options.reasoningEffort
     });
 
     try {
-      await this.chat(transcript, callback, {
-        metadata: options
+      await this.chat(transcript, callback, { metadata: options });
+      console.log("[ThinkTrace]", {
+        event: "turn_end",
+        turnId,
+        durationMs: Date.now() - startedAt
       });
-      if (callback.failure) throw callback.failure;
-      if (callback.wasInterrupted()) {
-        throw new Error("Voice turn interrupted");
-      }
-      return callback.textSoFar().trim();
-    } finally {
-      this.#voiceRequests.delete(turnId);
-      this.#cancelledVoiceTurns.delete(turnId);
-    }
-  }
-
-  cancelVoiceTurn(turnId: string): void {
-    const requestId = this.#voiceRequests.get(turnId);
-    if (requestId) {
-      this.cancelChat(requestId, "Voice turn interrupted");
-    } else {
-      this.#cancelledVoiceTurns.add(turnId);
+    } catch (error) {
+      console.error("[ThinkTrace]", {
+        event: "turn_error",
+        turnId,
+        durationMs: Date.now() - startedAt,
+        error
+      });
+      throw error;
     }
   }
 }
@@ -270,7 +314,10 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
 
   // --- Voice agent logic ---
 
-  async onTurn(transcript: string, context: VoiceTurnContext): Promise<string> {
+  async onTurn(
+    transcript: string,
+    context: VoiceTurnContext
+  ): Promise<AsyncIterable<string>> {
     const url = new URL(context.connection.uri ?? "http://localhost");
     const modelParam = url.searchParams.get("llm");
     const model =
@@ -281,25 +328,37 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
 
     const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
     const turnId = crypto.randomUUID();
-    const cancel = () => {
-      void brain.cancelVoiceTurn(turnId).catch((error) => {
-        console.error("[VoiceAgent] Failed to cancel Think turn:", error);
+    const cancelRequest = (requestId: string) => {
+      void brain
+        .cancelChat(requestId, "Voice turn interrupted")
+        .catch((error) => {
+          console.error("[VoiceAgent] Failed to cancel Think turn:", error);
+        });
+    };
+    const callback = new VoiceReplyCallback((requestId) => {
+      console.log("[ThinkTrace]", {
+        event: "request_start",
+        turnId,
+        requestId
       });
+      if (context.signal.aborted) cancelRequest(requestId);
+    });
+    const cancel = () => {
+      const requestId = callback.requestId();
+      if (requestId) cancelRequest(requestId);
     };
 
     context.signal.addEventListener("abort", cancel, { once: true });
     if (context.signal.aborted) cancel();
 
-    try {
-      return (
-        (await brain.runVoiceTurn(turnId, transcript, {
-          model,
-          ...(effort !== undefined && { reasoningEffort: effort })
-        })) || "Sorry, I didn't catch a response."
-      );
-    } finally {
+    const completion = brain.runVoiceTurn(turnId, transcript, callback, {
+      model,
+      ...(effort !== undefined && { reasoningEffort: effort })
+    });
+
+    return streamVoiceReply(callback, completion, () => {
       context.signal.removeEventListener("abort", cancel);
-    }
+    });
   }
 
   async onCallStart(connection: Connection) {
