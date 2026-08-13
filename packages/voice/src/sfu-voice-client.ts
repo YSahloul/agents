@@ -71,7 +71,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
             stream: await navigator.mediaDevices.getUserMedia({
               audio: {
                 sampleRate: 48000,
-                channelCount: 2,
+                channelCount: 1,
                 echoCancellation: true,
                 noiseSuppression: true,
                 autoGainControl: true
