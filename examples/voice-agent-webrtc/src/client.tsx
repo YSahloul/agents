@@ -157,11 +157,8 @@ function App() {
     agent: "my-think-agent",
     name: sessionId
   });
-  const { runsByToolCallId } = useAgentToolEvents({ agent: thinkAgent });
-  const helperRuns = useMemo(
-    () => Object.values(runsByToolCallId).flat(),
-    [runsByToolCallId]
-  );
+  const { unboundRuns } = useAgentToolEvents({ agent: thinkAgent });
+  const helperRuns = useMemo(() => unboundRuns, [unboundRuns]);
   const [models, setModels] = useState<ModelOption[]>(BASELINE_MODELS);
   const [llmModel, setLlmModel] = useState<string>(
     "@cf/moonshotai/kimi-k2.7-code"
@@ -342,8 +339,8 @@ function App() {
 
         <div className="mb-4 flex items-center justify-between gap-3">
           <Text size="xs" variant="secondary">
-            Run the same Researcher sub-agent used by the agents-as-tools
-            example.
+            Start a background Researcher, then keep talking to Think while it
+            works.
           </Text>
           <Button
             size="sm"
@@ -352,11 +349,11 @@ function App() {
             disabled={!connected || status === "thinking"}
             onClick={() =>
               sendText(
-                "Delegate to the Researcher sub-agent: compare WebRTC voice and WebSocket voice in three concise bullets."
+                "Start the Researcher in the background to compare WebRTC voice and WebSocket voice in three concise bullets."
               )
             }
           >
-            Try sub-agent
+            Start research
           </Button>
         </div>
 

@@ -6,7 +6,6 @@ import {
   type ToolCallResultContext,
   type TurnConfig
 } from "@cloudflare/think";
-import { agentTool } from "agents/agent-tools";
 import {
   Agent,
   getAgentByName,
@@ -44,7 +43,9 @@ const SYSTEM_PROMPT = `You are a helpful assistant with access to a persistent w
 
 You are speaking in a live WebRTC voice chat, so keep responses concise and natural for text-to-speech. Always return speakable text.
 
-Use the Researcher sub-agent whenever the user asks you to delegate or research a topic. Use the workspace tools to create, read, update, find, list, and delete files when requested. Confirm completed actions briefly.`;
+When the user asks you to delegate or research a topic, use research_background. Before calling it, say one short sentence telling the user that you are starting the Researcher. After dispatch, tell them they can keep talking while it works and that its result will appear in Sub-agent activity.
+
+Use the workspace tools to create, read, update, find, list, and delete files when requested. Confirm completed actions briefly.`;
 
 type ReasoningEffort = "low" | "medium" | "high" | null;
 
@@ -104,6 +105,7 @@ export class Researcher extends Think<Env> {
             fraction: 0.25,
             message: `Searching for "${query}"…`
           });
+          await scheduler.wait(20_000);
           await this.reportProgress({
             phase: "synthesizing",
             fraction: 0.75,
@@ -174,11 +176,32 @@ export class MyThinkAgent extends Think<Env> {
   }
   override getTools(): ToolSet {
     return {
-      research: agentTool<ResearchInput>(Researcher, {
+      research_background: tool({
         description:
-          "Dispatch a Researcher sub-agent to investigate a topic in depth.",
-        displayName: "Researcher",
-        inputSchema: z.object({ query: z.string().min(3) })
+          "Dispatch a Researcher sub-agent in the background. Returns immediately so the conversation can continue while it works.",
+        inputSchema: z.object({ query: z.string().min(3) }),
+        execute: async ({ query }) => {
+          const dispatched = await this.runAgentTool<ResearchInput>(
+            Researcher,
+            {
+              input: { query },
+              inputPreview: query,
+              display: { name: "Researcher" },
+              detached: {
+                notify: { source: "voice-background-research" },
+                maxBudgetMs: 5 * 60 * 1000
+              }
+            }
+          );
+          return {
+            status: dispatched.status,
+            runId: dispatched.runId,
+            note:
+              dispatched.status === "running"
+                ? "Researcher is working in the background. The user can continue talking."
+                : dispatched.error
+          };
+        }
       })
     };
   }

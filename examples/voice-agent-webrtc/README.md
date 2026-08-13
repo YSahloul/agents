@@ -5,8 +5,9 @@ WebRTC audio gateway. Think owns the transcript, model, tools, memory, and
 workspace; Voice only handles STT, TTS, and Cloudflare Realtime SFU transport.
 
 The demo also dispatches the same retained Researcher sub-agent used by the
-`agents-as-tools` example. Its live status and final summary appear beside the
-voice transcript.
+`agents-as-tools` example. Think acknowledges the dispatch immediately so the
+user can keep talking while the helper runs. Its live status and final summary
+appear beside the voice transcript.
 
 ## Run it
 
@@ -75,10 +76,13 @@ exposes the request id.
 The Think-provided workspace tools let voice turns create, read, update, search,
 and delete durable files. Shell execution stays disabled.
 
-`MyThinkAgent.getTools()` exposes `agentTool(Researcher, ...)`. The React client
-opens a second, same-session connection to `MyThinkAgent` and folds its
-`agent-tool-event` frames with `useAgentToolEvents()`, making the helper's
-running and completed states visible while Voice continues handling audio.
+`MyThinkAgent.getTools()` exposes a detached `runAgentTool(Researcher, ...)`.
+The React client opens a second, same-session connection to `MyThinkAgent` and
+folds its unbound `agent-tool-event` frames with `useAgentToolEvents()`, making
+the helper's background progress visible while Voice continues accepting turns.
+
+The copied `web_search` tool is simulated: it proves background orchestration,
+not grounded internet research.
 
 `[ThinkTrace]` worker logs record turn timing, step usage, and each server-side
 tool call, input, result, and duration. Reasoning text remains hidden.
