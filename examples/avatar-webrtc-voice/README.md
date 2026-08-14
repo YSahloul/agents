@@ -8,9 +8,11 @@ The demo also dispatches the same retained Researcher sub-agent used by the
 `agents-as-tools` example. Its live status and final summary appear beside the
 voice transcript.
 
-The browser shows a local robot animation inspired by Pipecat's simple chatbot:
-an idle image while waiting and a short frame loop while the agent speaks.
-Only audio travels through the SFU; the avatar assets stay client-side.
+The browser shows a local robot animation inspired by Pipecat's simple chatbot.
+It preloads 25 images, walks them forward and backward at 30 FPS while remote
+TTS audio is audible, and returns to the first frame when playback stops. This
+establishes the event → frame scheduler → renderer pattern; the frames are
+generic animation, not visemes. Only audio travels through the SFU.
 
 ## Run it
 

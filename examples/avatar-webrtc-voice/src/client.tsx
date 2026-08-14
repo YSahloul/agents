@@ -149,24 +149,57 @@ function helperStatus(run: AgentToolRunState): string {
   return run.error ?? run.status;
 }
 
+const ROBOT_FRAMES = Array.from(
+  { length: 25 },
+  (_, index) => `/robot-frames/frame-${String(index + 1).padStart(2, "0")}.jpg`
+);
+const ROBOT_SPEAKING_FRAMES = [...ROBOT_FRAMES, ...[...ROBOT_FRAMES].reverse()];
+const ROBOT_FRAME_DURATION_MS = 1000 / 30;
+
 function RobotAvatar({ isTalking }: { isTalking: boolean }) {
-  const shouldAnimate =
-    isTalking && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const imageRef = useRef<HTMLImageElement>(null);
+
+  useEffect(() => {
+    for (const src of ROBOT_FRAMES) {
+      const image = new Image();
+      image.src = src;
+    }
+  }, []);
+
+  useEffect(() => {
+    const image = imageRef.current;
+    if (!image) return;
+    image.src = ROBOT_FRAMES[0];
+    if (
+      !isTalking ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return;
+    }
+
+    let frame = 0;
+    let previousTime = performance.now();
+    let requestId = 0;
+    const animate = (time: number) => {
+      const elapsed = time - previousTime;
+      if (elapsed >= ROBOT_FRAME_DURATION_MS) {
+        const steps = Math.floor(elapsed / ROBOT_FRAME_DURATION_MS);
+        frame = (frame + steps) % ROBOT_SPEAKING_FRAMES.length;
+        image.src = ROBOT_SPEAKING_FRAMES[frame];
+        previousTime += steps * ROBOT_FRAME_DURATION_MS;
+      }
+      requestId = requestAnimationFrame(animate);
+    };
+    requestId = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(requestId);
+  }, [isTalking]);
 
   return (
     <div className="mb-4 overflow-hidden rounded-xl ring ring-kumo-line">
-      <video
-        key={shouldAnimate ? "talking" : "idle"}
-        src="/robot-talking.mp4"
-        poster="/robot-idle.jpg"
-        autoPlay={shouldAnimate}
-        loop
-        muted
-        playsInline
-        preload="auto"
-        aria-label={
-          shouldAnimate ? "Robot assistant talking" : "Robot assistant waiting"
-        }
+      <img
+        ref={imageRef}
+        src={ROBOT_FRAMES[0]}
+        alt={isTalking ? "Robot assistant talking" : "Robot assistant waiting"}
         className="block aspect-video w-full object-cover"
       />
     </div>
