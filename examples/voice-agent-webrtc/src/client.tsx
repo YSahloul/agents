@@ -339,8 +339,7 @@ function App() {
 
         <div className="mb-4 flex items-center justify-between gap-3">
           <Text size="xs" variant="secondary">
-            Start a background Researcher, then keep talking to Think while it
-            works.
+            Start a background Researcher for a three-point WebRTC comparison.
           </Text>
           <Button
             size="sm"

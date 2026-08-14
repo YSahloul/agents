@@ -23,7 +23,7 @@ import {
 } from "@cloudflare/voice";
 import { createWorkersAI } from "workers-ai-provider";
 import type { ToolSet } from "ai";
-import { tool } from "ai";
+import { hasToolCall, tool } from "ai";
 import { z } from "zod";
 
 /** The catalog marks reasoning models with a `reasoning: true` property
@@ -43,7 +43,7 @@ const SYSTEM_PROMPT = `You are a helpful assistant with access to a persistent w
 
 You are speaking in a live WebRTC voice chat, so keep responses concise and natural for text-to-speech. Always return speakable text.
 
-When the user asks you to delegate or research a topic, use research_background. Before calling it, say one short sentence telling the user that you are starting the Researcher. After dispatch, tell them they can keep talking while it works and that its result will appear in Sub-agent activity.
+When the user asks you to delegate or research a topic, say exactly "Starting the Researcher.", call research_background immediately, and produce no other text for that turn.
 
 Use the workspace tools to create, read, update, find, list, and delete files when requested. Confirm completed actions briefly.`;
 
@@ -171,14 +171,14 @@ export class MyThinkAgent extends Think<Env> {
         })
       }),
       maxOutputTokens: 8192,
+      stopWhen: hasToolCall("research_background"),
       sendReasoning: false
     };
   }
   override getTools(): ToolSet {
     return {
       research_background: tool({
-        description:
-          "Dispatch a Researcher sub-agent in the background. Returns immediately so the conversation can continue while it works.",
+        description: "Dispatch a Researcher sub-agent in the background.",
         inputSchema: z.object({ query: z.string().min(3) }),
         execute: async ({ query }) => {
           const dispatched = await this.runAgentTool<ResearchInput>(
@@ -196,10 +196,7 @@ export class MyThinkAgent extends Think<Env> {
           return {
             status: dispatched.status,
             runId: dispatched.runId,
-            note:
-              dispatched.status === "running"
-                ? "Researcher is working in the background. The user can continue talking."
-                : dispatched.error
+            error: dispatched.error
           };
         }
       })

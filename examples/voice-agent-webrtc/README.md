@@ -5,9 +5,8 @@ WebRTC audio gateway. Think owns the transcript, model, tools, memory, and
 workspace; Voice only handles STT, TTS, and Cloudflare Realtime SFU transport.
 
 The demo also dispatches the same retained Researcher sub-agent used by the
-`agents-as-tools` example. Think acknowledges the dispatch immediately so the
-user can keep talking while the helper runs. Its live status and final summary
-appear beside the voice transcript.
+`agents-as-tools` example. Think acknowledges the dispatch immediately. Its live
+status and final summary appear beside the voice transcript.
 
 ## Run it
 
