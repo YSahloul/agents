@@ -11,6 +11,8 @@ export interface SFUVoiceAudioInputOptions {
     stream: MediaStream;
     stop?: () => void | Promise<void>;
   }>;
+  /** Reports the RMS level of the remote TTS audio as it reaches playback. */
+  onPlaybackAudioLevel?: (rms: number) => void;
 }
 
 type SFUResponse = {
@@ -37,6 +39,9 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   readonly #iceServers: RTCIceServer[];
   readonly #headers: Headers;
   readonly #captureMicrophone: SFUVoiceAudioInputOptions["captureMicrophone"];
+  readonly #onPlaybackAudioLevel:
+    | SFUVoiceAudioInputOptions["onPlaybackAudioLevel"]
+    | undefined;
   readonly #jsonHeaders: Headers;
   #generation = 0;
   #peer: RTCPeerConnection | null = null;
@@ -45,12 +50,17 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   #audioElement: HTMLAudioElement | null = null;
   #analyserContext: AudioContext | null = null;
   #animationFrame: number | null = null;
+  #microphoneAnalyser: AnalyserNode | null = null;
+  #microphoneSamples: Float32Array<ArrayBuffer> | null = null;
+  #playbackAnalyser: AnalyserNode | null = null;
+  #playbackSamples: Float32Array<ArrayBuffer> | null = null;
   #shouldStopForwarding = false;
 
   constructor(options: SFUVoiceAudioInputOptions) {
     this.#endpoint = options.endpoint.replace(/\/$/, "");
     this.#iceServers = options.iceServers ?? DEFAULT_ICE_SERVERS;
     this.#captureMicrophone = options.captureMicrophone;
+    this.#onPlaybackAudioLevel = options.onPlaybackAudioLevel;
     this.#headers = new Headers(options.headers);
     this.#jsonHeaders = new Headers(this.#headers);
     this.#jsonHeaders.set("Content-Type", "application/json");
@@ -106,7 +116,10 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
       this.#audioElement = audio;
       peer.ontrack = (event) => {
         if (generation !== this.#generation || this.#peer !== peer) return;
-        audio.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+        const playbackStream =
+          event.streams[0] ?? new MediaStream([event.track]);
+        audio.srcObject = playbackStream;
+        this.#startPlaybackAudioLevelAnalysis(playbackStream);
         void audio.play().catch((error: unknown) => {
           console.warn("[SFUVoiceAudioInput] Audio playback failed:", error);
         });
@@ -180,6 +193,11 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
       cancelAnimationFrame(this.#animationFrame);
       this.#animationFrame = null;
     }
+    this.#microphoneAnalyser = null;
+    this.#microphoneSamples = null;
+    this.#playbackAnalyser = null;
+    this.#playbackSamples = null;
+    this.#onPlaybackAudioLevel?.(0);
     this.#peer?.close();
     this.#peer = null;
     this.#microphoneStream?.getTracks().forEach((track) => track.stop());
@@ -307,17 +325,42 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     const analyser = context.createAnalyser();
     analyser.fftSize = 2048;
     source.connect(analyser);
-    const samples = new Float32Array(analyser.fftSize);
+    this.#microphoneAnalyser = analyser;
+    this.#microphoneSamples = new Float32Array(analyser.fftSize);
 
     const measure = () => {
       if (generation !== this.#generation) return;
-      analyser.getFloatTimeDomainData(samples);
-      let sum = 0;
-      for (const sample of samples) sum += sample * sample;
-      this.onAudioLevel?.(Math.sqrt(sum / samples.length));
+      if (this.#microphoneAnalyser && this.#microphoneSamples) {
+        this.onAudioLevel?.(
+          this.#rms(this.#microphoneAnalyser, this.#microphoneSamples)
+        );
+      }
+      if (this.#playbackAnalyser && this.#playbackSamples) {
+        this.#onPlaybackAudioLevel?.(
+          this.#rms(this.#playbackAnalyser, this.#playbackSamples)
+        );
+      }
       this.#animationFrame = requestAnimationFrame(measure);
     };
     this.#animationFrame = requestAnimationFrame(measure);
+  }
+
+  #startPlaybackAudioLevelAnalysis(stream: MediaStream): void {
+    const context = this.#analyserContext;
+    if (!context) return;
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser);
+    this.#playbackAnalyser = analyser;
+    this.#playbackSamples = new Float32Array(analyser.fftSize);
+  }
+
+  #rms(analyser: AnalyserNode, samples: Float32Array<ArrayBuffer>): number {
+    analyser.getFloatTimeDomainData(samples);
+    let sum = 0;
+    for (const sample of samples) sum += sample * sample;
+    return Math.sqrt(sum / samples.length);
   }
 
   #waitForConnected(

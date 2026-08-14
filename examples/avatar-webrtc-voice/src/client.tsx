@@ -149,6 +149,63 @@ function helperStatus(run: AgentToolRunState): string {
   return run.error ?? run.status;
 }
 
+const ROBOT_FRAMES = Array.from(
+  { length: 25 },
+  (_, index) => `/robot-frames/frame-${String(index + 1).padStart(2, "0")}.jpg`
+);
+const ROBOT_SPEAKING_FRAMES = [...ROBOT_FRAMES, ...[...ROBOT_FRAMES].reverse()];
+const ROBOT_FRAME_DURATION_MS = 1000 / 30;
+
+function RobotAvatar({ isTalking }: { isTalking: boolean }) {
+  const imageRef = useRef<HTMLImageElement>(null);
+
+  useEffect(() => {
+    for (const src of ROBOT_FRAMES) {
+      const image = new Image();
+      image.src = src;
+    }
+  }, []);
+
+  useEffect(() => {
+    const image = imageRef.current;
+    if (!image) return;
+    image.src = ROBOT_FRAMES[0];
+    if (
+      !isTalking ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return;
+    }
+
+    let frame = 0;
+    let previousTime = performance.now();
+    let requestId = 0;
+    const animate = (time: number) => {
+      const elapsed = time - previousTime;
+      if (elapsed >= ROBOT_FRAME_DURATION_MS) {
+        const steps = Math.floor(elapsed / ROBOT_FRAME_DURATION_MS);
+        frame = (frame + steps) % ROBOT_SPEAKING_FRAMES.length;
+        image.src = ROBOT_SPEAKING_FRAMES[frame];
+        previousTime += steps * ROBOT_FRAME_DURATION_MS;
+      }
+      requestId = requestAnimationFrame(animate);
+    };
+    requestId = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(requestId);
+  }, [isTalking]);
+
+  return (
+    <div className="mb-4 overflow-hidden rounded-xl ring ring-kumo-line">
+      <img
+        ref={imageRef}
+        src={ROBOT_FRAMES[0]}
+        alt={isTalking ? "Robot assistant talking" : "Robot assistant waiting"}
+        className="block aspect-video w-full object-cover"
+      />
+    </div>
+  );
+}
+
 // --- Main App ---
 
 function App() {
@@ -165,13 +222,39 @@ function App() {
   );
   const [reasoning, setReasoning] = useState<ReasoningEffort>("off");
   const [outputDeviceId, setOutputDeviceId] = useState("default");
+  const [hasPlaybackAudio, setHasPlaybackAudio] = useState(false);
+  const playbackActive = useRef(false);
+  const playbackSilenceTimer = useRef<number | undefined>(undefined);
   const audioInput = useMemo(
     () =>
       new SFUVoiceAudioInput({
-        endpoint: `/agents/my-voice-agent/${encodeURIComponent(sessionId)}/voice`
+        endpoint: `/agents/my-voice-agent/${encodeURIComponent(sessionId)}/voice`,
+        onPlaybackAudioLevel: (rms) => {
+          if (rms > 0.01) {
+            if (playbackSilenceTimer.current !== undefined) {
+              clearTimeout(playbackSilenceTimer.current);
+              playbackSilenceTimer.current = undefined;
+            }
+            if (!playbackActive.current) {
+              playbackActive.current = true;
+              setHasPlaybackAudio(true);
+            }
+          } else if (
+            playbackActive.current &&
+            playbackSilenceTimer.current === undefined
+          ) {
+            playbackSilenceTimer.current = window.setTimeout(() => {
+              playbackActive.current = false;
+              playbackSilenceTimer.current = undefined;
+              setHasPlaybackAudio(false);
+            }, 160);
+          }
+        }
       }),
     [sessionId]
   );
+
+  useEffect(() => () => clearTimeout(playbackSilenceTimer.current), []);
 
   const {
     status,
@@ -200,7 +283,7 @@ function App() {
     }
   });
 
-  const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const transcriptScrollRef = useRef<HTMLDivElement>(null);
   const [textInput, setTextInput] = useState("");
   const [speakerConflict, setSpeakerConflict] = useState(false);
   const [kicked, setKicked] = useState(false);
@@ -243,9 +326,10 @@ function App() {
     };
   }, [refreshAudioOutputs]);
 
-  // Auto-scroll transcript
+  // Keep new text inside the transcript scroller without moving the page.
   useEffect(() => {
-    transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const scroller = transcriptScrollRef.current;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }, [transcript, interimTranscript]);
 
   // Populate the model dropdown from the Worker's /models endpoint (backed by
@@ -311,7 +395,7 @@ function App() {
               className="text-kumo-brand"
             />
             <Text variant="heading1" as="h1">
-              Think Voice
+              Avatar Voice
             </Text>
           </div>
           <div className="flex items-center gap-3">
@@ -332,10 +416,12 @@ function App() {
 
         <Surface className="mb-4 rounded-xl bg-kumo-fill px-4 py-3">
           <Text size="sm">
-            Speak over WebRTC. Voice handles audio while Think owns the
-            conversation, memory, and tools.
+            Speak over WebRTC while the local robot animates with the assistant.
+            Voice handles audio while Think owns the conversation.
           </Text>
         </Surface>
+
+        <RobotAvatar isTalking={hasPlaybackAudio} />
 
         <div className="mb-4 flex items-center justify-between gap-3">
           <Text size="xs" variant="secondary">
@@ -449,70 +535,78 @@ function App() {
             </span>
           </div>
           {/* Audio level meter */}
-          {isInCall && status === "listening" && (
-            <div className="mt-2 h-1.5 bg-kumo-fill rounded-full overflow-hidden">
-              <div
-                className="h-full bg-kumo-success rounded-full transition-all duration-75"
-                style={{ width: `${Math.min(audioLevel * 500, 100)}%` }}
-              />
-            </div>
-          )}
+          <div
+            className={`mt-2 h-1.5 overflow-hidden rounded-full bg-kumo-fill ${
+              isInCall && status === "listening" ? "" : "invisible"
+            }`}
+          >
+            <div
+              className="h-full rounded-full bg-kumo-success transition-all duration-75"
+              style={{ width: `${Math.min(audioLevel * 500, 100)}%` }}
+            />
+          </div>
         </Surface>
 
         {/* Transcript */}
-        <Surface className="rounded-xl ring ring-kumo-line mb-6 h-72 overflow-y-auto">
-          {transcript.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-kumo-secondary">
-              <Text size="sm">
-                {isInCall
-                  ? "Start speaking..."
-                  : connected
-                    ? "Start a voice session when you're ready"
-                    : "Connecting to agent..."}
-              </Text>
-            </div>
-          ) : (
-            <div className="p-4 space-y-3">
-              {transcript.map((msg, i) => (
-                <div
-                  key={i}
-                  className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-                >
-                  <div className="flex flex-col gap-0.5 max-w-[80%]">
-                    <div
-                      className={`rounded-xl px-3 py-2 text-sm ${
-                        msg.role === "user"
-                          ? "bg-kumo-brand/15 text-kumo-default"
-                          : "bg-kumo-fill text-kumo-default"
-                      }`}
-                    >
-                      {msg.text || (
-                        <span className="text-kumo-secondary italic">...</span>
+        <Surface className="mb-6 h-72 overflow-hidden rounded-xl ring ring-kumo-line">
+          <div
+            ref={transcriptScrollRef}
+            className="h-full overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+          >
+            {transcript.length === 0 ? (
+              <div className="h-full flex items-center justify-center text-kumo-secondary">
+                <Text size="sm">
+                  {isInCall
+                    ? "Start speaking..."
+                    : connected
+                      ? "Start a voice session when you're ready"
+                      : "Connecting to agent..."}
+                </Text>
+              </div>
+            ) : (
+              <div className="p-4 space-y-3">
+                {transcript.map((msg, i) => (
+                  <div
+                    key={i}
+                    className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                  >
+                    <div className="flex min-w-0 max-w-[80%] flex-col gap-0.5">
+                      <div
+                        className={`break-words rounded-xl px-3 py-2 text-sm ${
+                          msg.role === "user"
+                            ? "bg-kumo-brand/15 text-kumo-default"
+                            : "bg-kumo-fill text-kumo-default"
+                        }`}
+                      >
+                        {msg.text || (
+                          <span className="text-kumo-secondary italic">
+                            ...
+                          </span>
+                        )}
+                      </div>
+                      {msg.timestamp && (
+                        <span
+                          className={`text-[10px] text-kumo-secondary px-1 ${msg.role === "user" ? "text-right" : "text-left"}`}
+                        >
+                          {formatTime(new Date(msg.timestamp))}
+                        </span>
                       )}
                     </div>
-                    {msg.timestamp && (
-                      <span
-                        className={`text-[10px] text-kumo-secondary px-1 ${msg.role === "user" ? "text-right" : "text-left"}`}
-                      >
-                        {formatTime(new Date(msg.timestamp))}
-                      </span>
-                    )}
                   </div>
-                </div>
-              ))}
-              {/* Interim transcript — live preview of what the user is saying */}
-              {interimTranscript && (
-                <div className="flex justify-end">
-                  <div className="flex flex-col gap-0.5 max-w-[80%]">
-                    <div className="rounded-xl px-3 py-2 text-sm bg-kumo-brand/10 text-kumo-secondary italic border border-kumo-brand/20 border-dashed">
-                      {interimTranscript}
+                ))}
+                {/* Interim transcript — live preview of what the user is saying */}
+                {interimTranscript && (
+                  <div className="flex justify-end">
+                    <div className="flex min-w-0 max-w-[80%] flex-col gap-0.5">
+                      <div className="break-words rounded-xl border border-dashed border-kumo-brand/20 bg-kumo-brand/10 px-3 py-2 text-sm text-kumo-secondary italic">
+                        {interimTranscript}
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
-              <div ref={transcriptEndRef} />
-            </div>
-          )}
+                )}
+              </div>
+            )}
+          </div>
         </Surface>
 
         {/* Call controls */}
