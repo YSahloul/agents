@@ -535,14 +535,16 @@ function App() {
             </span>
           </div>
           {/* Audio level meter */}
-          {isInCall && status === "listening" && (
-            <div className="mt-2 h-1.5 bg-kumo-fill rounded-full overflow-hidden">
-              <div
-                className="h-full bg-kumo-success rounded-full transition-all duration-75"
-                style={{ width: `${Math.min(audioLevel * 500, 100)}%` }}
-              />
-            </div>
-          )}
+          <div
+            className={`mt-2 h-1.5 overflow-hidden rounded-full bg-kumo-fill ${
+              isInCall && status === "listening" ? "" : "invisible"
+            }`}
+          >
+            <div
+              className="h-full rounded-full bg-kumo-success transition-all duration-75"
+              style={{ width: `${Math.min(audioLevel * 500, 100)}%` }}
+            />
+          </div>
         </Surface>
 
         {/* Transcript */}
