@@ -1,5 +1,5 @@
 {
-  "name": "@cloudflare/agents-voice-webrtc-demo",
+  "name": "@cloudflare/agents-avatar-webrtc-voice",
   "version": "0.0.0",
   "private": true,
   "type": "module",

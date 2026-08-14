@@ -1,4 +1,4 @@
-# Think WebRTC Voice Agent
+# Avatar WebRTC Voice Agent
 
 A Think agent that uses a separate `@cloudflare/voice` Durable Object as its
 WebRTC audio gateway. Think owns the transcript, model, tools, memory, and
@@ -8,6 +8,10 @@ The demo also dispatches the same retained Researcher sub-agent used by the
 `agents-as-tools` example. Its live status and final summary appear beside the
 voice transcript.
 
+The browser shows a local robot animation inspired by Pipecat's simple chatbot:
+an idle image while waiting and a short frame loop while the agent speaks.
+Only audio travels through the SFU; the avatar assets stay client-side.
+
 ## Run it
 
 ```bash
@@ -15,6 +19,9 @@ pnpm install
 cp .env.example .env
 pnpm run start
 ```
+
+Deploying creates the separate `avatar-webrtc-voice` Worker and corresponding
+`avatar-webrtc-voice.<account-subdomain>.workers.dev` hostname.
 
 Set the required Realtime SFU credentials in `.env`:
 
@@ -109,3 +116,7 @@ const voice = useVoiceAgent({
 ```
 
 There is no PCM-over-WebSocket fallback or example-owned SFU implementation.
+
+The robot frames are adapted from
+[`pipecat-ai/pipecat-examples`](https://github.com/pipecat-ai/pipecat-examples/tree/main/simple-chatbot/server/assets)
+under the BSD 2-Clause License.

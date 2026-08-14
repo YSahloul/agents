@@ -149,6 +149,31 @@ function helperStatus(run: AgentToolRunState): string {
   return run.error ?? run.status;
 }
 
+function RobotAvatar({ status }: { status: VoiceStatus }) {
+  const isTalking =
+    status === "speaking" &&
+    !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  return (
+    <div className="mb-4 overflow-hidden rounded-xl ring ring-kumo-line">
+      <video
+        key={isTalking ? "talking" : "idle"}
+        src="/robot-talking.mp4"
+        poster="/robot-idle.jpg"
+        autoPlay={isTalking}
+        loop
+        muted
+        playsInline
+        preload={isTalking ? "auto" : "none"}
+        aria-label={
+          isTalking ? "Robot assistant talking" : "Robot assistant waiting"
+        }
+        className="block aspect-video w-full object-cover"
+      />
+    </div>
+  );
+}
+
 // --- Main App ---
 
 function App() {
@@ -311,7 +336,7 @@ function App() {
               className="text-kumo-brand"
             />
             <Text variant="heading1" as="h1">
-              Think Voice
+              Avatar Voice
             </Text>
           </div>
           <div className="flex items-center gap-3">
@@ -332,10 +357,12 @@ function App() {
 
         <Surface className="mb-4 rounded-xl bg-kumo-fill px-4 py-3">
           <Text size="sm">
-            Speak over WebRTC. Voice handles audio while Think owns the
-            conversation, memory, and tools.
+            Speak over WebRTC while the local robot animates with the assistant.
+            Voice handles audio while Think owns the conversation.
           </Text>
         </Surface>
+
+        <RobotAvatar status={status} />
 
         <div className="mb-4 flex items-center justify-between gap-3">
           <Text size="xs" variant="secondary">
