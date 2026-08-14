@@ -320,6 +320,28 @@ describe("WorkersAIFluxSTT", () => {
     expect(socket.sent).toEqual([chunk]);
   });
 
+  it("reconnects and flushes queued audio after the WebSocket fails", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ai = new MockAi();
+    const session = new WorkersAIFluxSTT(ai).createSession();
+
+    try {
+      if (!session.waitUntilReady) throw new Error("expected readiness method");
+      await session.waitUntilReady();
+      ai.sockets[0]?.dispatch("error", {});
+
+      const chunk = new ArrayBuffer(4);
+      session.feed(chunk);
+
+      await vi.waitFor(() => expect(ai.sockets).toHaveLength(2));
+      expect(ai.sockets[1]?.accepted).toBe(true);
+      expect(ai.sockets[1]?.sent).toEqual([chunk]);
+    } finally {
+      session.close();
+      errorLog.mockRestore();
+    }
+  });
+
   it("rejects readiness when ai.run throws", async () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const ai = new MockAi();

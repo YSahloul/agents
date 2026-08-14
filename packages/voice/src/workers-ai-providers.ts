@@ -486,6 +486,8 @@ class FluxSession implements TranscriberSession {
   #onUtterance: ((text: string) => void) | undefined;
   #onEagerUtterance: ((transcript: string) => void) | undefined;
   #onTurnResumed: ((transcript?: string) => void) | undefined;
+  readonly #ai: AiLike;
+  readonly #config: FluxSessionConfig;
 
   #ws: WebSocket | null = null;
   #connected = false;
@@ -503,6 +505,8 @@ class FluxSession implements TranscriberSession {
     config: FluxSessionConfig,
     options?: TranscriberSessionOptions
   ) {
+    this.#ai = ai;
+    this.#config = config;
     this.#onInterim = options?.onInterim;
     this.#onSpeechStart = options?.onSpeechStart;
     this.#onUtterance = options?.onUtterance;
@@ -513,28 +517,28 @@ class FluxSession implements TranscriberSession {
       this.#rejectReady = reject;
     });
     this.#ready.catch(() => {});
-    this.#connect(ai, config);
+    void this.#connect();
   }
 
   waitUntilReady(): Promise<void> {
     return this.#ready;
   }
 
-  async #connect(ai: AiLike, config: FluxSessionConfig): Promise<void> {
+  async #connect(): Promise<void> {
     try {
       const input: Record<string, unknown> = {
         encoding: "linear16",
-        sample_rate: String(config.sampleRate)
+        sample_rate: String(this.#config.sampleRate)
       };
-      if (config.eotThreshold != null)
-        input.eot_threshold = String(config.eotThreshold);
-      if (config.eagerEotThreshold != null)
-        input.eager_eot_threshold = String(config.eagerEotThreshold);
-      if (config.eotTimeoutMs != null)
-        input.eot_timeout_ms = String(config.eotTimeoutMs);
-      if (config.keyterms?.length) input.keyterm = config.keyterms;
+      if (this.#config.eotThreshold != null)
+        input.eot_threshold = String(this.#config.eotThreshold);
+      if (this.#config.eagerEotThreshold != null)
+        input.eager_eot_threshold = String(this.#config.eagerEotThreshold);
+      if (this.#config.eotTimeoutMs != null)
+        input.eot_timeout_ms = String(this.#config.eotTimeoutMs);
+      if (this.#config.keyterms?.length) input.keyterm = this.#config.keyterms;
 
-      const resp = await ai.run("@cf/deepgram/flux", input, {
+      const resp = await this.#ai.run("@cf/deepgram/flux", input, {
         websocket: true
       });
 
@@ -569,13 +573,18 @@ class FluxSession implements TranscriberSession {
         this.#handleMessage(event);
       });
 
-      ws.addEventListener("close", () => {
+      const reconnect = () => {
+        if (this.#closed || this.#ws !== ws) return;
         this.#connected = false;
-      });
+        this.#ws = null;
+        this.#currentTranscript = "";
+        void this.#connect();
+      };
+      ws.addEventListener("close", reconnect);
 
       ws.addEventListener("error", (event: Event) => {
         console.error("[FluxSTT] WebSocket error:", event);
-        this.#connected = false;
+        reconnect();
       });
 
       for (const chunk of this.#pendingChunks) {
