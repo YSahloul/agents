@@ -328,10 +328,12 @@ afterEach(() => {
 });
 
 describe("SFUVoiceAudioInput", () => {
-  it("uses one peer for the original microphone and remote TTS", async () => {
+  it("reports microphone and remote playback levels", async () => {
+    const playbackLevels: number[] = [];
     const input = new SFUVoiceAudioInput({
       endpoint: "/agent/alice/voice/",
-      headers: { Authorization: "Bearer mobile-token" }
+      headers: { Authorization: "Bearer mobile-token" },
+      onPlaybackAudioLevel: (level) => playbackLevels.push(level)
     });
     const levels: number[] = [];
     const audioData = vi.fn();
@@ -401,6 +403,7 @@ describe("SFUVoiceAudioInput", () => {
 
     animationFrames.find((callback) => callback)?.(0);
     expect(levels.at(-1)).toBeCloseTo(0.5);
+    expect(playbackLevels.at(-1)).toBeCloseTo(0.5);
     expect(audioData).not.toHaveBeenCalled();
 
     input.setMuted(true);
@@ -414,6 +417,7 @@ describe("SFUVoiceAudioInput", () => {
     expect(peer.closed).toBe(true);
     expect(stream.track?.stopped).toBe(true);
     expect(context.closed).toBe(true);
+    expect(playbackLevels.at(-1)).toBe(0);
     expect(audio.paused).toBe(true);
     expect(audio.removed).toBe(true);
     expect(requests.at(-1)).toBe("stt/stop-forwarding");

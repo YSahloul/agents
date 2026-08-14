@@ -149,24 +149,23 @@ function helperStatus(run: AgentToolRunState): string {
   return run.error ?? run.status;
 }
 
-function RobotAvatar({ status }: { status: VoiceStatus }) {
-  const isTalking =
-    status === "speaking" &&
-    !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+function RobotAvatar({ isTalking }: { isTalking: boolean }) {
+  const shouldAnimate =
+    isTalking && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   return (
     <div className="mb-4 overflow-hidden rounded-xl ring ring-kumo-line">
       <video
-        key={isTalking ? "talking" : "idle"}
+        key={shouldAnimate ? "talking" : "idle"}
         src="/robot-talking.mp4"
         poster="/robot-idle.jpg"
-        autoPlay={isTalking}
+        autoPlay={shouldAnimate}
         loop
         muted
         playsInline
-        preload={isTalking ? "auto" : "none"}
+        preload="auto"
         aria-label={
-          isTalking ? "Robot assistant talking" : "Robot assistant waiting"
+          shouldAnimate ? "Robot assistant talking" : "Robot assistant waiting"
         }
         className="block aspect-video w-full object-cover"
       />
@@ -190,13 +189,39 @@ function App() {
   );
   const [reasoning, setReasoning] = useState<ReasoningEffort>("off");
   const [outputDeviceId, setOutputDeviceId] = useState("default");
+  const [hasPlaybackAudio, setHasPlaybackAudio] = useState(false);
+  const playbackActive = useRef(false);
+  const playbackSilenceTimer = useRef<number | undefined>(undefined);
   const audioInput = useMemo(
     () =>
       new SFUVoiceAudioInput({
-        endpoint: `/agents/my-voice-agent/${encodeURIComponent(sessionId)}/voice`
+        endpoint: `/agents/my-voice-agent/${encodeURIComponent(sessionId)}/voice`,
+        onPlaybackAudioLevel: (rms) => {
+          if (rms > 0.01) {
+            if (playbackSilenceTimer.current !== undefined) {
+              clearTimeout(playbackSilenceTimer.current);
+              playbackSilenceTimer.current = undefined;
+            }
+            if (!playbackActive.current) {
+              playbackActive.current = true;
+              setHasPlaybackAudio(true);
+            }
+          } else if (
+            playbackActive.current &&
+            playbackSilenceTimer.current === undefined
+          ) {
+            playbackSilenceTimer.current = window.setTimeout(() => {
+              playbackActive.current = false;
+              playbackSilenceTimer.current = undefined;
+              setHasPlaybackAudio(false);
+            }, 160);
+          }
+        }
       }),
     [sessionId]
   );
+
+  useEffect(() => () => clearTimeout(playbackSilenceTimer.current), []);
 
   const {
     status,
@@ -362,7 +387,7 @@ function App() {
           </Text>
         </Surface>
 
-        <RobotAvatar status={status} />
+        <RobotAvatar isTalking={hasPlaybackAudio} />
 
         <div className="mb-4 flex items-center justify-between gap-3">
           <Text size="xs" variant="secondary">
