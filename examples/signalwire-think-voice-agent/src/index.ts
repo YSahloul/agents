@@ -1,5 +1,4 @@
 import { Think, type StreamCallback } from "@cloudflare/think";
-import { agentTool } from "agents/agent-tools";
 import {
   Agent,
   getAgentByName,
@@ -14,7 +13,7 @@ import {
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
-import type { ToolSet } from "ai";
+import { tool, type ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 
@@ -22,10 +21,11 @@ const MODEL = "@cf/zai-org/glm-4.7-flash";
 const SYSTEM_PROMPT = [
   "You are a phone voice assistant. Respond in 1-2 short sentences.",
   "Use retail_agent for requests that need the retail MCP server.",
-  "When a request contains independent searches, issue one retail_agent call per distinct search in the same model step so the existing sub-agent tool calls run in parallel.",
-  "Before those calls, say one brief sentence so the caller hears that work has started while the sub-agents search.",
-  "Never add overlapping, duplicate, or speculative searches.",
-  "After all results return, summarize them briefly.",
+  "retail_agent dispatches one background retail sub-agent and returns immediately.",
+  "When a request contains independent searches, issue one retail_agent call per distinct search in the same model step so they start in parallel.",
+  "After dispatching, briefly confirm the searches are running and keep helping the caller.",
+  "Never add overlapping, duplicate, or speculative searches, and never restart a search that is already running.",
+  "When background completion messages arrive, use their results to answer the caller.",
   "Be direct and natural. Never exceed 30 words unless asked for detail."
 ].join(" ");
 
@@ -77,11 +77,18 @@ export class MyThinkAgent extends Think<Env> {
 
   override getTools(): ToolSet {
     return {
-      retail_agent: agentTool<RetailInput>(RetailAgent, {
+      retail_agent: tool({
         description:
-          "Delegate one independent retail request to a sub-agent. Call this same tool multiple times in one model step when independent requests can run in parallel.",
-        displayName: "Retail specialist",
-        inputSchema: z.object({ query: z.string().min(3) })
+          "Dispatch one independent retail request to a background sub-agent. Call this same tool multiple times in one model step when independent requests can run in parallel.",
+        inputSchema: z.object({ query: z.string().min(3) }),
+        execute: async ({ query }, { toolCallId }) =>
+          this.runAgentTool<RetailInput>(RetailAgent, {
+            runId: `agent-tool:${toolCallId}`,
+            parentToolCallId: toolCallId,
+            input: { query },
+            display: { name: "Retail specialist" },
+            detached: { notify: true, maxBudgetMs: 5 * 60 * 1000 }
+          })
       })
     };
   }

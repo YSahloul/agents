@@ -11,14 +11,14 @@ Caller
   → MyVoiceAgent (STT and TTS)
   → streamRpcVoiceTurn()
   → MyThinkAgent (model, prompt, and persistent conversation)
-  → one or more parallel retail_agent calls
+  → one or more detached retail_agent calls
   → retained RetailAgent instances
-  → discovered retail MCP tools
+  → dynamically discovered retail MCP tools
 ```
 
-`MyVoiceAgent` and `MyThinkAgent` use the same instance name, so each phone call is routed to its corresponding Think conversation. Aborting a voice turn forwards the Think request ID to `cancelChat()`.
+`MyVoiceAgent` and `MyThinkAgent` use the same instance name, so each phone call is routed to its corresponding Think conversation. Aborting a voice turn forwards the Think request ID to `cancelChat()` without cancelling detached retail runs.
 
-`MyThinkAgent` delegates retail requests through the single `retail_agent` agent-tool definition. When the model emits multiple calls to that same tool in one step, the Agents SDK runs separate retained `RetailAgent` instances concurrently. Each sub-agent connects to the same retail MCP server used by `signalwire-mcp-voice-agent`, and Think dynamically discovers the server's current tools. No retail MCP tool names or schemas are hardcoded.
+`MyThinkAgent` exposes one `retail_agent` orchestration tool. Each call starts a retained `RetailAgent` with `runAgentTool(..., { detached: { notify: true } })` and immediately returns its run ID, so the caller can continue speaking while independent searches run concurrently. Each sub-agent connects to the same retail MCP server used by `signalwire-mcp-voice-agent`, and Think dynamically discovers the server's current tools. No retail MCP tool names or schemas are hardcoded.
 
 ## Run
 
@@ -41,7 +41,7 @@ Dial the number. SignalWire fetches `/answer`, opens the `/signalwire` media str
 
 Ask, “Find two 20-by-9 wheels,” or “Which tires fit an 18-inch wheel?” to exercise the Think → sub-agent → MCP path.
 
-For independent searches, the system prompt tells the model to call `retail_agent` once per distinct request in the same model step. Text streamed before the calls is synthesized immediately, so the caller hears a short acknowledgment while those parallel calls execute.
+For independent searches, the system prompt tells the model to call `retail_agent` once per distinct request in the same model step. Think injects each completion into the persistent conversation. The phone can use those results on later caller turns; unsolicited completion speech would require a separate persistent Think-to-Voice stream.
 
 ## Local development
 
