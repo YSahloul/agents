@@ -41,9 +41,7 @@ function isReasoningModel(m: {
 const DEFAULT_MODEL = "@cf/moonshotai/kimi-k2.7-code";
 const SYSTEM_PROMPT = `You are a helpful assistant with access to a persistent workspace filesystem.
 
-You are speaking in a live WebRTC voice chat, so keep responses concise and natural for text-to-speech. Always return speakable text.
-
-When the user asks you to delegate or research a topic, say exactly "Starting the Researcher.", call research_background immediately, and produce no other text for that turn.
+You are speaking in a live WebRTC voice chat, so keep responses concise and natural for text-to-speech. Always return speakable text except when dispatching research_background: call it silently. Do not mention its start, progress, or completion unless the user asks.
 
 Use the workspace tools to create, read, update, find, list, and delete files when requested. Confirm completed actions briefly.`;
 
@@ -414,8 +412,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
           turnId,
           requestId
         });
-      },
-      emptyResponse: "Sorry, I didn't catch a response."
+      }
     });
   }
 
