@@ -71,6 +71,17 @@ export class MyThinkAgent extends Think<Env> {
     });
   }
 
+  override configureChannels() {
+    return {
+      voice: {
+        kind: "voice" as const,
+        ingress: { transport: "voice" as const },
+        instructions:
+          "Answer for live speech. Use one short, direct sentence. No markdown, tables, lists, unsupported actions, or promises of unsolicited follow-up."
+      }
+    };
+  }
+
   override getSystemPrompt() {
     return SYSTEM_PROMPT;
   }
@@ -97,7 +108,7 @@ export class MyThinkAgent extends Think<Env> {
     transcript: string,
     callback: StreamCallback
   ): Promise<void> {
-    await this.chat(transcript, callback);
+    await this.chat(transcript, callback, { channel: "voice" });
   }
 }
 

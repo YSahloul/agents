@@ -63,6 +63,8 @@ return streamRpcVoiceTurn({
 });
 ```
 
+`runVoiceTurn()` selects Think's `voice` channel, whose per-channel instructions keep replies short and speakable without changing the SignalWire transport.
+
 The phone transport remains SignalWire's media WebSocket. Think receives text over Durable Object RPC; it does not depend on WebRTC.
 
 ## Related examples
