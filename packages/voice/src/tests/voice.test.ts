@@ -1546,6 +1546,33 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     ws.close();
   });
 
+  it("persists a confirmed eager transcript before the turn settles", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    await setTurnMode(ws, "until_abort");
+    await startCall(ws);
+
+    sendJSON(ws, { type: "_emit_eager", text: "confirmed question" });
+    await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
+
+    const transcript = waitForMessageMatching(
+      ws,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        (message as Record<string, unknown>).type === "transcript" &&
+        (message as Record<string, unknown>).role === "user"
+    );
+    sendJSON(ws, { type: "_emit_end", text: "confirmed question" });
+
+    await expect(transcript).resolves.toMatchObject({
+      text: "confirmed question"
+    });
+    expect(await getMessageCount(ws)).toBe(1);
+
+    ws.close();
+  });
+
   it("silently cancels an eager turn when speech resumes", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");

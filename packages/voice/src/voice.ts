@@ -1177,21 +1177,32 @@ export function withVoice<TBase extends AgentLike>(
         };
 
         const llmStart = Date.now();
-        let turnResult: TextSource;
-        try {
-          turnResult = await this.onTurn(userText, context);
-        } catch (error) {
-          if (!speculative) throw error;
+        const pendingTurnResult = Promise.resolve()
+          .then(() => this.onTurn(userText, context))
+          .then(
+            (value) => ({ ok: true as const, value }),
+            (error: unknown) => ({ ok: false as const, error })
+          );
+
+        if (speculative) {
           const confirmed = await speculative.outcome;
-          if (!confirmed || signal.aborted) return;
+          if (!confirmed) return;
           this.saveMessage("user", userText);
           this.#sendJSON(connection, {
             type: "transcript",
             role: "user",
             text: userText
           });
-          throw error;
+          if (signal.aborted) return;
+          this.#sendJSON(connection, { type: "status", status: "thinking" });
         }
+
+        const settledTurnResult = await pendingTurnResult;
+        if (!settledTurnResult.ok) {
+          if (signal.aborted) return;
+          throw settledTurnResult.error;
+        }
+        const turnResult = settledTurnResult.value;
 
         console.log("[VoiceTrace]", {
           event: "onTurn_call",
@@ -1201,18 +1212,6 @@ export function withVoice<TBase extends AgentLike>(
         });
 
         if (signal.aborted) return;
-
-        if (speculative) {
-          const confirmed = await speculative.outcome;
-          if (!confirmed || signal.aborted) return;
-          this.saveMessage("user", userText);
-          this.#sendJSON(connection, {
-            type: "transcript",
-            role: "user",
-            text: userText
-          });
-          this.#sendJSON(connection, { type: "status", status: "thinking" });
-        }
 
         this.#sendJSON(connection, { type: "status", status: "speaking" });
 
