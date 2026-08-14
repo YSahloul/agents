@@ -265,7 +265,10 @@ export class MyThinkAgent extends Think<Env> {
   }
 }
 
-const VoiceAgent = withSFUVoice(Agent);
+const VoiceAgent = withSFUVoice(Agent, {
+  filterEchoedTranscripts: true,
+  listenDuringCallStart: false
+});
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   tts = new WorkersAIRealtimeTTS(this.env.AI, {
@@ -300,7 +303,6 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   // can still observe transcripts and send text messages.
 
   #activeSpeakerId: string | null = null;
-  #greetingPlaying = false;
 
   beforeCallStart(connection: Connection): boolean {
     if (this.#activeSpeakerId && this.#activeSpeakerId !== connection.id) {
@@ -337,6 +339,38 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
         const parsed = JSON.parse(message);
         if (parsed.type === "kick_speaker") {
           this.#handleKick(connection);
+          return;
+        }
+        if (
+          parsed.type === "microphone_settings" &&
+          typeof parsed.settings === "object" &&
+          parsed.settings !== null
+        ) {
+          const settings = parsed.settings as Record<string, unknown>;
+          console.log("[VoiceTrace]", {
+            event: "microphone_settings",
+            connectionId: connection.id,
+            autoGainControl:
+              typeof settings.autoGainControl === "boolean"
+                ? settings.autoGainControl
+                : null,
+            channelCount:
+              typeof settings.channelCount === "number"
+                ? settings.channelCount
+                : null,
+            echoCancellation:
+              typeof settings.echoCancellation === "boolean"
+                ? settings.echoCancellation
+                : null,
+            noiseSuppression:
+              typeof settings.noiseSuppression === "boolean"
+                ? settings.noiseSuppression
+                : null,
+            sampleRate:
+              typeof settings.sampleRate === "number"
+                ? settings.sampleRate
+                : null
+          });
           return;
         }
       } catch {
@@ -378,10 +412,6 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     );
   }
 
-  receiveAudio(connectionId: string, audio: ArrayBuffer): void {
-    if (!this.#greetingPlaying) super.receiveAudio(connectionId, audio);
-  }
-
   // --- Voice agent logic ---
 
   async onTurn(
@@ -417,13 +447,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   }
 
   async onCallStart(connection: Connection) {
-    this.#greetingPlaying = true;
-    try {
-      await this.speak(connection, this.#greeting);
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    } finally {
-      this.#greetingPlaying = false;
-    }
+    await this.speak(connection, this.#greeting);
   }
 }
 

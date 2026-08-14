@@ -1865,6 +1865,42 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     recording.stop();
     ws.close();
   });
+
+  it("ignores live assistant echo before accepting a real barge-in", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    sendJSON(ws, { type: "_set_audio_transport", value: true });
+    await waitForAck(ws, "_set_audio_transport");
+    await setTtsMode(ws, "controlled");
+    await startCall(ws);
+    const recording = recordSocket(ws);
+
+    sendJSON(ws, { type: "_emit_end", text: "confirmed audio" });
+    await waitForTransportSendCount(ws, 1);
+
+    sendJSON(ws, { type: "_emit_eager", text: "Echo confirmed audio" });
+    sendJSON(ws, { type: "_emit_end", text: "Echo confirmed audio" });
+    await waitForMicrotasks();
+
+    expect((await getCounts(ws)).interrupt).toBe(0);
+    expect(await getTurnState(ws)).toEqual({
+      transcripts: ["confirmed audio"],
+      abortCount: 0
+    });
+
+    sendJSON(ws, { type: "_emit_eager", text: "real interruption" });
+    sendJSON(ws, { type: "_emit_end", text: "real interruption" });
+
+    expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
+    expect(
+      recording.messages.filter(
+        (message) => message.type === "playback_interrupt"
+      )
+    ).toHaveLength(1);
+
+    recording.stop();
+    ws.close();
+  });
 });
 
 describe("VoiceAgent — interrupt", () => {

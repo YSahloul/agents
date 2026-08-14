@@ -168,8 +168,10 @@ class FakeAudioInput implements VoiceAudioInput {
   onAudioData: ((pcm: ArrayBuffer) => void) | null = null;
   started = false;
   stopped = false;
+  startCount = 0;
 
   async start(): Promise<void> {
+    this.startCount++;
     this.started = true;
   }
 
@@ -1102,6 +1104,35 @@ describe("VoiceClient playback-owning audio inputs", () => {
     await startCall;
 
     expect(transport.sentJSON).toContainEqual({ type: "start_call" });
+  });
+
+  it("rebuilds playback-owned audio after transport reconnection", async () => {
+    const transport = new MockTransport();
+    const audioInput = new PlaybackOwningAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput,
+      preferredFormat: "pcm16"
+    });
+
+    client.connect();
+    await client.startCall();
+    transport.disconnect();
+    transport.connect();
+
+    await vi.waitFor(() => {
+      expect(audioInput.startCount).toBe(2);
+      expect(
+        transport.sentJSON.filter((message) => message.type === "start_call")
+      ).toHaveLength(2);
+    });
+    expect(
+      transport.sentJSON.filter((message) => message.type === "start_call")
+    ).toEqual([
+      { type: "start_call", preferred_format: "pcm16" },
+      { type: "start_call", preferred_format: "pcm16" }
+    ]);
   });
 
   it("restores idle when playback-owning input startup rejects", async () => {

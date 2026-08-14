@@ -277,6 +277,9 @@ function App() {
     name: sessionId,
     query: { llm: llmModel, reasoning },
     audioInput,
+    // Flux handles barge-in after echo filtering; raw mic levels cannot
+    // distinguish the caller from TTS playing through the device speaker.
+    interruptThreshold: 1,
     outputDeviceId,
     onReconnect: () => {
       setToast("Reconnected to agent.");
@@ -348,8 +351,22 @@ function App() {
 
   const handleStartCall = useCallback(async () => {
     await startCall();
+    const settings = audioInput.microphoneSettings;
+    console.info("[VoiceTrace] microphone_settings", settings);
+    sendJSON({
+      type: "microphone_settings",
+      settings: settings
+        ? {
+            autoGainControl: settings.autoGainControl ?? null,
+            channelCount: settings.channelCount ?? null,
+            echoCancellation: settings.echoCancellation ?? null,
+            noiseSuppression: settings.noiseSuppression ?? null,
+            sampleRate: settings.sampleRate ?? null
+          }
+        : null
+    });
     await refreshAudioOutputs().catch(() => {});
-  }, [refreshAudioOutputs, startCall]);
+  }, [audioInput, refreshAudioOutputs, sendJSON, startCall]);
 
   useEffect(() => {
     if (

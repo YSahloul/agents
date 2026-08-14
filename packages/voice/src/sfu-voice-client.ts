@@ -66,6 +66,10 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     this.#jsonHeaders.set("Content-Type", "application/json");
   }
 
+  get microphoneSettings(): MediaTrackSettings | null {
+    return this.#microphoneStream?.getAudioTracks()[0]?.getSettings() ?? null;
+  }
+
   async start(): Promise<void> {
     const generation = ++this.#generation;
     this.#teardown(this.#shouldStopForwarding, false);
@@ -82,7 +86,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
               audio: {
                 sampleRate: 48000,
                 channelCount: 1,
-                echoCancellation: true,
+                echoCancellation: { exact: true },
                 noiseSuppression: true,
                 autoGainControl: true
               }
@@ -100,6 +104,13 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
       const microphoneTrack = microphoneStream.getAudioTracks()[0];
       if (!microphoneTrack) {
         throw new Error("Microphone stream has no audio track");
+      }
+
+      if (
+        !this.#captureMicrophone &&
+        microphoneTrack.getSettings().echoCancellation !== true
+      ) {
+        throw new Error("Browser did not enable required echo cancellation");
       }
 
       const peer = new RTCPeerConnection({ iceServers: this.#iceServers });

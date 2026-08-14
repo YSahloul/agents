@@ -175,6 +175,10 @@ interface SpeculativeTurn {
   pipelineStarted: boolean;
   settle(confirmed: boolean): void;
 }
+interface ActiveAssistantText {
+  signal: AbortSignal;
+  text: string;
+}
 type SpeculativeCancelReason =
   | "turn_resumed"
   | "speech_start"
@@ -310,6 +314,8 @@ export function withVoice<TBase extends AgentLike>(
     #conversationHistory: Array<{ role: VoiceRole; content: string }> = [];
     // Speculative Flux responses wait for EndOfTurn before entering history.
     #speculativeTurns = new Map<string, SpeculativeTurn>();
+    // Text currently being spoken, used to reject live speakerphone echo.
+    #activeAssistantText = new Map<string, ActiveAssistantText>();
     // Connections whose opening hook should not feed inbound audio to STT.
     #callStartInputSuppressed = new Set<string>();
 
@@ -489,16 +495,24 @@ export function withVoice<TBase extends AgentLike>(
 
     afterTranscribe(
       transcript: string,
-      _connection: Connection
+      connection: Connection
     ): string | null | Promise<string | null> {
-      if (!opt("filterEchoedTranscripts", false)) return transcript;
+      return opt("filterEchoedTranscripts", false) &&
+        this.#isEchoTranscript(connection.id, transcript)
+        ? null
+        : transcript;
+    }
+
+    #isEchoTranscript(connectionId: string, transcript: string): boolean {
+      const active = this.#activeAssistantText.get(connectionId);
+      if (active && isEchoOf(transcript, active.text)) return true;
       const history = this.getConversationHistory();
       for (let i = history.length - 1; i >= 0; i--) {
         if (history[i].role === "assistant") {
-          return isEchoOf(transcript, history[i].content) ? null : transcript;
+          return isEchoOf(transcript, history[i].content);
         }
       }
-      return transcript;
+      return false;
     }
 
     beforeSynthesize(
@@ -823,10 +837,26 @@ export function withVoice<TBase extends AgentLike>(
               text
             });
           },
-          onSpeechStart: () => {
+          onSpeechStart: (transcript?: string) => {
+            if (
+              opt("filterEchoedTranscripts", false) &&
+              transcript &&
+              this.#isEchoTranscript(connection.id, transcript)
+            ) {
+              return;
+            }
             this.#handleBargeIn(connection);
           },
           onEagerUtterance: (transcript: string) => {
+            if (
+              opt("filterEchoedTranscripts", false) &&
+              this.#isEchoTranscript(connection.id, transcript)
+            ) {
+              return;
+            }
+            if (opt("filterEchoedTranscripts", false)) {
+              this.#handleBargeIn(connection);
+            }
             this.#startSpeculativeTurn(connection, transcript);
           },
           onTurnResumed: () => {
@@ -1155,6 +1185,13 @@ export function withVoice<TBase extends AgentLike>(
           }
           return;
         }
+        if (
+          !speculative &&
+          opt("filterEchoedTranscripts", false) &&
+          this.#cm.hasActivePipeline(connection.id)
+        ) {
+          this.#handleBargeIn(connection);
+        }
 
         signal = this.#cm.createPipelineAbort(connection.id);
         if (speculative) speculative.pipelineStarted = true;
@@ -1292,6 +1329,12 @@ export function withVoice<TBase extends AgentLike>(
         });
         this.#sendJSON(connection, { type: "status", status: "listening" });
       } finally {
+        if (
+          signal &&
+          this.#activeAssistantText.get(connection.id)?.signal === signal
+        ) {
+          this.#activeAssistantText.delete(connection.id);
+        }
         if (signal) this.#cm.clearPipelineAbort(connection.id, signal);
       }
     }
@@ -1313,6 +1356,10 @@ export function withVoice<TBase extends AgentLike>(
       firstAudioMs: number;
     }> {
       if (typeof response === "string") {
+        this.#activeAssistantText.set(connection.id, {
+          signal,
+          text: response
+        });
         const llmMs = Date.now() - llmStart;
 
         if (response.trim().length === 0) {
@@ -1577,6 +1624,10 @@ export function withVoice<TBase extends AgentLike>(
         }
 
         fullText += token;
+        this.#activeAssistantText.set(connection.id, {
+          signal,
+          text: fullText
+        });
         sendAssistantDelta(token);
 
         const sentences = chunker.add(token);

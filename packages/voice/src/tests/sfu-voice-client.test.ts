@@ -14,6 +14,17 @@ declare global {
 class FakeTrack {
   enabled = true;
   stopped = false;
+  settings: MediaTrackSettings = {
+    autoGainControl: true,
+    channelCount: 1,
+    echoCancellation: true,
+    noiseSuppression: true,
+    sampleRate: 48000
+  };
+
+  getSettings(): MediaTrackSettings {
+    return this.settings;
+  }
 
   stop(): void {
     this.stopped = true;
@@ -347,7 +358,7 @@ describe("SFUVoiceAudioInput", () => {
       audio: {
         sampleRate: 48000,
         channelCount: 1,
-        echoCancellation: true,
+        echoCancellation: { exact: true },
         noiseSuppression: true,
         autoGainControl: true
       }
@@ -360,6 +371,7 @@ describe("SFUVoiceAudioInput", () => {
         streams: [stream]
       }
     ]);
+    expect(input.microphoneSettings).toEqual(stream.track?.settings);
     const context = FakeAudioContext.instances[0];
     expect(context.resumed).toBe(true);
     expect(context.connections).toEqual([context.analyser]);
@@ -421,6 +433,17 @@ describe("SFUVoiceAudioInput", () => {
     expect(audio.paused).toBe(true);
     expect(audio.removed).toBe(true);
     expect(requests.at(-1)).toBe("stt/stop-forwarding");
+  });
+
+  it("rejects browser capture when echo cancellation is not applied", async () => {
+    if (stream.track) stream.track.settings.echoCancellation = false;
+    const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
+
+    await expect(input.start()).rejects.toThrow(
+      "Browser did not enable required echo cancellation"
+    );
+    expect(stream.track?.stopped).toBe(true);
+    expect(FakePeerConnection.instances).toHaveLength(0);
   });
 
   it("uses and stops a supplied platform microphone", async () => {

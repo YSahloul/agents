@@ -278,6 +278,8 @@ export class VoiceClient {
   #inCall = false;
   #callGeneration = 0;
   #serverCallAcknowledged = false;
+  #callRecoveryTimer: number | null = null;
+  #callRecoveryAttempt = 0;
 
   // Options (with defaults applied)
   #silenceThreshold: number;
@@ -443,6 +445,89 @@ export class VoiceClient {
       );
     }
   }
+  #callStartMessage(): Record<string, unknown> {
+    const message: Record<string, unknown> = { type: "start_call" };
+    if (this.#options.preferredFormat) {
+      message.preferred_format = this.#options.preferredFormat;
+    }
+    return message;
+  }
+
+  #configureAudioInput(audioInput: VoiceAudioInput): void {
+    audioInput.onAudioLevel = (rms) => this.#processAudioLevel(rms);
+    audioInput.onAudioData = (pcm) => {
+      if (this.#transport?.connected && !this.#isMuted) {
+        this.#transport.sendBinary(pcm);
+      }
+    };
+  }
+
+  #clearCallRecovery(): void {
+    if (this.#callRecoveryTimer !== null) {
+      clearTimeout(this.#callRecoveryTimer);
+      this.#callRecoveryTimer = null;
+    }
+    this.#callRecoveryAttempt = 0;
+  }
+
+  async #recoverCall(transport: VoiceTransport): Promise<void> {
+    if (
+      !this.#inCall ||
+      this.#transport !== transport ||
+      !transport.connected
+    ) {
+      return;
+    }
+
+    const audioInput = this.#options.audioInput;
+    if (!audioInput?.handlesPlayback) {
+      transport.sendJSON(this.#callStartMessage());
+      return;
+    }
+
+    const callGeneration = ++this.#callGeneration;
+    this.#configureAudioInput(audioInput);
+    try {
+      await audioInput.start();
+      if (
+        !this.#isCurrentCallStartup(callGeneration) ||
+        this.#transport !== transport ||
+        !transport.connected
+      ) {
+        return;
+      }
+      audioInput.setMuted?.(this.#isMuted);
+      await this.#setAudioInputOutputDevice(audioInput);
+      if (
+        !this.#isCurrentCallStartup(callGeneration) ||
+        this.#transport !== transport ||
+        !transport.connected
+      ) {
+        return;
+      }
+      this.#clearCallRecovery();
+      this.#error = null;
+      this.#emit("error", null);
+      transport.sendJSON(this.#callStartMessage());
+    } catch (error) {
+      if (
+        !this.#isCurrentCallStartup(callGeneration) ||
+        this.#transport !== transport ||
+        !transport.connected
+      ) {
+        return;
+      }
+      const detail =
+        error instanceof Error ? error.message : "Custom audio input failed";
+      this.#error = `Call reconnection failed: ${detail}. Retrying...`;
+      this.#emit("error", this.#error);
+      const delay = 1000 * 2 ** Math.min(this.#callRecoveryAttempt++, 3);
+      this.#callRecoveryTimer = window.setTimeout(() => {
+        this.#callRecoveryTimer = null;
+        void this.#recoverCall(transport);
+      }, delay);
+    }
+  }
 
   // --- Connection ---
 
@@ -469,13 +554,10 @@ export class VoiceClient {
       this.#emit("connectionchange", true);
       this.#emit("error", null);
 
-      // Reconnect recovery: if we were in a call when the connection
-      // dropped, re-establish it on the new connection. The mic is
-      // still running (not stopped on disconnect), so audio resumes
-      // flowing as soon as the server processes start_call.
       if (this.#inCall) {
         this.#serverCallAcknowledged = false;
-        transport.sendJSON({ type: "start_call" });
+        this.#clearCallRecovery();
+        void this.#recoverCall(transport);
       }
     };
 
@@ -534,15 +616,13 @@ export class VoiceClient {
     const callGeneration = ++this.#callGeneration;
     this.#inCall = true;
     this.#serverCallAcknowledged = false;
+    this.#clearCallRecovery();
     this.#error = null;
     this.#metrics = null;
     this.#emit("error", null);
     this.#emit("metricschange", null);
-    const startMsg: Record<string, unknown> = { type: "start_call" };
-    if (this.#options.preferredFormat) {
-      startMsg.preferred_format = this.#options.preferredFormat;
-    }
     const audioInput = this.#options.audioInput;
+    const startMsg = this.#callStartMessage();
     if (!audioInput?.handlesPlayback) this.#transport.sendJSON(startMsg);
     if (!audioInput?.handlesPlayback) {
       const ctx = await this.#getAudioContext();
@@ -551,12 +631,7 @@ export class VoiceClient {
       if (this.#abortStaleCallStartup(callGeneration)) return;
     }
     if (audioInput) {
-      audioInput.onAudioLevel = (rms) => this.#processAudioLevel(rms);
-      audioInput.onAudioData = (pcm) => {
-        if (this.#transport?.connected && !this.#isMuted) {
-          this.#transport.sendBinary(pcm);
-        }
-      };
+      this.#configureAudioInput(audioInput);
       try {
         await audioInput.start();
         if (this.#abortStaleCallStartup(callGeneration)) return;
@@ -589,6 +664,7 @@ export class VoiceClient {
 
   endCall(): void {
     this.#callGeneration++;
+    this.#clearCallRecovery();
     this.#inCall = false;
     this.#serverCallAcknowledged = false;
     if (this.#transport?.connected) {
