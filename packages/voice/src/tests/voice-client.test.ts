@@ -662,7 +662,10 @@ describe("VoiceClient playback interrupt", () => {
 
     expect(audioContext.pendingDecode).toBeDefined();
     audioInput.onAudioLevel?.(0.2);
-    expect(transport.sentJSON).toContainEqual({ type: "interrupt" });
+    expect(transport.sentJSON).toContainEqual({
+      type: "interrupt",
+      source: "audio_level"
+    });
 
     audioContext.pendingDecode?.();
     await Promise.resolve();

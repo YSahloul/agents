@@ -8,6 +8,7 @@ import {
 } from "@cloudflare/think";
 import {
   Agent,
+  callable,
   getAgentByName,
   routeAgentRequest,
   type Connection,
@@ -17,12 +18,12 @@ import {
   streamRpcVoiceTurn,
   withSFUVoice,
   WorkersAIFluxSTT,
-  WorkersAIRealtimeTTS,
+  WorkersAIGrokTTS,
   type SFUConfig,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { createWorkersAI } from "workers-ai-provider";
-import type { ToolSet } from "ai";
+import type { ToolSet, UIMessage } from "ai";
 import { hasToolCall, tool } from "ai";
 import { z } from "zod";
 
@@ -61,10 +62,35 @@ function reasoningEffort(value: unknown): ReasoningEffort | undefined {
 
 type ResearchInput = { query: string };
 
+const CustomClientMessage = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("kick_speaker") }),
+  z.object({
+    type: z.literal("microphone_settings"),
+    settings: z
+      .object({
+        autoGainControl: z.boolean().nullable(),
+        channelCount: z.number().nullable(),
+        echoCancellation: z.boolean().nullable(),
+        noiseSuppression: z.boolean().nullable(),
+        sampleRate: z.number().nullable()
+      })
+      .nullable()
+  }),
+  z.object({
+    type: z.literal("playback_started"),
+    rms: z.number().finite().min(0)
+  }),
+  z.object({
+    type: z.literal("playback_stopped"),
+    durationMs: z.number().finite().min(0),
+    peakRms: z.number().finite().min(0)
+  })
+]);
+
 function inputText(input: unknown): string {
   if (typeof input === "string") return input;
-  if (input && typeof input === "object") {
-    const query = (input as Record<string, unknown>).query;
+  if (input && typeof input === "object" && "query" in input) {
+    const query = input.query;
     if (typeof query === "string") return query;
   }
   return JSON.stringify(input, null, 2);
@@ -201,6 +227,17 @@ export class MyThinkAgent extends Think<Env> {
     };
   }
 
+  @callable()
+  async listWorkspaceFiles() {
+    try {
+      return (await this.workspace.glob("**/*")).filter(
+        (entry) => entry.type === "file"
+      );
+    } catch {
+      return [];
+    }
+  }
+
   override beforeToolCall(ctx: ToolCallContext): void {
     console.log("[ThinkTrace]", {
       event: "tool_call",
@@ -247,7 +284,9 @@ export class MyThinkAgent extends Think<Env> {
     });
 
     try {
-      await this.chat(transcript, callback, { metadata: options });
+      await this.chat(transcript, callback, {
+        metadata: { ...options, voiceTurnId: turnId }
+      });
       console.log("[ThinkTrace]", {
         event: "turn_end",
         turnId,
@@ -263,6 +302,55 @@ export class MyThinkAgent extends Think<Env> {
       throw error;
     }
   }
+
+  @callable()
+  async markVoiceTurnInterrupted(turnId: string): Promise<boolean> {
+    await this.waitUntilStable({ timeout: 10_000 });
+    const messages = await this.getMessages();
+    let userIndex = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message.role !== "user") continue;
+      const metadata = message.metadata as
+        | { turnMetadata?: { voiceTurnId?: unknown } }
+        | undefined;
+      if (metadata?.turnMetadata?.voiceTurnId === turnId) {
+        userIndex = i;
+        break;
+      }
+    }
+    if (userIndex === -1) return false;
+
+    let assistant: UIMessage | undefined;
+    for (let i = messages.length - 1; i > userIndex; i--) {
+      const message = messages[i];
+      if (
+        message.role === "assistant" &&
+        message.parts.some((part) => part.type === "text")
+      ) {
+        assistant = message;
+        break;
+      }
+    }
+    if (!assistant) return false;
+
+    let replacedText = false;
+    const parts: UIMessage["parts"] = assistant.parts.map((part) => {
+      if (part.type !== "text") return part;
+      const text = replacedText
+        ? ""
+        : "[Voice response interrupted before playback completed. Do not assume the user heard the complete response.]";
+      replacedText = true;
+      return { ...part, text, state: "done" };
+    });
+    await this.updateMessageInHistory({ ...assistant, parts });
+    console.log("[ThinkTrace]", {
+      event: "voice_turn_interrupted",
+      turnId,
+      assistantMessageId: assistant.id
+    });
+    return true;
+  }
 }
 
 const VoiceAgent = withSFUVoice(Agent, {
@@ -271,17 +359,13 @@ const VoiceAgent = withSFUVoice(Agent, {
 });
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  tts = new WorkersAIRealtimeTTS(this.env.AI, {
-    model: "@cf/deepgram/aura-2-en",
-    speaker: "draco",
-    encoding: "linear16",
-    sampleRate: 24000
-  });
+  tts = new WorkersAIGrokTTS(this.env.AI, { voice: "ara" });
   transcriber = new WorkersAIFluxSTT(this.env.AI, {
     eotThreshold: 0.7
   });
 
   readonly #greeting = "Hi, how are you doing?";
+  readonly #activeTurnIds = new Map<string, string>();
 
   getSFUConfig(): SFUConfig {
     const env = this.env as Env & {
@@ -323,6 +407,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     if (this.#activeSpeakerId === connection.id) {
       this.#activeSpeakerId = null;
     }
+    this.#activeTurnIds.delete(connection.id);
   }
 
   onClose(connection: Connection) {
@@ -334,48 +419,44 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   onMessage(connection: Connection, message: WSMessage) {
     // Voice protocol messages are intercepted automatically by the mixin.
     // This handler only receives non-voice messages.
-    if (typeof message === "string") {
-      try {
-        const parsed = JSON.parse(message);
-        if (parsed.type === "kick_speaker") {
-          this.#handleKick(connection);
-          return;
-        }
-        if (
-          parsed.type === "microphone_settings" &&
-          typeof parsed.settings === "object" &&
-          parsed.settings !== null
-        ) {
-          const settings = parsed.settings as Record<string, unknown>;
-          console.log("[VoiceTrace]", {
-            event: "microphone_settings",
-            connectionId: connection.id,
-            autoGainControl:
-              typeof settings.autoGainControl === "boolean"
-                ? settings.autoGainControl
-                : null,
-            channelCount:
-              typeof settings.channelCount === "number"
-                ? settings.channelCount
-                : null,
-            echoCancellation:
-              typeof settings.echoCancellation === "boolean"
-                ? settings.echoCancellation
-                : null,
-            noiseSuppression:
-              typeof settings.noiseSuppression === "boolean"
-                ? settings.noiseSuppression
-                : null,
-            sampleRate:
-              typeof settings.sampleRate === "number"
-                ? settings.sampleRate
-                : null
-          });
-          return;
-        }
-      } catch {
-        // not JSON
+    if (typeof message !== "string") return;
+
+    try {
+      const result = CustomClientMessage.safeParse(JSON.parse(message));
+      if (!result.success) return;
+      const parsed = result.data;
+
+      if (parsed.type === "kick_speaker") {
+        this.#handleKick(connection);
+        return;
       }
+
+      if (parsed.type === "microphone_settings") {
+        console.log("[VoiceTrace]", {
+          event: "microphone_settings",
+          connectionId: connection.id,
+          ...parsed.settings
+        });
+        return;
+      }
+
+      if (parsed.type === "playback_started") {
+        console.log("[VoiceTrace]", {
+          event: "browser_playback_started",
+          connectionId: connection.id,
+          rms: parsed.rms
+        });
+        return;
+      }
+
+      console.log("[VoiceTrace]", {
+        event: "browser_playback_stopped",
+        connectionId: connection.id,
+        durationMs: parsed.durationMs,
+        peakRms: parsed.peakRms
+      });
+    } catch {
+      // not JSON
     }
   }
 
@@ -428,6 +509,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
 
     const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
     const turnId = crypto.randomUUID();
+    this.#activeTurnIds.set(context.connection.id, turnId);
     return streamRpcVoiceTurn({
       signal: context.signal,
       run: (callback) =>
@@ -444,6 +526,13 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
         });
       }
     });
+  }
+
+  async onInterrupt(connection: Connection) {
+    const turnId = this.#activeTurnIds.get(connection.id);
+    if (!turnId) return;
+    const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
+    await brain.markVoiceTurnInterrupted(turnId);
   }
 
   async onCallStart(connection: Connection) {

@@ -1,19 +1,26 @@
 /**
- * Sentence chunker — accumulates streaming text and yields complete sentences.
+ * Sentence chunker — accumulates streaming text and yields speech-ready chunks.
  *
- * Isolated and testable: no dependencies on the voice pipeline, Agent, or AI APIs.
- * Feed it tokens via `add()`, get back sentences via the return value.
- * Call `flush()` at end-of-stream to get any remaining text.
+ * By default it emits complete sentences. A finite `maxChunkLength` also emits
+ * bounded phrases at clause or word boundaries, allowing TTS to start while a
+ * long sentence is still being generated.
  *
- * Current implementation: splits on sentence-ending punctuation (. ! ?) followed
- * by a space or end-of-input. This is intentionally simple — optimize later with
- * better heuristics (abbreviations, decimal numbers, quoted speech, etc.).
+ * Isolated and testable: no dependencies on the voice pipeline, Agent, or AI
+ * APIs. Feed it tokens via `add()`, get back chunks via the return value. Call
+ * `flush()` at end-of-stream to get any remaining text.
  */
 
-/**
- * Punctuation characters that can end a sentence.
- */
-const SENTENCE_TERMINATORS = new Set([".", "!", "?"]);
+const SENTENCE_TERMINATORS: Record<string, true> = {
+  ".": true,
+  "!": true,
+  "?": true
+};
+const CLAUSE_TERMINATORS: Record<string, true> = {
+  ",": true,
+  ";": true,
+  ":": true,
+  "—": true
+};
 
 /**
  * Minimum character count before we'll emit a sentence.
@@ -21,10 +28,15 @@ const SENTENCE_TERMINATORS = new Set([".", "!", "?"]);
  * while still allowing short responses like "Sure thing!" to stream quickly.
  */
 const MIN_SENTENCE_LENGTH = 10;
+const MIN_PHRASE_LENGTH = 24;
 
 export class SentenceChunker {
   #buffer = "";
 
+  /**
+   * @param maxChunkLength Maximum phrase length. Omit to split only sentences.
+   */
+  constructor(private readonly maxChunkLength = Number.POSITIVE_INFINITY) {}
   /**
    * Add a chunk of text (e.g. a streamed LLM token).
    * Returns an array of complete sentences extracted from the buffer.
@@ -56,15 +68,7 @@ export class SentenceChunker {
     this.#buffer = "";
   }
 
-  /**
-   * Extract complete sentences from the buffer.
-   * A sentence boundary is a terminator (. ! ?) followed by:
-   * - a space and an uppercase letter (start of next sentence)
-   * - a space and end of current buffer (likely a boundary)
-   * - end of buffer after the terminator
-   *
-   * We leave ambiguous cases in the buffer until more text arrives.
-   */
+  /** Extract every speech-ready chunk currently buffered. */
   #extractSentences(): string[] {
     const sentences: string[] = [];
 
@@ -83,33 +87,58 @@ export class SentenceChunker {
     return sentences;
   }
 
-  /**
-   * Find the index of the end of the first complete sentence in the buffer.
-   * Returns -1 if no complete sentence boundary is found.
-   */
+  /** Return the inclusive end index of the next speech-ready chunk. */
   #findSentenceBoundary(): number {
+    let sentenceBoundary = -1;
     for (let i = 0; i < this.#buffer.length; i++) {
       const char = this.#buffer[i];
+      if (!SENTENCE_TERMINATORS[char]) continue;
 
-      if (!SENTENCE_TERMINATORS.has(char)) continue;
-
-      // Check what follows the terminator
       const nextChar = this.#buffer[i + 1];
-
-      // If this is the last character in the buffer, don't split yet —
-      // more text might follow (e.g. "3.14" or "Dr. Smith")
-      if (nextChar === undefined) continue;
-
-      // Terminator followed by space — likely a real sentence boundary
-      if (nextChar === " " || nextChar === "\n") {
-        // But only if the sentence is long enough to be real
-        const candidate = this.#buffer.slice(0, i + 1).trim();
-        if (candidate.length >= MIN_SENTENCE_LENGTH) {
-          return i;
-        }
+      const candidate = this.#buffer.slice(0, i + 1).trim();
+      if (
+        candidate.length >= MIN_SENTENCE_LENGTH &&
+        (nextChar === " " || nextChar === "\n")
+      ) {
+        sentenceBoundary = i;
+        break;
+      }
+      if (
+        nextChar === undefined &&
+        Number.isFinite(this.maxChunkLength) &&
+        candidate.length <= this.maxChunkLength &&
+        candidate.length >= MIN_SENTENCE_LENGTH
+      ) {
+        sentenceBoundary = i;
+        break;
       }
     }
 
+    if (
+      sentenceBoundary !== -1 &&
+      sentenceBoundary + 1 <= this.maxChunkLength
+    ) {
+      return sentenceBoundary;
+    }
+    if (this.#buffer.length < this.maxChunkLength) return -1;
+
+    const limit = Math.min(this.maxChunkLength - 1, this.#buffer.length - 1);
+    for (let i = limit; i >= MIN_PHRASE_LENGTH; i--) {
+      const char = this.#buffer[i];
+      if (
+        CLAUSE_TERMINATORS[char] &&
+        (this.#buffer[i + 1] === " " ||
+          this.#buffer[i + 1] === "\n" ||
+          this.#buffer[i + 1] === undefined)
+      ) {
+        return i;
+      }
+    }
+    for (let i = limit; i >= MIN_PHRASE_LENGTH; i--) {
+      if (this.#buffer[i] === " " || this.#buffer[i] === "\n") {
+        return i - 1;
+      }
+    }
     return -1;
   }
 }

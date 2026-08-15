@@ -298,13 +298,21 @@ await client.setOutputDevice(selectedSpeakerId);
 
 ## Workers AI providers (built-in)
 
-All default providers use Workers AI bindings -- no API keys required:
+Built-in providers use the Workers AI binding:
 
 | Class               | Type           | Workers AI model      | Recommended for  |
 | ------------------- | -------------- | --------------------- | ---------------- |
 | `WorkersAIFluxSTT`  | Continuous STT | `@cf/deepgram/flux`   | `withVoice`      |
 | `WorkersAINova3STT` | Continuous STT | `@cf/deepgram/nova-3` | `withVoiceInput` |
 | `WorkersAITTS`      | TTS            | `@cf/deepgram/aura-1` | Both             |
+| `WorkersAIGrokTTS`  | Streaming TTS  | `xai/grok-tts`        | `withVoice`      |
+
+Grok requires a funded AI Gateway Unified Billing balance and an authenticated
+`default` gateway.
+
+Grok receives model text deltas directly and returns audio before the model
+response completes. Its MP3 WebSocket output is decoded incrementally to 24 kHz
+mono PCM for the voice pipeline.
 
 `WorkersAIFluxSTT` uses Flux `StartOfTurn` events for low-latency barge-in and `EndOfTurn` events for final utterances. Custom transcribers can provide the same behavior by calling `onSpeechStart` from `TranscriberSessionOptions` when user speech begins, then `onUtterance` when the turn is complete.
 

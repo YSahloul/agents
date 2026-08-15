@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  WorkersAIGrokTTS,
   WorkersAIFluxSTT,
   WorkersAIRealtimeTTS,
   WorkersAINova3STT,
@@ -55,6 +56,7 @@ class MockAi {
     input: Record<string, unknown>;
     options?: Record<string, unknown>;
   }> = [];
+  fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
   #resolveRun: (() => void) | null = null;
 
   resolveRun(): void {
@@ -62,6 +64,12 @@ class MockAi {
     if (!resolve) return;
     this.#resolveRun = null;
     resolve();
+  }
+  async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    this.fetchCalls.push({ input, init });
+    const webSocket = new MockWebSocket();
+    this.sockets.push(webSocket);
+    return { webSocket } as unknown as Response;
   }
 
   async run(
@@ -302,6 +310,99 @@ describe("WorkersAIRealtimeTTS", () => {
       }),
       expect.objectContaining({ returnRawResponse: true })
     );
+  });
+});
+
+describe("WorkersAIGrokTTS", () => {
+  it("streams Grok audio before the model text stream completes", async () => {
+    const ai = new MockAi();
+    const tts = new WorkersAIGrokTTS(ai, { voice: "eve" });
+    let textController: ReadableStreamDefaultController<string> | undefined;
+    const text = new ReadableStream<string>({
+      start(controller) {
+        textController = controller;
+      }
+    });
+    const frames: Uint8Array[] = [];
+    let resolveFirstFrame = () => {};
+    const firstFrame = new Promise<void>((resolve) => {
+      resolveFirstFrame = resolve;
+    });
+    const done = (async () => {
+      for await (const frame of tts.synthesizeTextStream(text)) {
+        frames.push(new Uint8Array(frame));
+        resolveFirstFrame();
+        resolveFirstFrame = () => {};
+      }
+    })();
+
+    const socket = await waitForConnect(ai);
+    const request = ai.fetchCalls[0];
+    const url = new URL(String(request.input));
+    expect(url.origin + url.pathname).toBe("https://workers-binding.ai/run");
+    expect(url.searchParams.get("model")).toBe("xai/grok-tts");
+    expect(url.searchParams.get("voice_id")).toBe("eve");
+    expect(url.searchParams.get("websocket")).toBe("true");
+    expect(url.searchParams.get("output_format.codec")).toBe("mp3");
+    expect(url.searchParams.get("output_format.sample_rate")).toBe("24000");
+    expect(url.searchParams.get("optimize_streaming_latency")).toBe("1");
+    expect(request.init?.headers).toEqual(
+      expect.objectContaining({ "cf-aig-gateway-id": "default" })
+    );
+
+    textController?.enqueue("hello");
+    await vi.waitFor(() =>
+      expect(socket.sent).toEqual([
+        JSON.stringify({ type: "text.delta", delta: "hello" })
+      ])
+    );
+
+    const mp3 = Uint8Array.from(
+      atob(
+        "//MUxAACeDrAAUMAAXd3dziAYGBgbh6H//MUxAECgDrYAYsAAH+QQMKhJIGTzmXx//MUxAICeDbUAYoAASwGjTcsWfofTEFN//MUxAMAAANIAcAAAEU0LjBVVVVVVVVV"
+      ),
+      (char) => char.charCodeAt(0)
+    );
+    const split = Math.floor(mp3.byteLength / 2);
+    for (const chunk of [mp3.subarray(0, split), mp3.subarray(split)]) {
+      socket.message(
+        JSON.stringify({
+          type: "audio.delta",
+          delta: btoa(String.fromCharCode(...chunk))
+        })
+      );
+    }
+
+    await firstFrame;
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames.some((frame) => frame.some((sample) => sample !== 0))).toBe(
+      true
+    );
+    expect(socket.sent).not.toContain(JSON.stringify({ type: "text.done" }));
+
+    textController?.close();
+    await vi.waitFor(() =>
+      expect(socket.sent).toContain(JSON.stringify({ type: "text.done" }))
+    );
+    socket.message(JSON.stringify({ type: "audio.done" }));
+    await done;
+    expect(socket.closed).toBe(true);
+  });
+
+  it("closes the Grok socket immediately when synthesis is interrupted", async () => {
+    const ai = new MockAi();
+    const controller = new AbortController();
+    const stream = new WorkersAIGrokTTS(ai).synthesizeStream(
+      "hello",
+      controller.signal
+    );
+    const pending = stream.next();
+    const socket = await waitForConnect(ai);
+
+    controller.abort();
+
+    await expect(pending).resolves.toEqual({ done: true, value: undefined });
+    expect(socket.closed).toBe(true);
   });
 });
 

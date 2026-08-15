@@ -156,5 +156,17 @@ describe("SentenceChunker", () => {
         "First, we should consider options."
       ]);
     });
+
+    it("emits a bounded phrase before a long sentence completes", () => {
+      const input =
+        "I can explain this in a way that begins speaking while the sentence continues";
+      const streamingChunker = new SentenceChunker(48);
+
+      const emitted = streamingChunker.add(input);
+
+      expect(emitted.length).toBeGreaterThan(0);
+      expect(emitted[0]?.length).toBeLessThanOrEqual(48);
+      expect([...emitted, ...streamingChunker.flush()].join(" ")).toBe(input);
+    });
   });
 });

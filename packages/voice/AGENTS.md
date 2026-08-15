@@ -19,21 +19,22 @@ voice protocol. Optional SFU/WebRTC transport.
 - `sfu-transport.ts`, `sfu-voice-client.ts`, `sfu-utils.ts` — SFU/WebRTC stack.
 - `audio-pipeline.ts`, `sentence-chunker.ts`, `text-stream.ts` — internals.
 
-## TTS providers — the two shapes (read before touching TTS)
+## TTS providers — the three shapes (read before touching TTS)
 
-One job (text → audio), two provider interfaces:
+One job (text → audio), three provider interfaces:
 
-| Interface              | Method                   | Capability                   | Built-in implementor                       |
-| ---------------------- | ------------------------ | ---------------------------- | ------------------------------------------ |
-| `TTSProvider`          | `synthesize(text)`       | Batch whole-sentence blob    | `WorkersAITTS`                             |
-| `StreamingTTSProvider` | `synthesizeStream(text)` | Per-sentence async generator | `WorkersAIRealtimeTTS`, external providers |
+| Interface                  | Method                   | Capability                              | Built-in implementor                       |
+| -------------------------- | ------------------------ | --------------------------------------- | ------------------------------------------ |
+| `TTSProvider`              | `synthesize(text)`       | Batch whole-sentence blob               | `WorkersAITTS`                             |
+| `StreamingTTSProvider`     | `synthesizeStream(text)` | Audio stream for one speech-ready chunk | `WorkersAIRealtimeTTS`, external providers |
+| `StreamingTextTTSProvider` | `synthesizeTextStream()` | Model text deltas → audio stream        | `WorkersAIGrokTTS`                         |
 
 ### Dispatcher precedence
 
-`voice.ts` selects the streaming path when
-`typeof tts.synthesizeStream === "function"`; otherwise it calls batch
-`synthesize()`. `SentenceChunker` completes a sentence before either method is
-called. There is no token-granular TTS session interface.
+`voice.ts` sends model text deltas directly when
+`typeof tts.synthesizeTextStream === "function"`. Otherwise it completes a
+speech-ready chunk with `SentenceChunker`, then selects `synthesizeStream()`
+when available and batch `synthesize()` as the fallback.
 
 ### `WorkersAITTS` vs `WorkersAIRealtimeTTS`
 

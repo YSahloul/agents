@@ -121,6 +121,12 @@ This project incorporates code from the following open-source projects.
   >
   > END OF TERMS AND CONDITIONS
 
+### minimp3-wasm
+
+- **License**: Apache License 2.0
+- **Repository**: https://github.com/bashi/minimp3-wasm
+- **Full License**: [licenses/apache-2.0-minimp3-wasm.txt](licenses/apache-2.0-minimp3-wasm.txt)
+
 ### TypeScript VFS
 
 - **License**: MIT License

@@ -994,6 +994,36 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     ws.close();
   });
 
+  it("logs the finalized transcript exactly as sent to the client", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { ws } = await connectWS(uniquePath());
+
+    try {
+      await waitForStatus(ws, "idle");
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
+
+      sendJSON(ws, { type: "text_message", text: "logging test" });
+      await waitForType(ws, "transcript_end");
+
+      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
+        event: "client_transcript",
+        connectionId: expect.any(String),
+        role: "user",
+        text: "logging test"
+      });
+      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
+        event: "client_transcript",
+        connectionId: expect.any(String),
+        role: "assistant",
+        text: "Echo: logging test"
+      });
+    } finally {
+      ws.close();
+      log.mockRestore();
+    }
+  });
+
   it("sends interim transcripts during audio streaming", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
@@ -2476,7 +2506,7 @@ describe("VoiceAgent — server audio transport", () => {
   });
 });
 
-describe("VoiceAgent — streaming TTS (synthesizeStream branch)", () => {
+describe("VoiceAgent — bidirectional streaming TTS", () => {
   async function collectBinaryUntilMetrics(
     ws: WebSocket,
     timeout = 5000
@@ -2511,7 +2541,7 @@ describe("VoiceAgent — streaming TTS (synthesizeStream branch)", () => {
     });
   }
 
-  it("delivers chunked streaming audio when the TTS provider implements synthesizeStream", async () => {
+  it("feeds model text deltas directly to a streaming-text TTS provider", async () => {
     const { ws } = await connectWS(uniqueStreamingTTSPath());
     await waitForStatus(ws, "idle");
 
@@ -2535,13 +2565,12 @@ describe("VoiceAgent — streaming TTS (synthesizeStream branch)", () => {
       chunks: string[];
     };
 
-    // synthesizeStream splits a single sentence into exactly two chunks;
-    // batch synthesize() would leave this array empty.
+    // The model yields exactly two text deltas. The provider receives and
+    // speaks both directly rather than waiting for a sentence boundary.
     expect(chunks.chunks).toHaveLength(2);
     expect(frames.length).toBe(2);
 
-    // The concatenated streamed audio must reconstruct the spoken echo,
-    // proving both chunks arrived on the connection (not just the first).
+    // Both streamed audio chunks reconstruct the model response.
     const echoed = frames.join("");
     expect(echoed).toEqual(expect.stringContaining("Echo:"));
 

@@ -20,10 +20,6 @@
       {
         "class_name": "MyThinkAgent",
         "name": "MyThinkAgent"
-      },
-      {
-        "class_name": "RetailAgent",
-        "name": "RetailAgent"
       }
     ]
   },

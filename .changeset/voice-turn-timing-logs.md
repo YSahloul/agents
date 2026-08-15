@@ -13,6 +13,9 @@ silently, and the batch/streaming TTS pipeline emits the same trace vocabulary
 the realtime pipeline already had (`model_first_delta`, `model_stream_complete`,
 `model_stream_error`, `tts_sentence` with per-sentence synth time, and
 `tts_first_audio`). Previously that path logged nothing at all.
+Final client-visible transcripts and interruption triggers are also traced so
+the recognized speech, model input, displayed transcript, and interruption
+source can be correlated.
 
 `@cloudflare/voice-signalwire`: the per-frame `duck` and `gated — dropping`
 logs fired ~50×/second while the agent spoke, burying every useful line

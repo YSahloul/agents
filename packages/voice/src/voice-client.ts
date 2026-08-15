@@ -1286,7 +1286,10 @@ export class VoiceClient {
         this.#stopPlayback();
         this.#interruptChunkCount = 0;
         if (this.#transport?.connected) {
-          this.#transport.sendJSON({ type: "interrupt" });
+          this.#transport.sendJSON({
+            type: "interrupt",
+            source: "audio_level"
+          });
         }
       }
     } else {

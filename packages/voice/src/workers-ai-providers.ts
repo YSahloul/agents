@@ -6,8 +6,12 @@
  * satisfying the provider interfaces works.
  */
 
+import { Decoder as Mp3Decoder } from "minimp3-wasm";
+import mp3DecoderModule from "minimp3-wasm/dist/decoder.opt.wasm";
+
 import type {
   StreamingTTSProvider,
+  StreamingTextTTSProvider,
   TTSProvider,
   Transcriber,
   TranscriberSession,
@@ -19,6 +23,7 @@ import type {
 
 /** Loose type for the Workers AI binding — avoids hard dependency on @cloudflare/workers-types. */
 interface AiLike {
+  fetch?(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   run(
     model: string,
     input: Record<string, unknown>,
@@ -275,6 +280,315 @@ export class WorkersAIRealtimeTTS
     ws.accept();
     ws.binaryType = "arraybuffer";
     return ws;
+  }
+}
+
+export interface WorkersAIGrokTTSOptions {
+  /** Grok voice. @default "ara" */
+  voice?: string;
+  /** BCP-47 language code. @default "en" */
+  language?: string;
+  /**
+   * xAI streaming latency optimization. `1` lowers first-audio latency with a
+   * minor quality tradeoff. @default 1
+   */
+  optimizeStreamingLatency?: 0 | 1 | 2;
+}
+
+/** Incrementally exposes new mono PCM16 samples from an MP3 byte stream. */
+class StreamingMp3ToPcm16 {
+  #chunks: Uint8Array[] = [];
+  #byteLength = 0;
+  #emittedFrames = 0;
+
+  constructor(
+    private readonly wasm: WebAssembly.Exports,
+    private readonly sampleRate: number
+  ) {}
+
+  push(chunk: Uint8Array): Uint8Array | null {
+    this.#chunks.push(chunk);
+    this.#byteLength += chunk.byteLength;
+    const mp3 = new Uint8Array(this.#byteLength);
+    let offset = 0;
+    for (const buffered of this.#chunks) {
+      mp3.set(buffered, offset);
+      offset += buffered.byteLength;
+    }
+
+    // ponytail: TTS utterances are short, so re-decoding the buffered stream
+    // keeps this dependency tiny; use a stateful decoder if CPU profiles show
+    // long-form TTS needs it.
+    const result = new Mp3Decoder(this.wasm, mp3).decode(
+      Number.POSITIVE_INFINITY
+    );
+    if (result.samplingRate !== 0 && result.samplingRate !== this.sampleRate) {
+      throw new Error(
+        `MP3 stream returned ${result.samplingRate} Hz audio; expected ${this.sampleRate} Hz`
+      );
+    }
+    if (result.numChannels < 1) return null;
+    const decodedFrames = Math.floor(result.numSamples / result.numChannels);
+    if (decodedFrames <= this.#emittedFrames) return null;
+    const pcm = new Int16Array(decodedFrames - this.#emittedFrames);
+    for (let frame = this.#emittedFrames; frame < decodedFrames; frame++) {
+      let sample = 0;
+      for (let channel = 0; channel < result.numChannels; channel++) {
+        sample += result.pcm[frame * result.numChannels + channel] ?? 0;
+      }
+      pcm[frame - this.#emittedFrames] = Math.round(
+        sample / result.numChannels
+      );
+    }
+    this.#emittedFrames = decodedFrames;
+    return new Uint8Array(pcm.buffer);
+  }
+}
+
+/**
+ * Streaming xAI Grok TTS through the Workers AI binding.
+ *
+ * Grok's MP3 WebSocket output is decoded to PCM16 as each chunk arrives, so
+ * callers do not need an xAI API key or a complete audio download.
+ */
+export class WorkersAIGrokTTS
+  implements TTSProvider, StreamingTTSProvider, StreamingTextTTSProvider
+{
+  readonly audioFormat: VoiceAudioFormat = "pcm16";
+  readonly sampleRate = 24000;
+  #ai: AiLike;
+  #voice: string;
+  #language: string;
+  #optimizeStreamingLatency: 0 | 1 | 2;
+
+  constructor(ai: AiLike, options?: WorkersAIGrokTTSOptions) {
+    this.#ai = ai;
+    this.#voice = options?.voice ?? "ara";
+    this.#language = options?.language ?? "en";
+    this.#optimizeStreamingLatency = options?.optimizeStreamingLatency ?? 1;
+  }
+
+  async synthesize(
+    text: string,
+    signal?: AbortSignal
+  ): Promise<ArrayBuffer | null> {
+    const chunks: ArrayBuffer[] = [];
+    let byteLength = 0;
+    for await (const chunk of this.synthesizeStream(text, signal)) {
+      chunks.push(chunk);
+      byteLength += chunk.byteLength;
+    }
+    if (chunks.length === 0) return null;
+    const audio = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      audio.set(new Uint8Array(chunk), offset);
+      offset += chunk.byteLength;
+    }
+    return audio.buffer;
+  }
+
+  async *synthesizeStream(
+    text: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer> {
+    if (!text || signal?.aborted) return;
+    const source = new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue(text);
+        controller.close();
+      }
+    });
+    yield* this.synthesizeTextStream(source, signal);
+  }
+
+  async *synthesizeTextStream(
+    text: ReadableStream<string>,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer> {
+    if (signal?.aborted) return;
+
+    const [decoderInstance, ws] = await Promise.all([
+      WebAssembly.instantiate(mp3DecoderModule, {}),
+      this.#open()
+    ]);
+    const frames = new AudioFrameStream(
+      (this.sampleRate * FRAME_MS * 2) / 1000,
+      2
+    );
+    const normalizer = new StreamingMp3ToPcm16(
+      decoderInstance.exports,
+      this.sampleRate
+    );
+
+    ws.addEventListener("message", (event: MessageEvent) => {
+      if (typeof event.data !== "string") return;
+      let message: unknown;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (!message || typeof message !== "object" || !("type" in message)) {
+        return;
+      }
+      if (
+        message.type === "audio.delta" &&
+        "delta" in message &&
+        typeof message.delta === "string"
+      ) {
+        try {
+          const decoded = atob(message.delta);
+          const chunk = new Uint8Array(decoded.length);
+          for (let i = 0; i < decoded.length; i++) {
+            chunk[i] = decoded.charCodeAt(i);
+          }
+          const pcm = normalizer.push(chunk);
+          if (pcm) frames.push(pcm);
+        } catch (error) {
+          frames.fail(
+            error instanceof Error
+              ? error
+              : new Error("Workers AI Grok MP3 decode failed")
+          );
+        }
+      } else if (message.type === "audio.done") {
+        frames.finish();
+      } else if (message.type === "error") {
+        const detail =
+          "message" in message && typeof message.message === "string"
+            ? `: ${message.message}`
+            : "";
+        frames.fail(new Error(`Workers AI Grok TTS error${detail}`));
+      }
+    });
+    ws.addEventListener("close", (event: CloseEvent) => {
+      frames.fail(
+        new Error(
+          `Workers AI Grok TTS socket closed before audio.done (code ${event.code}${
+            event.reason ? `: ${event.reason}` : ""
+          })`
+        )
+      );
+    });
+    ws.addEventListener("error", () => {
+      frames.fail(new Error("Workers AI Grok TTS socket error"));
+    });
+    const abort = () => {
+      try {
+        ws.send(JSON.stringify({ type: "text.clear" }));
+      } catch {
+        // Already closed.
+      }
+      frames.finish();
+      try {
+        ws.close();
+      } catch {
+        // Already closed.
+      }
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+
+    const inputPromise = (async () => {
+      const reader = text.getReader();
+      let sentText = false;
+      try {
+        while (!signal?.aborted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          sentText = true;
+          ws.send(JSON.stringify({ type: "text.delta", delta: value }));
+        }
+        if (signal?.aborted) return;
+        if (sentText) {
+          ws.send(JSON.stringify({ type: "text.done" }));
+        } else {
+          frames.finish();
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    })().catch((error: unknown) => {
+      if (signal?.aborted) return;
+      frames.fail(
+        error instanceof Error
+          ? error
+          : new Error("Workers AI Grok TTS input stream failed")
+      );
+    });
+
+    try {
+      let nextYieldAt = 0;
+      for await (const frame of frames) {
+        if (signal?.aborted) return;
+        const now = Date.now();
+        if (nextYieldAt === 0) {
+          nextYieldAt = now + FRAME_MS;
+        } else {
+          if (now < nextYieldAt) {
+            await new Promise<void>((resolve) =>
+              setTimeout(resolve, nextYieldAt - now)
+            );
+          }
+          nextYieldAt = Math.max(nextYieldAt + FRAME_MS, Date.now() + FRAME_MS);
+        }
+        yield frame;
+      }
+      await inputPromise;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      try {
+        ws.close();
+      } catch {
+        // Already closed.
+      }
+    }
+  }
+
+  async #open(): Promise<WebSocket> {
+    if (!this.#ai.fetch) {
+      throw new Error("Workers AI Grok TTS requires the native AI binding");
+    }
+    const model = "xai/grok-tts";
+    const endpoint = new URL("https://workers-binding.ai/run");
+    endpoint.searchParams.set("model", model);
+    endpoint.searchParams.set("language", this.#language);
+    endpoint.searchParams.set("voice_id", this.#voice);
+    endpoint.searchParams.set("websocket", "true");
+    endpoint.searchParams.set("output_format.codec", "mp3");
+    endpoint.searchParams.set(
+      "output_format.sample_rate",
+      String(this.sampleRate)
+    );
+    endpoint.searchParams.set(
+      "optimize_streaming_latency",
+      String(this.#optimizeStreamingLatency)
+    );
+    const response = await this.#ai.fetch(endpoint, {
+      headers: {
+        Upgrade: "websocket",
+        "cf-aig-gateway-id": "default",
+        "cf-consn-sdk-version": "2.0.0",
+        "cf-consn-model-id": model
+      }
+    });
+    const socket =
+      "webSocket" in response && isWebSocket(response.webSocket)
+        ? response.webSocket
+        : null;
+    if (!socket) {
+      const body = await response.text().catch(() => "");
+      throw new Error(
+        `Workers AI Grok TTS WebSocket failed: HTTP ${response.status}${
+          body ? ` — ${body.slice(0, 200)}` : ""
+        }`
+      );
+    }
+    socket.accept();
+    socket.binaryType = "arraybuffer";
+    return socket;
   }
 }
 

@@ -11,6 +11,7 @@ import { withVoice, type TextSource, type VoiceTurnContext } from "../../voice";
 import type {
   TTSProvider,
   StreamingTTSProvider,
+  StreamingTextTTSProvider,
   Transcriber,
   TranscriberSession,
   TranscriberSessionOptions,
@@ -29,29 +30,27 @@ class TestTTS implements TTSProvider {
   }
 }
 
-/**
- * Streaming TTS provider for tests — splits text into two chunks via
- * synthesizeStream (exercising the restored StreamingTTSProvider branch).
- */
-class TestStreamingTTS implements TTSProvider, StreamingTTSProvider {
-  /** Records how the audio was chunked per sentence, for assertions. */
+/** Bidirectional TTS provider that turns each model text delta into audio. */
+class TestStreamingTTS implements TTSProvider, StreamingTextTTSProvider {
   chunks: string[] = [];
 
   async synthesize(text: string): Promise<ArrayBuffer | null> {
-    const buffer = new ArrayBuffer(text.length);
-    const view = new Uint8Array(buffer);
-    for (let i = 0; i < text.length; i++) {
-      view[i] = text.charCodeAt(i) & 0xff;
-    }
-    return buffer;
+    return new TextEncoder().encode(text).buffer;
   }
 
-  async *synthesizeStream(text: string): AsyncGenerator<ArrayBuffer> {
-    const mid = Math.ceil(text.length / 2);
-    const parts = [text.slice(0, mid), text.slice(mid)];
-    for (const part of parts) {
-      this.chunks.push(part);
-      yield new TextEncoder().encode(part).buffer;
+  async *synthesizeTextStream(
+    text: ReadableStream<string>
+  ): AsyncGenerator<ArrayBuffer> {
+    const reader = text.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        this.chunks.push(value);
+        yield new TextEncoder().encode(value).buffer;
+      }
+    } finally {
+      reader.releaseLock();
     }
   }
 }

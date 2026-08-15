@@ -29,6 +29,18 @@
     ".nx": true,
     ".github": true,
     "packages/voice/dist": true,
-    "packages/voice/node_modules": true
+    "packages/voice/node_modules": true,
+    "examples/signalwire-mcp-voice-agent/.wrangler": true,
+    "examples/signalwire-mcp-voice-agent/node_modules": true,
+    "examples/sandbox-coding-agent": true,
+    "examples/signalwire-mcp-voice-agent/env.d.ts": true,
+    "examples/signalwire-think-voice-agent/.wrangler": true,
+    "examples/signalwire-think-voice-agent/node_modules": true,
+    "examples/avatar-webrtc-voice/.wrangler": true,
+    "examples/avatar-webrtc-voice/dist": true,
+    "examples/avatar-webrtc-voice/node_modules": true,
+    "examples/avatar-webrtc-voice/vite.config.ts": true,
+    "packages/think/dist": true,
+    "packages/think/node_modules": true
   }
 }

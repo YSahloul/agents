@@ -1,40 +1,61 @@
-import {
-  SFUVoiceAudioInput,
-  useVoiceAgent,
-  type VoiceStatus
-} from "@cloudflare/voice/react";
+import { SFUVoiceAudioInput, useVoiceAgent } from "@cloudflare/voice/react";
 import { useAgent, useAgentToolEvents } from "agents/react";
 import type { AgentToolRunState } from "agents/chat";
 import {
+  CaretDownIcon,
+  ChatCircleDotsIcon,
+  FolderSimpleIcon,
   MicrophoneIcon,
   MicrophoneSlashIcon,
-  PhoneIcon,
-  PhoneDisconnectIcon,
-  WaveformIcon,
-  SpinnerGapIcon,
-  SpeakerHighIcon,
-  ChatCircleDotsIcon,
-  WifiHighIcon,
-  WifiSlashIcon,
-  WarningCircleIcon,
-  UserSwitchIcon,
-  PaperPlaneRightIcon,
   MoonIcon,
+  PaperPlaneRightIcon,
+  PhoneDisconnectIcon,
+  PhoneIcon,
+  SpinnerGapIcon,
   SunIcon,
-  RobotIcon
+  UserSwitchIcon,
+  WarningCircleIcon,
+  WaveformIcon,
+  WifiHighIcon,
+  WifiSlashIcon
 } from "@phosphor-icons/react";
 import { Button, Input, Select, Surface, Text } from "@cloudflare/kumo";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
-// --- Session ID ---
-// Every page load gets a brand-new instance name, so each session hits a
-// fresh Durable Object with no persisted conversation history. Nothing is
-// stored in localStorage — a reload is a new session by design.
+// --- Browser persistence ---
+
+const SESSION_ID_KEY = "avatar-voice-session-id";
+const PANEL_STATE_KEY = "avatar-voice-panels";
+
+type PanelState = {
+  activity: boolean;
+  files: boolean;
+  transcript: boolean;
+};
 
 function getSessionId(): string {
-  return crypto.randomUUID();
+  const stored = localStorage.getItem(SESSION_ID_KEY);
+  if (stored) return stored;
+  const sessionId = crypto.randomUUID();
+  localStorage.setItem(SESSION_ID_KEY, sessionId);
+  return sessionId;
+}
+
+function getPanelState(): PanelState {
+  try {
+    const stored = JSON.parse(
+      localStorage.getItem(PANEL_STATE_KEY) ?? "{}"
+    ) as Record<string, unknown>;
+    return {
+      activity: stored.activity === true,
+      files: stored.files === true,
+      transcript: stored.transcript === true
+    };
+  } catch {
+    return { activity: false, files: false, transcript: false };
+  }
 }
 
 // --- Helpers ---
@@ -47,33 +68,9 @@ function formatTime(date: Date): string {
   });
 }
 
-function getStatusDisplay(status: VoiceStatus) {
-  switch (status) {
-    case "idle":
-      return {
-        text: "Ready",
-        icon: PhoneIcon,
-        color: "text-kumo-secondary"
-      };
-    case "listening":
-      return {
-        text: "Listening...",
-        icon: WaveformIcon,
-        color: "text-kumo-success"
-      };
-    case "thinking":
-      return {
-        text: "Thinking...",
-        icon: SpinnerGapIcon,
-        color: "text-kumo-warning"
-      };
-    case "speaking":
-      return {
-        text: "Speaking...",
-        icon: SpeakerHighIcon,
-        color: "text-kumo-info"
-      };
-  }
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
 function ModeToggle() {
@@ -103,6 +100,13 @@ function ModeToggle() {
 type ModelOption = {
   id: string;
   reasoning: boolean;
+};
+
+type WorkspaceFile = {
+  path: string;
+  name: string;
+  size: number;
+  updatedAt: number;
 };
 
 // Fallback shown before / if the /models endpoint is unreachable. The API is
@@ -195,7 +199,7 @@ function RobotAvatar({ isTalking }: { isTalking: boolean }) {
   }, [isTalking]);
 
   return (
-    <div className="mb-4 overflow-hidden rounded-xl ring ring-kumo-line">
+    <div className="mb-4 overflow-hidden rounded-2xl ring ring-kumo-line">
       <img
         ref={imageRef}
         src={ROBOT_FRAMES[0]}
@@ -216,6 +220,11 @@ function App() {
   });
   const { unboundRuns } = useAgentToolEvents({ agent: thinkAgent });
   const helperRuns = useMemo(() => unboundRuns, [unboundRuns]);
+  const activeRun = helperRuns.find((run) => run.status === "running");
+  const [panels, setPanels] = useState<PanelState>(getPanelState);
+  const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [filesError, setFilesError] = useState(false);
   const [models, setModels] = useState<ModelOption[]>(BASELINE_MODELS);
   const [llmModel, setLlmModel] = useState<string>(
     "@cf/moonshotai/kimi-k2.7-code"
@@ -225,18 +234,27 @@ function App() {
   const [hasPlaybackAudio, setHasPlaybackAudio] = useState(false);
   const playbackActive = useRef(false);
   const playbackSilenceTimer = useRef<number | undefined>(undefined);
+  const sendVoiceJSON = useRef<(message: Record<string, unknown>) => void>(
+    () => {}
+  );
+  const playbackStartedAt = useRef(0);
+  const playbackPeakRms = useRef(0);
   const audioInput = useMemo(
     () =>
       new SFUVoiceAudioInput({
         endpoint: `/agents/my-voice-agent/${encodeURIComponent(sessionId)}/voice`,
         onPlaybackAudioLevel: (rms) => {
           if (rms > 0.01) {
+            playbackPeakRms.current = Math.max(playbackPeakRms.current, rms);
             if (playbackSilenceTimer.current !== undefined) {
               clearTimeout(playbackSilenceTimer.current);
               playbackSilenceTimer.current = undefined;
             }
             if (!playbackActive.current) {
               playbackActive.current = true;
+              playbackStartedAt.current = Date.now();
+              playbackPeakRms.current = rms;
+              sendVoiceJSON.current({ type: "playback_started", rms });
               setHasPlaybackAudio(true);
             }
           } else if (
@@ -246,6 +264,13 @@ function App() {
             playbackSilenceTimer.current = window.setTimeout(() => {
               playbackActive.current = false;
               playbackSilenceTimer.current = undefined;
+              sendVoiceJSON.current({
+                type: "playback_stopped",
+                durationMs: Date.now() - playbackStartedAt.current,
+                peakRms: playbackPeakRms.current
+              });
+              playbackStartedAt.current = 0;
+              playbackPeakRms.current = 0;
               setHasPlaybackAudio(false);
             }, 160);
           }
@@ -261,7 +286,6 @@ function App() {
     transcript,
     interimTranscript,
     metrics,
-    audioLevel,
     isMuted,
     connected,
     error,
@@ -277,14 +301,15 @@ function App() {
     name: sessionId,
     query: { llm: llmModel, reasoning },
     audioInput,
-    // Flux handles barge-in after echo filtering; raw mic levels cannot
-    // distinguish the caller from TTS playing through the device speaker.
-    interruptThreshold: 1,
     outputDeviceId,
     onReconnect: () => {
       setToast("Reconnected to agent.");
     }
   });
+
+  useEffect(() => {
+    sendVoiceJSON.current = sendJSON;
+  }, [sendJSON]);
 
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
   const [textInput, setTextInput] = useState("");
@@ -294,6 +319,31 @@ function App() {
   const [audioOutputDevices, setAudioOutputDevices] = useState<
     MediaDeviceInfo[]
   >([]);
+
+  const setPanelOpen = useCallback((panel: keyof PanelState, open: boolean) => {
+    setPanels((current) => ({ ...current, [panel]: open }));
+  }, []);
+
+  const refreshWorkspaceFiles = useCallback(async () => {
+    setFilesLoading(true);
+    setFilesError(false);
+    try {
+      const files = await thinkAgent.call("listWorkspaceFiles", []);
+      setWorkspaceFiles(Array.isArray(files) ? (files as WorkspaceFile[]) : []);
+    } catch {
+      setFilesError(true);
+    } finally {
+      setFilesLoading(false);
+    }
+  }, [thinkAgent]);
+
+  useEffect(() => {
+    localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(panels));
+  }, [panels]);
+
+  useEffect(() => {
+    if (connected) void refreshWorkspaceFiles();
+  }, [connected, transcript.length, refreshWorkspaceFiles]);
 
   // Auto-clear toasts
   useEffect(() => {
@@ -397,14 +447,12 @@ function App() {
   }, [sendJSON]);
 
   const isInCall = status !== "idle";
-  const statusDisplay = getStatusDisplay(status);
-  const StatusIcon = statusDisplay.icon;
 
   return (
-    <div className="min-h-full flex items-center justify-center p-6">
-      <Surface className="w-full max-w-lg rounded-2xl p-8 ring ring-kumo-line">
+    <div className="flex min-h-dvh items-start justify-center p-0 sm:items-center sm:p-6">
+      <Surface className="min-h-dvh w-full max-w-3xl rounded-none p-4 ring-0 sm:min-h-0 sm:rounded-2xl sm:p-6 sm:ring sm:ring-kumo-line">
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="mb-4 flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
             <ChatCircleDotsIcon
               size={28}
@@ -415,9 +463,10 @@ function App() {
               Avatar Voice
             </Text>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-2">
             {/* Connection status */}
             <span
+              aria-label={connected ? "Connected" : "Connecting"}
               className={`flex items-center gap-1.5 text-xs ${connected ? "text-kumo-success" : "text-kumo-secondary"}`}
             >
               {connected ? (
@@ -425,75 +474,15 @@ function App() {
               ) : (
                 <WifiSlashIcon size={14} weight="bold" />
               )}
-              {connected ? "Connected" : "Connecting..."}
+              <span className="hidden sm:inline">
+                {connected ? "Connected" : "Connecting..."}
+              </span>
             </span>
             <ModeToggle />
           </div>
         </div>
 
-        <Surface className="mb-4 rounded-xl bg-kumo-fill px-4 py-3">
-          <Text size="sm">
-            Speak over WebRTC while the local robot animates with the assistant.
-            Voice handles audio while Think owns the conversation.
-          </Text>
-        </Surface>
-
         <RobotAvatar isTalking={hasPlaybackAudio} />
-
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <Text size="xs" variant="secondary">
-            Start a background Researcher for a three-point WebRTC comparison.
-          </Text>
-          <Button
-            size="sm"
-            variant="secondary"
-            icon={<RobotIcon size={16} />}
-            disabled={!connected || status === "thinking"}
-            onClick={() =>
-              sendText(
-                "Start the Researcher in the background to compare WebRTC voice and WebSocket voice in three concise bullets."
-              )
-            }
-          >
-            Start research
-          </Button>
-        </div>
-
-        {helperRuns.length > 0 && (
-          <Surface className="mb-4 rounded-xl p-4 ring ring-kumo-line">
-            <div className="mb-3 flex items-center gap-2">
-              <RobotIcon size={18} className="text-kumo-accent" />
-              <Text size="sm" bold>
-                Sub-agent activity
-              </Text>
-            </div>
-            <div className="space-y-3">
-              {helperRuns.map((run) => (
-                <div key={run.runId} className="rounded-lg bg-kumo-fill p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <Text size="xs" bold>
-                      {run.display?.name ?? run.agentType}
-                    </Text>
-                    <span className="flex items-center gap-1 text-xs text-kumo-secondary">
-                      {run.status === "running" && (
-                        <SpinnerGapIcon size={13} className="animate-spin" />
-                      )}
-                      {helperStatus(run)}
-                    </span>
-                  </div>
-                  <div className="mt-1 text-xs text-kumo-secondary">
-                    {helperQuery(run)}
-                  </div>
-                  {run.summary && (
-                    <div className="mt-2 text-xs text-kumo-default">
-                      {run.summary}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </Surface>
-        )}
 
         {/* Toast notification */}
         {toast && (
@@ -537,101 +526,12 @@ function App() {
           </div>
         )}
 
-        {/* Status indicator */}
-        <Surface className="rounded-xl px-4 py-3 text-center ring ring-kumo-line mb-4">
-          <div
-            className={`flex items-center justify-center gap-2 ${statusDisplay.color}`}
-          >
-            <StatusIcon
-              size={20}
-              weight="bold"
-              className={status === "thinking" ? "animate-spin" : ""}
-            />
-            <span className={`text-lg ${statusDisplay.color}`}>
-              {statusDisplay.text}
-            </span>
-          </div>
-          {/* Audio level meter */}
-          <div
-            className={`mt-2 h-1.5 overflow-hidden rounded-full bg-kumo-fill ${
-              isInCall && status === "listening" ? "" : "invisible"
-            }`}
-          >
-            <div
-              className="h-full rounded-full bg-kumo-success transition-all duration-75"
-              style={{ width: `${Math.min(audioLevel * 500, 100)}%` }}
-            />
-          </div>
-        </Surface>
-
-        {/* Transcript */}
-        <Surface className="mb-6 h-72 overflow-hidden rounded-xl ring ring-kumo-line">
-          <div
-            ref={transcriptScrollRef}
-            className="h-full overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
-          >
-            {transcript.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-kumo-secondary">
-                <Text size="sm">
-                  {isInCall
-                    ? "Start speaking..."
-                    : connected
-                      ? "Start a voice session when you're ready"
-                      : "Connecting to agent..."}
-                </Text>
-              </div>
-            ) : (
-              <div className="p-4 space-y-3">
-                {transcript.map((msg, i) => (
-                  <div
-                    key={i}
-                    className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-                  >
-                    <div className="flex min-w-0 max-w-[80%] flex-col gap-0.5">
-                      <div
-                        className={`break-words rounded-xl px-3 py-2 text-sm ${
-                          msg.role === "user"
-                            ? "bg-kumo-brand/15 text-kumo-default"
-                            : "bg-kumo-fill text-kumo-default"
-                        }`}
-                      >
-                        {msg.text || (
-                          <span className="text-kumo-secondary italic">
-                            ...
-                          </span>
-                        )}
-                      </div>
-                      {msg.timestamp && (
-                        <span
-                          className={`text-[10px] text-kumo-secondary px-1 ${msg.role === "user" ? "text-right" : "text-left"}`}
-                        >
-                          {formatTime(new Date(msg.timestamp))}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-                {/* Interim transcript — live preview of what the user is saying */}
-                {interimTranscript && (
-                  <div className="flex justify-end">
-                    <div className="flex min-w-0 max-w-[80%] flex-col gap-0.5">
-                      <div className="break-words rounded-xl border border-dashed border-kumo-brand/20 bg-kumo-brand/10 px-3 py-2 text-sm text-kumo-secondary italic">
-                        {interimTranscript}
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </Surface>
-
         {/* Call controls */}
-        <div className="flex items-center justify-center gap-3">
+        <div className="flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
           {!isInCall ? (
             <Button
               onClick={handleStartCall}
-              className="px-8 justify-center"
+              className="w-full justify-center px-8 sm:w-auto"
               variant="primary"
               disabled={!connected || speakerConflict}
               icon={<PhoneIcon size={20} weight="fill" />}
@@ -642,6 +542,7 @@ function App() {
             <>
               <Button
                 onClick={toggleMute}
+                className="w-full justify-center sm:w-auto"
                 variant={isMuted ? "destructive" : "secondary"}
                 icon={
                   isMuted ? (
@@ -655,6 +556,7 @@ function App() {
               </Button>
               <Button
                 onClick={endCall}
+                className="w-full justify-center sm:w-auto"
                 variant="destructive"
                 icon={<PhoneDisconnectIcon size={20} weight="fill" />}
               >
@@ -664,33 +566,262 @@ function App() {
           )}
         </div>
 
-        {/* Text input — type to the agent */}
-        <form
-          className="mt-4 flex gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (textInput.trim() && connected) {
-              sendText(textInput.trim());
-              setTextInput("");
-            }
-          }}
+        <details
+          open={panels.activity}
+          onToggle={(event) =>
+            setPanelOpen("activity", event.currentTarget.open)
+          }
+          className="group mt-6 overflow-hidden rounded-xl bg-kumo-base ring ring-kumo-line open:shadow-sm"
         >
-          <Input
-            value={textInput}
-            onChange={(e) => setTextInput(e.target.value)}
-            placeholder={connected ? "Type a message..." : "Connecting..."}
-            disabled={!connected || status === "thinking"}
-            className="flex-1"
-          />
-          <Button
-            type="submit"
-            variant="secondary"
-            disabled={!connected || !textInput.trim() || status === "thinking"}
-            icon={<PaperPlaneRightIcon size={16} weight="fill" />}
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 marker:hidden [&::-webkit-details-marker]:hidden">
+            <span className="flex min-w-0 items-center gap-2">
+              {activeRun ? (
+                <SpinnerGapIcon
+                  size={16}
+                  className="shrink-0 animate-spin text-kumo-accent"
+                />
+              ) : (
+                <WaveformIcon
+                  size={16}
+                  className="shrink-0 text-kumo-secondary"
+                />
+              )}
+              <span className="text-sm font-medium text-kumo-default">
+                Activity
+              </span>
+              <span className="truncate text-xs text-kumo-secondary">
+                {activeRun
+                  ? helperStatus(activeRun)
+                  : helperRuns.length > 0
+                    ? `${helperRuns.length} ${helperRuns.length === 1 ? "run" : "runs"}`
+                    : "Quiet"}
+              </span>
+            </span>
+            <CaretDownIcon
+              size={16}
+              className="shrink-0 text-kumo-secondary transition-transform group-open:rotate-180"
+            />
+          </summary>
+          <div className="max-h-72 overflow-y-auto border-t border-kumo-line p-3">
+            {helperRuns.length === 0 ? (
+              <div className="rounded-lg bg-kumo-fill px-3 py-4 text-center">
+                <Text size="xs" variant="secondary">
+                  Background work will appear here automatically.
+                </Text>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {helperRuns.map((run) => (
+                  <div key={run.runId} className="rounded-lg bg-kumo-fill p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <Text size="xs" bold>
+                          {run.display?.name ?? run.agentType}
+                        </Text>
+                        <div className="mt-1 text-xs text-kumo-secondary">
+                          {helperQuery(run)}
+                        </div>
+                      </div>
+                      <span className="flex shrink-0 items-center gap-1 text-xs text-kumo-secondary">
+                        {run.status === "running" && (
+                          <SpinnerGapIcon size={13} className="animate-spin" />
+                        )}
+                        {helperStatus(run)}
+                      </span>
+                    </div>
+                    {run.summary && (
+                      <div className="mt-3 border-t border-kumo-line pt-3 text-xs text-kumo-default">
+                        {run.summary}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </details>
+
+        <details
+          open={panels.files}
+          onToggle={(event) => {
+            const open = event.currentTarget.open;
+            setPanelOpen("files", open);
+            if (open) void refreshWorkspaceFiles();
+          }}
+          className="group mt-2 overflow-hidden rounded-xl bg-kumo-base ring ring-kumo-line open:shadow-sm"
+        >
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 marker:hidden [&::-webkit-details-marker]:hidden">
+            <span className="flex min-w-0 items-center gap-2">
+              <FolderSimpleIcon
+                size={16}
+                className="shrink-0 text-kumo-secondary"
+              />
+              <span className="text-sm font-medium text-kumo-default">
+                Files
+              </span>
+              {workspaceFiles.length > 0 && (
+                <span className="text-xs text-kumo-secondary">
+                  {workspaceFiles.length}
+                </span>
+              )}
+            </span>
+            <CaretDownIcon
+              size={16}
+              className="shrink-0 text-kumo-secondary transition-transform group-open:rotate-180"
+            />
+          </summary>
+          <div className="max-h-64 overflow-y-auto border-t border-kumo-line p-3">
+            {filesLoading ? (
+              <div className="flex items-center justify-center gap-2 px-3 py-4 text-xs text-kumo-secondary">
+                <SpinnerGapIcon size={14} className="animate-spin" />
+                Loading files…
+              </div>
+            ) : filesError ? (
+              <div className="rounded-lg bg-kumo-fill px-3 py-4 text-center text-xs text-kumo-secondary">
+                Files could not be loaded.
+              </div>
+            ) : workspaceFiles.length === 0 ? (
+              <div className="rounded-lg bg-kumo-fill px-3 py-4 text-center">
+                <Text size="xs" variant="secondary">
+                  Files created during the conversation will appear here.
+                </Text>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {workspaceFiles.map((file) => (
+                  <div
+                    key={file.path}
+                    className="flex items-center justify-between gap-3 rounded-lg px-3 py-2 hover:bg-kumo-fill"
+                  >
+                    <span className="min-w-0 truncate text-xs text-kumo-default">
+                      {file.path}
+                    </span>
+                    <span className="shrink-0 text-[11px] text-kumo-secondary">
+                      {formatFileSize(file.size)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </details>
+
+        <details
+          open={panels.transcript}
+          onToggle={(event) =>
+            setPanelOpen("transcript", event.currentTarget.open)
+          }
+          className="group mt-2 overflow-hidden rounded-xl bg-kumo-base ring ring-kumo-line open:shadow-sm"
+        >
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 marker:hidden [&::-webkit-details-marker]:hidden">
+            <span className="flex min-w-0 items-center gap-2">
+              <ChatCircleDotsIcon
+                size={16}
+                className="shrink-0 text-kumo-secondary"
+              />
+              <span className="text-sm font-medium text-kumo-default">
+                Transcript
+              </span>
+              {transcript.length > 0 && (
+                <span className="text-xs text-kumo-secondary">
+                  {transcript.length}
+                </span>
+              )}
+            </span>
+            <CaretDownIcon
+              size={16}
+              className="shrink-0 text-kumo-secondary transition-transform group-open:rotate-180"
+            />
+          </summary>
+          <div className="h-64 border-t border-kumo-line">
+            <div
+              ref={transcriptScrollRef}
+              className="h-full overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+            >
+              {transcript.length === 0 && !interimTranscript ? (
+                <div className="flex h-full items-center justify-center px-4 text-center text-kumo-secondary">
+                  <Text size="sm">
+                    {isInCall
+                      ? "Start speaking..."
+                      : connected
+                        ? "Start a voice session when you're ready"
+                        : "Connecting to agent..."}
+                  </Text>
+                </div>
+              ) : (
+                <div className="space-y-3 p-4">
+                  {transcript.map((msg, i) => (
+                    <div
+                      key={i}
+                      className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                    >
+                      <div className="flex min-w-0 max-w-[85%] flex-col gap-0.5">
+                        <div
+                          className={`break-words rounded-xl px-3 py-2 text-sm ${
+                            msg.role === "user"
+                              ? "bg-kumo-brand/15 text-kumo-default"
+                              : "bg-kumo-fill text-kumo-default"
+                          }`}
+                        >
+                          {msg.text || (
+                            <span className="text-kumo-secondary italic">
+                              ...
+                            </span>
+                          )}
+                        </div>
+                        {msg.timestamp && (
+                          <span
+                            className={`px-1 text-[10px] text-kumo-secondary ${msg.role === "user" ? "text-right" : "text-left"}`}
+                          >
+                            {formatTime(new Date(msg.timestamp))}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {interimTranscript && (
+                    <div className="flex justify-end">
+                      <div className="flex min-w-0 max-w-[85%] flex-col gap-0.5">
+                        <div className="break-words rounded-xl border border-dashed border-kumo-brand/20 bg-kumo-brand/10 px-3 py-2 text-sm text-kumo-secondary italic">
+                          {interimTranscript}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+          <form
+            className="flex gap-2 border-t border-kumo-line p-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (textInput.trim() && connected) {
+                sendText(textInput.trim());
+                setTextInput("");
+              }
+            }}
           >
-            Send
-          </Button>
-        </form>
+            <Input
+              value={textInput}
+              onChange={(event) => setTextInput(event.target.value)}
+              placeholder={connected ? "Type a message..." : "Connecting..."}
+              disabled={!connected || status === "thinking"}
+              className="min-w-0 flex-1"
+            />
+            <Button
+              type="submit"
+              variant="secondary"
+              disabled={
+                !connected || !textInput.trim() || status === "thinking"
+              }
+              className="shrink-0 justify-center"
+              icon={<PaperPlaneRightIcon size={16} weight="fill" />}
+            >
+              Send
+            </Button>
+          </form>
+        </details>
 
         <details hidden className="mt-6 border-t border-kumo-line pt-4">
           <summary className="cursor-pointer select-none text-sm text-kumo-secondary">

@@ -85,5 +85,8 @@
   },
   "devDependencies": {
     "agents": "workspace:*"
+  },
+  "dependencies": {
+    "minimp3-wasm": "0.1.0"
   }
 }

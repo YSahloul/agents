@@ -22,8 +22,8 @@ cp .env.example .env
 pnpm run start
 ```
 
-Deploying creates the separate `avatar-webrtc-voice` Worker and corresponding
-`avatar-webrtc-voice.<account-subdomain>.workers.dev` hostname.
+Deploying creates the separate `avatar-webrtc-voice-grok` Worker at
+`https://avatar.sahloul.io`.
 
 Set the required Realtime SFU credentials in `.env`:
 
@@ -32,8 +32,12 @@ REALTIME_SFU_APP_ID=...
 REALTIME_SFU_BEARER_TOKEN=...
 ```
 
-Workers AI provides Flux turn detection, realtime Aura TTS, and the selectable
-LLM models.
+Set both values with `pnpm exec wrangler secret put <NAME>` before deploying
+the separate Worker.
+
+Workers AI provides Flux turn detection, the selectable LLM models, and Grok
+TTS. No xAI API key is required, but the AI Gateway balance must be funded and
+the `default` gateway must have authentication enabled.
 
 ## Key pattern
 

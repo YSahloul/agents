@@ -221,6 +221,17 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#partialInputByte = null;
     this.#rejectSocketWaiters(new Error("SFU voice transport stopped"));
 
+    const adapterIds: string[] = [];
+    await this.#updateState((state) => {
+      for (const adapterId of [state?.tts?.adapterId, state?.stt?.adapterId]) {
+        if (adapterId) adapterIds.push(adapterId);
+      }
+      return null;
+    });
+    await Promise.all(
+      adapterIds.map((adapterId) => this.#closeAdapter(adapterId))
+    );
+
     if (this.#ttsSocket) {
       this.#ttsSocket.close(1000, "Voice stopped");
       this.#ttsSocket = null;
@@ -229,16 +240,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
       socket.close(1000, "Voice stopped");
     }
     this.#sttSockets.clear();
-
-    await this.#stateWrite;
-    const state = await this.#loadState();
-    const adapterIds = [state?.tts?.adapterId, state?.stt?.adapterId].filter(
-      (adapterId): adapterId is string => typeof adapterId === "string"
-    );
-    await Promise.all(
-      adapterIds.map((adapterId) => this.#closeAdapter(adapterId))
-    );
-    await this.#replaceState(null);
   }
 
   handleWebSocketUpgrade(request: Request): Response | null {
@@ -305,12 +306,13 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
   }
 
   async #publishTts(request: Request): Promise<Response> {
-    const state = await this.#loadState();
-    if (state?.tts?.adapterId) {
-      await this.#updateState((current) =>
-        current?.stt ? { stt: current.stt } : null
-      );
-      await this.#closeAdapter(state.tts.adapterId);
+    let previousAdapterId: string | undefined;
+    await this.#updateState((state) => {
+      previousAdapterId = state?.tts?.adapterId;
+      return state?.stt ? { stt: state.stt } : null;
+    });
+    if (previousAdapterId) {
+      await this.#closeAdapter(previousAdapterId);
     }
 
     const callbackUrl = this.#callbackUrl(
@@ -520,17 +522,17 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
   }
 
   async #stopSttForwarding(): Promise<Response> {
-    const state = await this.#loadState();
-    if (!state?.stt?.adapterId) {
+    let adapterId: string | undefined;
+    await this.#updateState((state) => {
+      adapterId = state?.stt?.adapterId;
+      if (!state?.stt || !adapterId) return state;
+      const stt = { ...state.stt };
+      delete stt.adapterId;
+      return { ...state, stt };
+    });
+    if (!adapterId) {
       return new Response("Forwarding not active");
     }
-    const adapterId = state.stt.adapterId;
-    await this.#updateState((current) => {
-      if (!current?.stt) return current;
-      const stt = { ...current.stt };
-      delete stt.adapterId;
-      return { ...current, stt };
-    });
     await this.#closeAdapter(adapterId);
     return new Response("Forwarding stopped");
   }

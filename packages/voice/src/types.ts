@@ -36,7 +36,7 @@ export type VoiceClientMessage =
   | { type: "end_call" }
   | { type: "start_of_speech" }
   | { type: "end_of_speech" }
-  | { type: "interrupt" }
+  | { type: "interrupt"; source?: "audio_level" }
   | { type: "text_message"; text: string };
 
 // --- Wire protocol: Server → Client ---
@@ -92,12 +92,11 @@ export interface TTSProvider {
 }
 
 /**
- * Streaming text-to-speech — a stateless, **per-sentence** audio stream.
+ * Streaming text-to-speech — a stateless audio stream per speech chunk.
  *
- * `synthesizeStream(text)` is called once per sentence (the pipeline's
- * `SentenceChunker` waits for a sentence boundary) and yields that sentence's
- * audio chunks as they are produced. Stateless: one independent call per
- * sentence, no session held between calls.
+ * The pipeline yields complete sentences immediately and bounds long
+ * sentences into phrases so synthesis can begin before the model finishes the
+ * sentence. Each chunk is an independent call; no session is retained.
  *
  * The generator returning is completion, and throwing is failure — a provider
  * built on a socket needs no separate acknowledgement protocol, and a socket
@@ -107,6 +106,19 @@ export interface TTSProvider {
 export interface StreamingTTSProvider {
   synthesizeStream(
     text: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer>;
+}
+
+/**
+ * Bidirectional streaming text-to-speech.
+ *
+ * The provider receives model text as it is generated and may begin yielding
+ * audio before the text stream ends.
+ */
+export interface StreamingTextTTSProvider {
+  synthesizeTextStream(
+    text: ReadableStream<string>,
     signal?: AbortSignal
   ): AsyncGenerator<ArrayBuffer>;
 }

@@ -39,6 +39,7 @@ import type {
   VoiceAudioFormat,
   TTSProvider,
   StreamingTTSProvider,
+  StreamingTextTTSProvider,
   Transcriber,
   TranscriberSession,
   VoiceServerAudioTransport
@@ -68,6 +69,7 @@ export type {
   TranscriptMessage,
   TTSProvider,
   StreamingTTSProvider,
+  StreamingTextTTSProvider,
   Transcriber,
   TranscriberSession,
   TranscriberSessionOptions
@@ -112,12 +114,14 @@ export type { SFUVoiceAgentOptions } from "./sfu-voice";
 export {
   WorkersAITTS,
   WorkersAIRealtimeTTS,
+  WorkersAIGrokTTS,
   WorkersAIFluxSTT,
   WorkersAINova3STT
 } from "./workers-ai-providers";
 export type {
   WorkersAITTSOptions,
   WorkersAIRealtimeTTSOptions,
+  WorkersAIGrokTTSOptions,
   WorkersAIFluxSTTOptions,
   WorkersAINova3STTOptions
 } from "./workers-ai-providers";
@@ -190,6 +194,7 @@ type SpeculativeCancelReason =
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
 const DEFAULT_SAMPLE_RATE = 16000;
+const STREAMING_TTS_MAX_CHARS = 48;
 
 function isEchoOf(transcript: string, assistantText: string): boolean {
   if (!assistantText) return false;
@@ -404,38 +409,57 @@ export function withVoice<TBase extends AgentLike>(
           return _onMessage?.(connection, message);
         }
 
-        let parsed: { type: string };
+        let parsed: object;
+        let messageType: string;
         try {
-          parsed = JSON.parse(message);
+          const value: unknown = JSON.parse(message);
+          if (
+            !value ||
+            typeof value !== "object" ||
+            !("type" in value) ||
+            typeof value.type !== "string"
+          ) {
+            return _onMessage?.(connection, message);
+          }
+          parsed = value;
+          messageType = value.type;
         } catch {
           return _onMessage?.(connection, message);
         }
 
-        if (VoiceAgentMixin.#VOICE_MESSAGES.has(parsed.type)) {
-          switch (parsed.type) {
+        if (VoiceAgentMixin.#VOICE_MESSAGES.has(messageType)) {
+          switch (messageType) {
             case "hello":
               break;
-            case "start_call":
+            case "start_call": {
+              const preferredFormat =
+                "preferred_format" in parsed &&
+                typeof parsed.preferred_format === "string"
+                  ? parsed.preferred_format
+                  : undefined;
               runBackground("start_call", () =>
-                this.#handleStartCall(
-                  connection,
-                  (parsed as { preferred_format?: string }).preferred_format
-                )
+                this.#handleStartCall(connection, preferredFormat)
               );
               break;
+            }
             case "end_call":
               runBackground("end_call", () => this.#handleEndCall(connection));
               break;
             case "start_of_speech":
             case "end_of_speech":
               break;
-            case "interrupt":
+            case "interrupt": {
+              const source =
+                "source" in parsed && parsed.source === "audio_level"
+                  ? "client_audio_level"
+                  : "client_interrupt";
               runBackground("interrupt", () =>
-                this.#handleInterrupt(connection)
+                this.#handleInterrupt(connection, source)
               );
               break;
+            }
             case "text_message": {
-              const text = (parsed as unknown as { text?: string }).text;
+              const text = "text" in parsed ? parsed.text : undefined;
               if (typeof text === "string") {
                 runBackground("text_message", () =>
                   this.#handleTextMessage(connection, text)
@@ -838,24 +862,37 @@ export function withVoice<TBase extends AgentLike>(
             });
           },
           onSpeechStart: (transcript?: string) => {
-            if (
+            const echoed =
               opt("filterEchoedTranscripts", false) &&
-              transcript &&
-              this.#isEchoTranscript(connection.id, transcript)
-            ) {
-              return;
-            }
-            this.#handleBargeIn(connection);
+              Boolean(
+                transcript && this.#isEchoTranscript(connection.id, transcript)
+              );
+            console.log("[VoiceTrace]", {
+              event: "stt_speech_start",
+              connectionId: connection.id,
+              transcript: transcript ?? null,
+              echoed
+            });
+            if (echoed) return;
+            this.#handleBargeIn(connection, "flux_speech_start", transcript);
           },
           onEagerUtterance: (transcript: string) => {
-            if (
+            const echoed =
               opt("filterEchoedTranscripts", false) &&
-              this.#isEchoTranscript(connection.id, transcript)
-            ) {
-              return;
-            }
+              this.#isEchoTranscript(connection.id, transcript);
+            console.log("[VoiceTrace]", {
+              event: "stt_eager_utterance",
+              connectionId: connection.id,
+              transcript,
+              echoed
+            });
+            if (echoed) return;
             if (opt("filterEchoedTranscripts", false)) {
-              this.#handleBargeIn(connection);
+              this.#handleBargeIn(
+                connection,
+                "flux_eager_utterance",
+                transcript
+              );
             }
             this.#startSpeculativeTurn(connection, transcript);
           },
@@ -1007,7 +1044,18 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
-    async #handleInterrupt(connection: Connection): Promise<void> {
+    async #handleInterrupt(
+      connection: Connection,
+      trigger: string
+    ): Promise<void> {
+      console.log("[VoiceTrace]", {
+        event: "interrupt_trigger",
+        connectionId: connection.id,
+        trigger,
+        transcript: null,
+        activePipeline: this.#cm.hasActivePipeline(connection.id),
+        action: "interrupt"
+      });
       this.#cm.abortPipeline(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "interrupt");
       this.#cm.clearAudioBuffer(connection.id);
@@ -1021,9 +1069,23 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
-    #handleBargeIn(connection: Connection): void {
+    #handleBargeIn(
+      connection: Connection,
+      trigger: string,
+      transcript?: string
+    ): void {
       this.#cancelSpeculativeTurn(connection.id, "speech_start");
-      if (!this.#cm.abortPipeline(connection.id)) return;
+      const activePipeline = this.#cm.hasActivePipeline(connection.id);
+      const interrupted = this.#cm.abortPipeline(connection.id);
+      console.log("[VoiceTrace]", {
+        event: "interrupt_trigger",
+        connectionId: connection.id,
+        trigger,
+        transcript: transcript ?? null,
+        activePipeline,
+        action: interrupted ? "interrupt" : "no_active_pipeline"
+      });
+      if (!interrupted) return;
       this.#sendJSON(connection, { type: "playback_interrupt" });
       this.#sendJSON(connection, { type: "status", status: "listening" });
       runBackground("barge_in", async () => {
@@ -1190,7 +1252,7 @@ export function withVoice<TBase extends AgentLike>(
           opt("filterEchoedTranscripts", false) &&
           this.#cm.hasActivePipeline(connection.id)
         ) {
-          this.#handleBargeIn(connection);
+          this.#handleBargeIn(connection, "flux_confirmed_utterance", userText);
         }
 
         signal = this.#cm.createPipelineAbort(connection.id);
@@ -1402,13 +1464,143 @@ export function withVoice<TBase extends AgentLike>(
         };
       }
 
+      const tts = this.#requireTTS() as TTSProvider &
+        Partial<StreamingTextTTSProvider>;
+      const tokenStream = iterateTextEvents(response);
+      if (typeof tts.synthesizeTextStream === "function") {
+        return this.#textStreamingTTSPipeline(
+          connection,
+          tokenStream,
+          llmStart,
+          pipelineStart,
+          signal,
+          tts as TTSProvider & StreamingTextTTSProvider
+        );
+      }
+
       return this.#streamingTTSPipeline(
         connection,
-        iterateTextEvents(response),
+        tokenStream,
         llmStart,
         pipelineStart,
         signal
       );
+    }
+
+    async #textStreamingTTSPipeline(
+      connection: Connection,
+      tokenStream: AsyncIterable<TextStreamEvent>,
+      llmStart: number,
+      pipelineStart: number,
+      signal: AbortSignal,
+      tts: TTSProvider & StreamingTextTTSProvider
+    ): Promise<{
+      text: string;
+      llmMs: number;
+      ttsMs: number;
+      firstModelDeltaMs: number;
+      firstSentenceMs: number;
+      firstAudioMs: number;
+    }> {
+      const textStream = new TransformStream<string, string>();
+      const writer = textStream.writable.getWriter();
+      let fullText = "";
+      let pendingTranscriptText = "";
+      let transcriptStarted = false;
+      let firstModelDeltaAt: number | null = null;
+      let firstAudioSentAt: number | null = null;
+      const ttsStart = Date.now();
+
+      const trace = (event: string, details: Record<string, unknown> = {}) => {
+        console.log("[VoiceTrace]", {
+          event,
+          connectionId: connection.id,
+          elapsedMs: Date.now() - pipelineStart,
+          ...details
+        });
+      };
+      const sendAssistantDelta = (token: string) => {
+        if (!transcriptStarted) {
+          pendingTranscriptText += token;
+          if (pendingTranscriptText.trim().length === 0) return;
+          this.#sendJSON(connection, {
+            type: "transcript_start",
+            role: "assistant"
+          });
+          transcriptStarted = true;
+          token = pendingTranscriptText;
+          pendingTranscriptText = "";
+        }
+        this.#sendJSON(connection, { type: "transcript_delta", text: token });
+      };
+      const audioPromise = (async () => {
+        for await (const chunk of tts.synthesizeTextStream(
+          textStream.readable,
+          signal
+        )) {
+          if (signal.aborted) return;
+          await this.#sendAudio(connection, chunk);
+          if (firstAudioSentAt === null) {
+            firstAudioSentAt = Date.now();
+            trace("tts_first_audio", { bytes: chunk.byteLength });
+          }
+        }
+      })();
+
+      try {
+        for await (const event of tokenStream) {
+          if (signal.aborted) break;
+          if (event.type === "boundary") continue;
+          if (event.type === "error") throw event.error;
+
+          const token = event.text;
+          if (firstModelDeltaAt === null) {
+            firstModelDeltaAt = Date.now();
+            trace("model_first_delta");
+          }
+          fullText += token;
+          this.#activeAssistantText.set(connection.id, {
+            signal,
+            text: fullText
+          });
+          sendAssistantDelta(token);
+          await writer.write(token);
+        }
+
+        if (signal.aborted) {
+          await writer.abort(signal.reason).catch(() => undefined);
+        } else {
+          await writer.close();
+        }
+        await audioPromise;
+      } catch (error) {
+        await writer.abort(error).catch(() => undefined);
+        await audioPromise.catch(() => undefined);
+        throw error;
+      }
+
+      const llmMs = Date.now() - llmStart;
+      trace("model_stream_complete", {
+        generatedChars: fullText.length,
+        aborted: signal.aborted,
+        text: fullText
+      });
+      if (transcriptStarted) {
+        this.#sendJSON(connection, { type: "transcript_end", text: fullText });
+      }
+      if (!signal.aborted) await this.#flushAudio(connection);
+
+      const firstModelDeltaMs = firstModelDeltaAt
+        ? firstModelDeltaAt - pipelineStart
+        : 0;
+      return {
+        text: fullText,
+        llmMs,
+        ttsMs: Date.now() - ttsStart,
+        firstModelDeltaMs,
+        firstSentenceMs: firstModelDeltaMs,
+        firstAudioMs: firstAudioSentAt ? firstAudioSentAt - pipelineStart : 0
+      };
     }
 
     async #streamingTTSPipeline(
@@ -1425,7 +1617,12 @@ export function withVoice<TBase extends AgentLike>(
       firstSentenceMs: number;
       firstAudioMs: number;
     }> {
-      const chunker = new SentenceChunker();
+      const tts = this.#requireTTS();
+      const chunker = new SentenceChunker(
+        typeof tts.synthesizeStream === "function"
+          ? STREAMING_TTS_MAX_CHARS
+          : Number.POSITIVE_INFINITY
+      );
       const ttsQueue: AsyncIterable<ArrayBuffer>[] = [];
       let fullText = "";
       let pendingTranscriptText = "";
@@ -1479,8 +1676,6 @@ export function withVoice<TBase extends AgentLike>(
           drainWaiters.set(target, waiters);
         });
       };
-
-      const tts = this.#requireTTS();
 
       const drainPromise = (async () => {
         let i = 0;
@@ -1681,6 +1876,22 @@ export function withVoice<TBase extends AgentLike>(
 
     #sendJSON(connection: Connection, data: unknown) {
       const parsed = data as Record<string, unknown>;
+      if (
+        (parsed.type === "transcript" ||
+          parsed.type === "transcript_interim" ||
+          parsed.type === "transcript_end") &&
+        typeof parsed.text === "string"
+      ) {
+        console.log("[VoiceTrace]", {
+          event:
+            parsed.type === "transcript_interim"
+              ? "client_transcript_interim"
+              : "client_transcript",
+          connectionId: connection.id,
+          role: parsed.type === "transcript_end" ? "assistant" : "user",
+          text: parsed.text
+        });
+      }
       sendVoiceJSON(
         connection,
         data,

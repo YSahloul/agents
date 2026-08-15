@@ -389,6 +389,47 @@ describe("SFUVoiceTransport", () => {
     );
   });
 
+  it("closes each adapter once when call stop races stop-forwarding", async () => {
+    const { calls, fetchMock } = createSfuFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    let state: SFUVoiceState | null = {
+      tts: {
+        sessionId: "tts-session",
+        adapterId: "tts-adapter",
+        trackName: "track"
+      },
+      stt: {
+        sessionId: "stt-session",
+        adapterId: "stt-adapter",
+        trackName: "mic",
+        callbackUrl: "wss://example.com/callback"
+      }
+    };
+    const transport = new SFUVoiceTransport({
+      config: CONFIG,
+      loadState: async () => state,
+      saveState: async (nextState) => {
+        state = nextState;
+      }
+    });
+    upgrade(transport, "/voice/tts/subscribe");
+    await transport.start("call", () => {});
+
+    const [, stopForwarding] = await Promise.all([
+      transport.stop("call"),
+      transport.handleHttpRequest(
+        new Request("https://example.com/voice/stt/stop-forwarding", {
+          method: "POST"
+        })
+      )
+    ]);
+
+    expect(stopForwarding?.status).toBe(200);
+    expect(
+      calls.filter((call) => call.path.endsWith("/adapters/websocket/close"))
+    ).toHaveLength(2);
+  });
+
   it("recovers from stale adapters that the SFU cannot close", async () => {
     const { fetchMock } = createSfuFetchMock();
     vi.stubGlobal(

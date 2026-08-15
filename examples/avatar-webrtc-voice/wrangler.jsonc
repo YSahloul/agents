@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "avatar-webrtc-voice",
+  "name": "avatar-webrtc-voice-grok",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
@@ -8,6 +8,12 @@
     "binding": "AI",
     "remote": true
   },
+  "routes": [
+    {
+      "pattern": "avatar.sahloul.io",
+      "custom_domain": true
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
