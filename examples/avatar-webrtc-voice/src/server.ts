@@ -23,7 +23,7 @@ import {
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { createWorkersAI } from "workers-ai-provider";
-import type { ToolSet, UIMessage } from "ai";
+import type { ToolSet } from "ai";
 import { hasToolCall, tool } from "ai";
 import { z } from "zod";
 
@@ -284,9 +284,7 @@ export class MyThinkAgent extends Think<Env> {
     });
 
     try {
-      await this.chat(transcript, callback, {
-        metadata: { ...options, voiceTurnId: turnId }
-      });
+      await this.chat(transcript, callback, { metadata: options });
       console.log("[ThinkTrace]", {
         event: "turn_end",
         turnId,
@@ -302,55 +300,6 @@ export class MyThinkAgent extends Think<Env> {
       throw error;
     }
   }
-
-  @callable()
-  async markVoiceTurnInterrupted(turnId: string): Promise<boolean> {
-    await this.waitUntilStable({ timeout: 10_000 });
-    const messages = await this.getMessages();
-    let userIndex = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i];
-      if (message.role !== "user") continue;
-      const metadata = message.metadata as
-        | { turnMetadata?: { voiceTurnId?: unknown } }
-        | undefined;
-      if (metadata?.turnMetadata?.voiceTurnId === turnId) {
-        userIndex = i;
-        break;
-      }
-    }
-    if (userIndex === -1) return false;
-
-    let assistant: UIMessage | undefined;
-    for (let i = messages.length - 1; i > userIndex; i--) {
-      const message = messages[i];
-      if (
-        message.role === "assistant" &&
-        message.parts.some((part) => part.type === "text")
-      ) {
-        assistant = message;
-        break;
-      }
-    }
-    if (!assistant) return false;
-
-    let replacedText = false;
-    const parts: UIMessage["parts"] = assistant.parts.map((part) => {
-      if (part.type !== "text") return part;
-      const text = replacedText
-        ? ""
-        : "[Voice response interrupted before playback completed. Do not assume the user heard the complete response.]";
-      replacedText = true;
-      return { ...part, text, state: "done" };
-    });
-    await this.updateMessageInHistory({ ...assistant, parts });
-    console.log("[ThinkTrace]", {
-      event: "voice_turn_interrupted",
-      turnId,
-      assistantMessageId: assistant.id
-    });
-    return true;
-  }
 }
 
 const VoiceAgent = withSFUVoice(Agent, {
@@ -365,7 +314,6 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   });
 
   readonly #greeting = "Hi, how are you doing?";
-  readonly #activeTurnIds = new Map<string, string>();
 
   getSFUConfig(): SFUConfig {
     const env = this.env as Env & {
@@ -407,7 +355,6 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     if (this.#activeSpeakerId === connection.id) {
       this.#activeSpeakerId = null;
     }
-    this.#activeTurnIds.delete(connection.id);
   }
 
   onClose(connection: Connection) {
@@ -509,7 +456,6 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
 
     const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
     const turnId = crypto.randomUUID();
-    this.#activeTurnIds.set(context.connection.id, turnId);
     return streamRpcVoiceTurn({
       signal: context.signal,
       run: (callback) =>
@@ -526,13 +472,6 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
         });
       }
     });
-  }
-
-  async onInterrupt(connection: Connection) {
-    const turnId = this.#activeTurnIds.get(connection.id);
-    if (!turnId) return;
-    const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
-    await brain.markVoiceTurnInterrupted(turnId);
   }
 
   async onCallStart(connection: Connection) {
