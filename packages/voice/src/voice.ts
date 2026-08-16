@@ -367,6 +367,7 @@ export function withVoice<TBase extends AgentLike>(
       "end_call",
       "start_of_speech",
       "end_of_speech",
+      "noise_gate",
       "interrupt",
       "text_message"
     ]);
@@ -496,6 +497,26 @@ export function withVoice<TBase extends AgentLike>(
                   energy?.threshold ??
                   null
               });
+              break;
+            }
+            case "noise_gate": {
+              const event =
+                "event" in parsed &&
+                (parsed.event === "open" ||
+                  parsed.event === "closed" ||
+                  parsed.event === "rejected")
+                  ? parsed.event
+                  : null;
+              const rms = readClientRms(parsed, "rms");
+              const threshold = readClientRms(parsed, "threshold");
+              if (event && rms !== null && threshold !== null) {
+                console.log("[VoiceTrace]", {
+                  event: `noise_gate_${event}`,
+                  connectionId: connection.id,
+                  clientRms: rms,
+                  clientThreshold: threshold
+                });
+              }
               break;
             }
             case "interrupt": {

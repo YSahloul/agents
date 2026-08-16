@@ -92,6 +92,9 @@ It suppresses low-level background sound while preserving the raw RMS signal
 used for speech and interruption detection. Nearby speech above the threshold
 still passes; tune the threshold for the microphone and room.
 
+Worker logs include aggregated `noise_gate_rejected`, `noise_gate_open`, and
+`noise_gate_closed` events, never continuous microphone levels.
+
 The Think agent remains the canonical conversation:
 
 ```ts

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SFUVoiceAudioInput } from "../sfu-voice-client";
+import type { VoiceNoiseGateEvent } from "../types";
 
 declare global {
   interface PromiseConstructor {
@@ -450,6 +451,8 @@ describe("SFUVoiceAudioInput", () => {
     });
     const levels: number[] = [];
     input.onAudioLevel = (level) => levels.push(level);
+    const gateEvents: VoiceNoiseGateEvent[] = [];
+    input.onNoiseGateEvent = (event) => gateEvents.push(event);
 
     const start = input.start();
     const peer = await waitForPeer();
@@ -463,22 +466,40 @@ describe("SFUVoiceAudioInput", () => {
     const measure = animationFrames.find((callback) => callback);
     expect(measure).toBeDefined();
 
-    context.analyser.level = 0.2;
+    context.analyser.level = 0.05;
     measure?.(0);
+
+    context.analyser.level = 0.2;
     measure?.(16);
     measure?.(32);
+    measure?.(48);
     expect(outboundTrack?.enabled).toBe(true);
     expect(levels.at(-1)).toBeCloseTo(0.2);
 
     vi.useFakeTimers();
     context.analyser.level = 0.01;
-    measure?.(48);
+    measure?.(64);
     await vi.advanceTimersByTimeAsync(299);
     expect(outboundTrack?.enabled).toBe(true);
     await vi.advanceTimersByTimeAsync(1);
     expect(outboundTrack?.enabled).toBe(false);
+    expect(gateEvents.map(({ event }) => event)).toEqual([
+      "rejected",
+      "open",
+      "closed"
+    ]);
+    expect(gateEvents.every(({ threshold }) => threshold === 0.1)).toBe(true);
+    expect(gateEvents[0]?.rms).toBeCloseTo(0.05);
+    expect(gateEvents[1]?.rms).toBeCloseTo(0.2);
+    expect(gateEvents[2]?.rms).toBeCloseTo(0.01);
+
+    context.analyser.level = 0.03;
+    measure?.(80);
 
     input.stop();
+    expect(gateEvents.at(-1)?.event).toBe("rejected");
+    expect(gateEvents.at(-1)?.rms).toBeCloseTo(0.03);
+    expect(gateEvents.at(-1)?.threshold).toBe(0.1);
     expect(outboundTrack?.stopped).toBe(true);
   });
 

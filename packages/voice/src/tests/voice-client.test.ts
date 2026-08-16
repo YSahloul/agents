@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VoiceClient } from "../voice-client";
-import type { VoiceAudioInput, VoiceTransport } from "../types";
+import type {
+  VoiceAudioInput,
+  VoiceNoiseGateEvent,
+  VoiceTransport
+} from "../types";
 
 class MockTransport implements VoiceTransport {
   sentJSON: Record<string, unknown>[] = [];
@@ -166,6 +170,7 @@ class FakeAudioElement {
 class FakeAudioInput implements VoiceAudioInput {
   onAudioLevel: ((rms: number) => void) | null = null;
   onAudioData: ((pcm: ArrayBuffer) => void) | null = null;
+  onNoiseGateEvent: ((event: VoiceNoiseGateEvent) => void) | null = null;
   started = false;
   stopped = false;
   startCount = 0;
@@ -1091,6 +1096,18 @@ describe("VoiceClient speech energy telemetry", () => {
       expect(transport.sentJSON).toContainEqual({
         type: "end_of_speech",
         peak_rms: 0.2,
+        threshold: 0.06
+      });
+
+      audioInput.onNoiseGateEvent?.({
+        event: "rejected",
+        rms: 0.03,
+        threshold: 0.06
+      });
+      expect(transport.sentJSON).toContainEqual({
+        type: "noise_gate",
+        event: "rejected",
+        rms: 0.03,
         threshold: 0.06
       });
     } finally {

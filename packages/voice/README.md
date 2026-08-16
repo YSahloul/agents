@@ -218,6 +218,9 @@ microphone RMS stays below that level. The optional gate opens after three loud
 frames, closes after 300 ms of quieter audio, and does not suppress nearby
 speech above the configured threshold.
 
+`VoiceClient` forwards aggregated `noise_gate_rejected`, `noise_gate_open`, and
+`noise_gate_closed` traces. It does not send per-frame microphone levels.
+
 ## Server: voice input only (`withVoiceInput`)
 
 STT-only mixin -- no TTS, no LLM. Use when you only need speech-to-text (e.g., dictation, transcription).

@@ -461,6 +461,16 @@ export class VoiceClient {
         this.#transport.sendBinary(pcm);
       }
     };
+    audioInput.onNoiseGateEvent = ({ event, rms, threshold }) => {
+      if (this.#transport?.connected) {
+        this.#transport.sendJSON({
+          type: "noise_gate",
+          event,
+          rms,
+          threshold
+        });
+      }
+    };
   }
 
   #clearCallRecovery(): void {
@@ -691,6 +701,7 @@ export class VoiceClient {
       this.#options.audioInput.stop();
       this.#options.audioInput.onAudioLevel = null;
       this.#options.audioInput.onAudioData = null;
+      this.#options.audioInput.onNoiseGateEvent = null;
     } else {
       this.#stopMic();
     }

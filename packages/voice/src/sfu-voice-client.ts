@@ -1,4 +1,4 @@
-import type { VoiceAudioInput } from "./types";
+import type { VoiceAudioInput, VoiceNoiseGateEvent } from "./types";
 
 export interface SFUVoiceAudioInputOptions {
   /** Agent instance route plus the SFU route prefix, for example `/agents/voice/alice/voice`. */
@@ -41,6 +41,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   readonly handlesPlayback = true;
   onAudioLevel: ((rms: number) => void) | null = null;
   onAudioData: ((pcm: ArrayBuffer) => void) | null = null;
+  onNoiseGateEvent: ((event: VoiceNoiseGateEvent) => void) | null = null;
 
   readonly #endpoint: string;
   readonly #iceServers: RTCIceServer[];
@@ -66,6 +67,8 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   #noiseGateOpen = false;
   #noiseGateLoudFrames = 0;
   #noiseGateCloseTimer: NodeJS.Timeout | null = null;
+  #noiseGateLastRms = 0;
+  #noiseGateRejectedPeakRms = 0;
   #muted = false;
   #shouldStopForwarding = false;
 
@@ -95,6 +98,8 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   async start(): Promise<void> {
     const generation = ++this.#generation;
     this.#teardown(this.#shouldStopForwarding, false);
+    this.#noiseGateLastRms = 0;
+    this.#noiseGateRejectedPeakRms = 0;
     this.#shouldStopForwarding = true;
 
     try {
@@ -224,6 +229,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   }
 
   stop(): void {
+    this.#emitRejectedNoise();
     this.#generation++;
     this.#teardown(this.#shouldStopForwarding, true);
   }
@@ -274,6 +280,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     if (clearCallbacks) {
       this.onAudioLevel = null;
       this.onAudioData = null;
+      this.onNoiseGateEvent = null;
     }
   }
 
@@ -428,6 +435,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   #processNoiseGate(rms: number): void {
     const threshold = this.#noiseGateThreshold;
     if (threshold === undefined) return;
+    this.#noiseGateLastRms = rms;
 
     if (rms > threshold) {
       this.#noiseGateLoudFrames++;
@@ -435,20 +443,51 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
         clearTimeout(this.#noiseGateCloseTimer);
         this.#noiseGateCloseTimer = null;
       }
-      if (this.#noiseGateLoudFrames >= NOISE_GATE_OPEN_FRAMES) {
+      if (
+        !this.#noiseGateOpen &&
+        this.#noiseGateLoudFrames >= NOISE_GATE_OPEN_FRAMES
+      ) {
+        this.#emitRejectedNoise();
         this.#noiseGateOpen = true;
         this.#updateOutboundMicrophone();
+        this.#emitNoiseGateEvent("open", rms);
       }
       return;
     }
 
     this.#noiseGateLoudFrames = 0;
-    if (!this.#noiseGateOpen || this.#noiseGateCloseTimer !== null) return;
+    if (!this.#noiseGateOpen) {
+      this.#noiseGateRejectedPeakRms = Math.max(
+        this.#noiseGateRejectedPeakRms,
+        rms
+      );
+      return;
+    }
+    if (this.#noiseGateCloseTimer !== null) return;
     this.#noiseGateCloseTimer = globalThis.setTimeout(() => {
       this.#noiseGateCloseTimer = null;
       this.#noiseGateOpen = false;
       this.#updateOutboundMicrophone();
+      this.#emitNoiseGateEvent("closed", this.#noiseGateLastRms);
     }, NOISE_GATE_CLOSE_DELAY_MS);
+  }
+
+  #emitRejectedNoise(): void {
+    if (
+      this.#noiseGateThreshold === undefined ||
+      !this.#microphoneStream ||
+      this.#noiseGateOpen
+    ) {
+      return;
+    }
+    this.#emitNoiseGateEvent("rejected", this.#noiseGateRejectedPeakRms);
+    this.#noiseGateRejectedPeakRms = 0;
+  }
+
+  #emitNoiseGateEvent(event: VoiceNoiseGateEvent["event"], rms: number): void {
+    const threshold = this.#noiseGateThreshold;
+    if (threshold === undefined) return;
+    this.onNoiseGateEvent?.({ event, rms, threshold });
   }
 
   #updateOutboundMicrophone(): void {
