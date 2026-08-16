@@ -2096,33 +2096,53 @@ describe("VoiceAgent — text messages", () => {
   });
 });
 
-describe("VoiceAgent — start_of_speech / end_of_speech are no-ops", () => {
-  it("ignores start_of_speech and end_of_speech", async () => {
+describe("VoiceAgent — client speech energy telemetry", () => {
+  it("adds client RMS levels to STT turn traces without changing audio flow", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
 
-    sendJSON(ws, { type: "start_call" });
-    await waitForStatus(ws, "listening");
+    try {
+      await waitForStatus(ws, "idle");
+      sendJSON(ws, { type: "start_call" });
+      await waitForStatus(ws, "listening");
 
-    sendJSON(ws, { type: "start_of_speech" });
-    sendJSON(ws, { type: "end_of_speech" });
-
-    // Audio still flows to the continuous session
-    for (let i = 0; i < 4; i++) {
+      sendJSON(ws, {
+        type: "start_of_speech",
+        rms: 0.07,
+        threshold: 0.06
+      });
+      for (let i = 0; i < 3; i++) {
+        ws.send(new ArrayBuffer(5000));
+      }
+      sendJSON(ws, {
+        type: "end_of_speech",
+        peak_rms: 0.21,
+        threshold: 0.06
+      });
       ws.send(new ArrayBuffer(5000));
+
+      const transcript = (await waitForMessageMatching(
+        ws,
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          (message as Record<string, unknown>).type === "transcript" &&
+          (message as Record<string, unknown>).role === "user"
+      )) as Record<string, unknown>;
+
+      expect((transcript.text as string).includes("utterance 1")).toBe(true);
+      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
+        event: "stt_utterance",
+        connectionId: expect.any(String),
+        text: "utterance 1 (20000 bytes)",
+        clientStartRms: 0.07,
+        clientPeakRms: 0.21,
+        clientThreshold: 0.06
+      });
+    } finally {
+      ws.close();
+      log.mockRestore();
     }
-
-    const transcript = (await waitForMessageMatching(
-      ws,
-      (m) =>
-        typeof m === "object" &&
-        m !== null &&
-        (m as Record<string, unknown>).type === "transcript" &&
-        (m as Record<string, unknown>).role === "user"
-    )) as Record<string, unknown>;
-
-    expect((transcript.text as string).includes("utterance 1")).toBe(true);
-    ws.close();
   });
 });
 

@@ -1060,6 +1060,45 @@ describe("VoiceClient playback bridge reuse", () => {
   });
 });
 
+describe("VoiceClient speech energy telemetry", () => {
+  it("reports turn start and peak RMS", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = new MockTransport();
+      const audioInput = new FakeAudioInput();
+      const client = new VoiceClient({
+        agent: "test-agent",
+        transport,
+        audioInput,
+        silenceThreshold: 0.06,
+        silenceDurationMs: 300
+      });
+
+      client.connect();
+      await client.startCall();
+      audioInput.onAudioLevel?.(0.07);
+      audioInput.onAudioLevel?.(0.2);
+      audioInput.onAudioLevel?.(0.1);
+      audioInput.onAudioLevel?.(0.01);
+
+      expect(transport.sentJSON).toContainEqual({
+        type: "start_of_speech",
+        rms: 0.07,
+        threshold: 0.06
+      });
+
+      await vi.advanceTimersByTimeAsync(300);
+      expect(transport.sentJSON).toContainEqual({
+        type: "end_of_speech",
+        peak_rms: 0.2,
+        threshold: 0.06
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("VoiceClient playback-owning audio inputs", () => {
   it("skips binary playback and propagates mute and output device state", async () => {
     const transport = new MockTransport();

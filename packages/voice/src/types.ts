@@ -34,8 +34,16 @@ export type VoiceClientMessage =
   | { type: "hello"; protocol_version?: number }
   | { type: "start_call"; preferred_format?: VoiceAudioFormat }
   | { type: "end_call" }
-  | { type: "start_of_speech" }
-  | { type: "end_of_speech" }
+  | {
+      type: "start_of_speech";
+      rms?: number;
+      threshold?: number;
+    }
+  | {
+      type: "end_of_speech";
+      peak_rms?: number;
+      threshold?: number;
+    }
   | { type: "interrupt"; source?: "audio_level" }
   | { type: "text_message"; text: string };
 

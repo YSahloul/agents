@@ -128,6 +128,9 @@ not grounded internet research.
 `[ThinkTrace]` worker logs record turn timing, step usage, and each server-side
 tool call, input, result, and duration. Reasoning text remains hidden.
 
+`[VoiceTrace]` STT events include the client-captured start, peak, and threshold
+RMS levels for each finalized utterance.
+
 The Voice agent does not replay its transient `VoiceTurnContext.messages` into
 Think. This prevents duplicate history. Eager end-of-turn speculation is also
 disabled so provisional transcripts cannot start tool calls.

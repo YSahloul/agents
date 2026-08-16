@@ -299,6 +299,7 @@ export class VoiceClient {
   #stream: MediaStream | null = null;
   #silenceTimer: ReturnType<typeof setTimeout> | null = null;
   #isSpeaking = false;
+  #speechPeakRms = 0;
   #playbackQueue: ArrayBuffer[] = [];
   #isPlaying = false;
   #isScheduling = false;
@@ -716,9 +717,7 @@ export class VoiceClient {
         clearTimeout(this.#silenceTimer);
         this.#silenceTimer = null;
       }
-      if (this.#transport?.connected) {
-        this.#transport.sendJSON({ type: "end_of_speech" });
-      }
+      this.#sendSpeechEnd();
     }
 
     this.#options.audioInput?.setMuted?.(this.#isMuted);
@@ -1296,30 +1295,43 @@ export class VoiceClient {
       this.#interruptChunkCount = 0;
     }
 
-    // Silence detection
+    // Speech boundaries carry client-captured energy for server-side STT traces.
     if (rms > this.#silenceThreshold) {
       if (!this.#isSpeaking) {
         this.#isSpeaking = true;
-        // Notify server that speech started (for streaming STT)
+        this.#speechPeakRms = rms;
         if (this.#transport?.connected) {
-          this.#transport.sendJSON({ type: "start_of_speech" });
+          this.#transport.sendJSON({
+            type: "start_of_speech",
+            rms,
+            threshold: this.#silenceThreshold
+          });
         }
+      } else {
+        this.#speechPeakRms = Math.max(this.#speechPeakRms, rms);
       }
       if (this.#silenceTimer) {
         clearTimeout(this.#silenceTimer);
         this.#silenceTimer = null;
       }
-    } else if (this.#isSpeaking) {
-      if (!this.#silenceTimer) {
-        this.#silenceTimer = setTimeout(() => {
-          this.#isSpeaking = false;
-          this.#silenceTimer = null;
-          if (this.#transport?.connected) {
-            this.#transport.sendJSON({ type: "end_of_speech" });
-          }
-        }, this.#silenceDurationMs);
-      }
+    } else if (this.#isSpeaking && !this.#silenceTimer) {
+      this.#silenceTimer = setTimeout(() => {
+        this.#isSpeaking = false;
+        this.#silenceTimer = null;
+        this.#sendSpeechEnd();
+      }, this.#silenceDurationMs);
     }
+  }
+
+  #sendSpeechEnd(): void {
+    if (this.#transport?.connected) {
+      this.#transport.sendJSON({
+        type: "end_of_speech",
+        peak_rms: this.#speechPeakRms,
+        threshold: this.#silenceThreshold
+      });
+    }
+    this.#speechPeakRms = 0;
   }
 
   #resetDetection(): void {
@@ -1328,6 +1340,7 @@ export class VoiceClient {
       this.#silenceTimer = null;
     }
     this.#isSpeaking = false;
+    this.#speechPeakRms = 0;
     this.#interruptChunkCount = 0;
     this.#audioLevel = 0;
     this.#emit("audiolevelchange", 0);

@@ -50,6 +50,25 @@ import {
   sendVoiceJSON
 } from "./audio-pipeline";
 
+type ClientSpeechEnergy = {
+  startRms: number | null;
+  peakRms: number | null;
+  threshold: number | null;
+};
+
+function readClientRms(
+  message: object,
+  key: "rms" | "peak_rms" | "threshold"
+): number | null {
+  const value = (message as Record<string, unknown>)[key];
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= 1
+    ? value
+    : null;
+}
+
 // Re-export SentenceChunker for direct use
 export { SentenceChunker } from "./sentence-chunker";
 
@@ -335,6 +354,8 @@ export function withVoice<TBase extends AgentLike>(
     #activeAssistantText = new Map<string, ActiveAssistantText>();
     // Connections whose opening hook should not feed inbound audio to STT.
     #callStartInputSuppressed = new Set<string>();
+    // Client-captured microphone energy for the current STT turn.
+    #clientSpeechEnergy = new Map<string, ClientSpeechEnergy>();
 
     // Current async start_call identity per connection, used to ignore stale readiness.
     #startupTokens = new Map<string, symbol>();
@@ -394,6 +415,7 @@ export function withVoice<TBase extends AgentLike>(
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
         this.#startupTokens.delete(connection.id);
         this.#callStartInputSuppressed.delete(connection.id);
+        this.#clientSpeechEnergy.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
         this.#cm.cleanup(connection.id);
         const transport = this.#audioTransports.get(connection.id);
@@ -458,8 +480,24 @@ export function withVoice<TBase extends AgentLike>(
               runBackground("end_call", () => this.#handleEndCall(connection));
               break;
             case "start_of_speech":
-            case "end_of_speech":
+              this.#clientSpeechEnergy.set(connection.id, {
+                startRms: readClientRms(parsed, "rms"),
+                peakRms: null,
+                threshold: readClientRms(parsed, "threshold")
+              });
               break;
+            case "end_of_speech": {
+              const energy = this.#clientSpeechEnergy.get(connection.id);
+              this.#clientSpeechEnergy.set(connection.id, {
+                startRms: energy?.startRms ?? null,
+                peakRms: readClientRms(parsed, "peak_rms"),
+                threshold:
+                  readClientRms(parsed, "threshold") ??
+                  energy?.threshold ??
+                  null
+              });
+              break;
+            }
             case "interrupt": {
               const source =
                 "source" in parsed && parsed.source === "audio_level"
@@ -788,6 +826,7 @@ export function withVoice<TBase extends AgentLike>(
 
     async #handleStartCall(connection: Connection, _preferredFormat?: string) {
       if (this.#cm.isInCall(connection.id)) return;
+      this.#clientSpeechEnergy.delete(connection.id);
 
       const startupToken = Symbol(connection.id);
       this.#startupTokens.set(connection.id, startupToken);
@@ -879,11 +918,14 @@ export function withVoice<TBase extends AgentLike>(
               Boolean(
                 transcript && this.#isEchoTranscript(connection.id, transcript)
               );
+            const energy = this.#clientSpeechEnergy.get(connection.id);
             console.log("[VoiceTrace]", {
               event: "stt_speech_start",
               connectionId: connection.id,
               transcript: transcript ?? null,
-              echoed
+              echoed,
+              clientStartRms: energy?.startRms ?? null,
+              clientThreshold: energy?.threshold ?? null
             });
             if (echoed) return;
             this.#handleBargeIn(connection, "flux_speech_start", transcript);
@@ -892,11 +934,14 @@ export function withVoice<TBase extends AgentLike>(
             const echoed =
               opt("filterEchoedTranscripts", false) &&
               this.#isEchoTranscript(connection.id, transcript);
+            const energy = this.#clientSpeechEnergy.get(connection.id);
             console.log("[VoiceTrace]", {
               event: "stt_eager_utterance",
               connectionId: connection.id,
               transcript,
-              echoed
+              echoed,
+              clientStartRms: energy?.startRms ?? null,
+              clientThreshold: energy?.threshold ?? null
             });
             if (echoed) return;
             if (opt("filterEchoedTranscripts", false)) {
@@ -916,11 +961,16 @@ export function withVoice<TBase extends AgentLike>(
             if (turn?.pipelineStarted) this.#cm.abortPipeline(connection.id);
           },
           onUtterance: (transcript: string) => {
+            const energy = this.#clientSpeechEnergy.get(connection.id);
             console.log("[VoiceTrace]", {
               event: "stt_utterance",
               connectionId: connection.id,
-              text: transcript
+              text: transcript,
+              clientStartRms: energy?.startRms ?? null,
+              clientPeakRms: energy?.peakRms ?? null,
+              clientThreshold: energy?.threshold ?? null
             });
+            this.#clientSpeechEnergy.delete(connection.id);
             this.#sendJSON(connection, {
               type: "transcript_interim",
               text: ""
@@ -1045,6 +1095,7 @@ export function withVoice<TBase extends AgentLike>(
 
     async #handleEndCall(connection: Connection): Promise<void> {
       this.#startupTokens.delete(connection.id);
+      this.#clientSpeechEnergy.delete(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "end_call");
       this.#cm.cleanup(connection.id);
       try {
