@@ -14,6 +14,7 @@ declare global {
 class FakeTrack {
   enabled = true;
   stopped = false;
+  clones: FakeTrack[] = [];
   settings: MediaTrackSettings = {
     autoGainControl: true,
     channelCount: 1,
@@ -24,6 +25,12 @@ class FakeTrack {
 
   getSettings(): MediaTrackSettings {
     return this.settings;
+  }
+  clone(): MediaStreamTrack {
+    const clone = new FakeTrack();
+    clone.settings = { ...this.settings };
+    this.clones.push(clone);
+    return clone as unknown as MediaStreamTrack;
   }
 
   stop(): void {
@@ -75,9 +82,10 @@ class FakeAudioElement {
 
 class FakeAnalyser {
   fftSize = 0;
+  level = 0.5;
 
   getFloatTimeDomainData(samples: Float32Array): void {
-    samples.fill(0.5);
+    samples.fill(this.level);
   }
 }
 
@@ -433,6 +441,45 @@ describe("SFUVoiceAudioInput", () => {
     expect(audio.paused).toBe(true);
     expect(audio.removed).toBe(true);
     expect(requests.at(-1)).toBe("stt/stop-forwarding");
+  });
+
+  it("gates quiet microphone audio while preserving level detection", async () => {
+    const input = new SFUVoiceAudioInput({
+      endpoint: "/voice",
+      noiseGateThreshold: 0.1
+    });
+    const levels: number[] = [];
+    input.onAudioLevel = (level) => levels.push(level);
+
+    const start = input.start();
+    const peer = await waitForPeer();
+    const outboundTrack = stream.track?.clones[0];
+    expect(outboundTrack?.enabled).toBe(false);
+    expect(peer.transceiverCalls[0]?.track).toBe(outboundTrack);
+
+    peer.connect();
+    await start;
+    const context = FakeAudioContext.instances[0];
+    const measure = animationFrames.find((callback) => callback);
+    expect(measure).toBeDefined();
+
+    context.analyser.level = 0.2;
+    measure?.(0);
+    measure?.(16);
+    measure?.(32);
+    expect(outboundTrack?.enabled).toBe(true);
+    expect(levels.at(-1)).toBeCloseTo(0.2);
+
+    vi.useFakeTimers();
+    context.analyser.level = 0.01;
+    measure?.(48);
+    await vi.advanceTimersByTimeAsync(299);
+    expect(outboundTrack?.enabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(outboundTrack?.enabled).toBe(false);
+
+    input.stop();
+    expect(outboundTrack?.stopped).toBe(true);
   });
 
   it("rejects browser capture when echo cancellation is not applied", async () => {

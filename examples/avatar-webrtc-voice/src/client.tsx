@@ -13,8 +13,6 @@ import {
   PhoneIcon,
   SpinnerGapIcon,
   SunIcon,
-  UserSwitchIcon,
-  WarningCircleIcon,
   WaveformIcon,
   WifiHighIcon,
   WifiSlashIcon
@@ -28,6 +26,7 @@ import "./styles.css";
 
 const SESSION_ID_KEY = "avatar-voice-session-id";
 const PANEL_STATE_KEY = "avatar-voice-panels";
+const MICROPHONE_GATE_THRESHOLD = 0.06;
 
 type PanelState = {
   activity: boolean;
@@ -234,27 +233,19 @@ function App() {
   const [hasPlaybackAudio, setHasPlaybackAudio] = useState(false);
   const playbackActive = useRef(false);
   const playbackSilenceTimer = useRef<number | undefined>(undefined);
-  const sendVoiceJSON = useRef<(message: Record<string, unknown>) => void>(
-    () => {}
-  );
-  const playbackStartedAt = useRef(0);
-  const playbackPeakRms = useRef(0);
   const audioInput = useMemo(
     () =>
       new SFUVoiceAudioInput({
         endpoint: `/agents/my-voice-agent/${encodeURIComponent(sessionId)}/voice`,
+        noiseGateThreshold: MICROPHONE_GATE_THRESHOLD,
         onPlaybackAudioLevel: (rms) => {
           if (rms > 0.01) {
-            playbackPeakRms.current = Math.max(playbackPeakRms.current, rms);
             if (playbackSilenceTimer.current !== undefined) {
               clearTimeout(playbackSilenceTimer.current);
               playbackSilenceTimer.current = undefined;
             }
             if (!playbackActive.current) {
               playbackActive.current = true;
-              playbackStartedAt.current = Date.now();
-              playbackPeakRms.current = rms;
-              sendVoiceJSON.current({ type: "playback_started", rms });
               setHasPlaybackAudio(true);
             }
           } else if (
@@ -264,13 +255,6 @@ function App() {
             playbackSilenceTimer.current = window.setTimeout(() => {
               playbackActive.current = false;
               playbackSilenceTimer.current = undefined;
-              sendVoiceJSON.current({
-                type: "playback_stopped",
-                durationMs: Date.now() - playbackStartedAt.current,
-                peakRms: playbackPeakRms.current
-              });
-              playbackStartedAt.current = 0;
-              playbackPeakRms.current = 0;
               setHasPlaybackAudio(false);
             }, 160);
           }
@@ -293,28 +277,22 @@ function App() {
     startCall,
     endCall,
     toggleMute,
-    sendText,
-    sendJSON,
-    lastCustomMessage
+    sendText
   } = useVoiceAgent({
     agent: "my-voice-agent",
     name: sessionId,
     query: { llm: llmModel, reasoning },
     audioInput,
+    silenceThreshold: MICROPHONE_GATE_THRESHOLD,
+    interruptThreshold: MICROPHONE_GATE_THRESHOLD,
     outputDeviceId,
     onReconnect: () => {
       setToast("Reconnected to agent.");
     }
   });
 
-  useEffect(() => {
-    sendVoiceJSON.current = sendJSON;
-  }, [sendJSON]);
-
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
   const [textInput, setTextInput] = useState("");
-  const [speakerConflict, setSpeakerConflict] = useState(false);
-  const [kicked, setKicked] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [audioOutputDevices, setAudioOutputDevices] = useState<
     MediaDeviceInfo[]
@@ -401,50 +379,8 @@ function App() {
 
   const handleStartCall = useCallback(async () => {
     await startCall();
-    const settings = audioInput.microphoneSettings;
-    console.info("[VoiceTrace] microphone_settings", settings);
-    sendJSON({
-      type: "microphone_settings",
-      settings: settings
-        ? {
-            autoGainControl: settings.autoGainControl ?? null,
-            channelCount: settings.channelCount ?? null,
-            echoCancellation: settings.echoCancellation ?? null,
-            noiseSuppression: settings.noiseSuppression ?? null,
-            sampleRate: settings.sampleRate ?? null
-          }
-        : null
-    });
     await refreshAudioOutputs().catch(() => {});
-  }, [audioInput, refreshAudioOutputs, sendJSON, startCall]);
-
-  useEffect(() => {
-    if (
-      typeof lastCustomMessage !== "object" ||
-      lastCustomMessage === null ||
-      !("type" in lastCustomMessage)
-    ) {
-      return;
-    }
-
-    const message = lastCustomMessage as { type: string; message?: string };
-    if (message.type === "speaker_conflict") {
-      setSpeakerConflict(true);
-    } else if (message.type === "kicked") {
-      setKicked(true);
-      setSpeakerConflict(false);
-    } else if (message.type === "speaker_available") {
-      setSpeakerConflict(false);
-      setToast(message.message ?? "Speaker is available.");
-    }
-  }, [lastCustomMessage]);
-
-  const handleKickSpeaker = useCallback(() => {
-    sendJSON({ type: "kick_speaker" });
-    setSpeakerConflict(false);
-    setKicked(false);
-    setToast("Attempting to take over as speaker...");
-  }, [sendJSON]);
+  }, [refreshAudioOutputs, startCall]);
 
   const isInCall = status !== "idle";
 
@@ -492,37 +428,9 @@ function App() {
         )}
 
         {/* Error banner */}
-        {error && !speakerConflict && !kicked && (
+        {error && (
           <div className="mb-4 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
             {error}
-          </div>
-        )}
-
-        {/* Speaker conflict banner */}
-        {speakerConflict && (
-          <div className="mb-4 px-4 py-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
-            <div className="flex items-center gap-2 text-sm text-amber-600 dark:text-amber-400 mb-2">
-              <WarningCircleIcon size={16} weight="bold" />
-              Another session is currently the active speaker.
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              icon={<UserSwitchIcon size={16} />}
-              onClick={handleKickSpeaker}
-            >
-              Take over as speaker
-            </Button>
-          </div>
-        )}
-
-        {/* Kicked banner */}
-        {kicked && (
-          <div className="mb-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/20">
-            <div className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400">
-              <WarningCircleIcon size={16} weight="bold" />
-              Another session has taken over. You have been disconnected.
-            </div>
           </div>
         )}
 
@@ -533,7 +441,7 @@ function App() {
               onClick={handleStartCall}
               className="w-full justify-center px-8 sm:w-auto"
               variant="primary"
-              disabled={!connected || speakerConflict}
+              disabled={!connected}
               icon={<PhoneIcon size={20} weight="fill" />}
             >
               {connected ? "Start talking" : "Connecting..."}

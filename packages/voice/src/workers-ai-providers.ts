@@ -6,8 +6,7 @@
  * satisfying the provider interfaces works.
  */
 
-import { Decoder as Mp3Decoder } from "minimp3-wasm";
-import mp3DecoderModule from "minimp3-wasm/dist/decoder.opt.wasm";
+import { StreamingMp3ToPcm16 } from "./audio-converters";
 
 import type {
   StreamingTTSProvider,
@@ -36,6 +35,13 @@ interface AiLike {
 export interface WorkersAITTSOptions {
   /** TTS model name. @default "@cf/deepgram/aura-1" */
   model?: string;
+  /**
+   * Model-specific fields merged with the synthesized text. When provided,
+   * Deepgram-specific speaker and encoding fields are not added.
+   */
+  input?: Record<string, unknown>;
+  /** Declared output format for model-specific inputs. */
+  audioFormat?: VoiceAudioFormat;
   /** TTS speaker voice. @default "asteria" */
   speaker?: string;
   /** Output audio encoding. */
@@ -57,12 +63,14 @@ export interface WorkersAITTSOptions {
  * ```
  */
 export class WorkersAITTS implements TTSProvider {
+  readonly audioFormat: VoiceAudioFormat | undefined;
+  readonly sampleRate: number | undefined;
   #ai: AiLike;
   #model: string;
   #speaker: string;
   #encoding: WorkersAITTSOptions["encoding"];
   #container: WorkersAITTSOptions["container"];
-  #sampleRate: number | undefined;
+  #input: Record<string, unknown> | undefined;
 
   constructor(ai: AiLike, options?: WorkersAITTSOptions) {
     this.#ai = ai;
@@ -70,37 +78,107 @@ export class WorkersAITTS implements TTSProvider {
     this.#speaker = options?.speaker ?? "asteria";
     this.#encoding = options?.encoding;
     this.#container = options?.container;
-    this.#sampleRate = options?.sampleRate;
+    this.#input = options?.input;
+    this.sampleRate = options?.sampleRate;
+    this.audioFormat =
+      options?.audioFormat ??
+      (this.#encoding === "linear16"
+        ? "pcm16"
+        : this.#encoding === "mp3" ||
+            this.#encoding === "opus" ||
+            this.#encoding === "mulaw"
+          ? this.#encoding
+          : this.#container === "wav"
+            ? "wav"
+            : undefined);
   }
 
   async synthesize(
     text: string,
     signal?: AbortSignal
   ): Promise<ArrayBuffer | null> {
-    const input: Record<string, unknown> = {
-      text,
-      speaker: this.#speaker
-    };
-    if (this.#encoding !== undefined) input.encoding = this.#encoding;
-    if (this.#container !== undefined) input.container = this.#container;
-    if (this.#sampleRate !== undefined) input.sample_rate = this.#sampleRate;
-    const response = (await this.#ai.run(this.#model, input, {
+    const input: Record<string, unknown> = this.#input
+      ? { ...this.#input, text }
+      : {
+          text,
+          speaker: this.#speaker,
+          ...(this.#encoding !== undefined ? { encoding: this.#encoding } : {}),
+          ...(this.#container !== undefined
+            ? { container: this.#container }
+            : {}),
+          ...(this.sampleRate !== undefined
+            ? { sample_rate: this.sampleRate }
+            : {})
+        };
+    const result = await this.#ai.run(this.#model, input, {
       returnRawResponse: true,
       ...(signal ? { signal } : {})
-    })) as Response;
+    });
+    return this.#resolveAudio(result, signal);
+  }
 
-    // Without this check an error body (e.g. a 429 quota JSON) would be
-    // forwarded to the client as audio bytes and fail to decode silently.
+  async #resolveAudio(
+    result: unknown,
+    signal?: AbortSignal
+  ): Promise<ArrayBuffer | null> {
+    if (result instanceof Response) {
+      if (!result.ok) {
+        const body = await result.text().catch(() => "");
+        console.error(
+          `[WorkersAITTS] TTS request failed: HTTP ${result.status}${body ? ` — ${body.slice(0, 200)}` : ""}`
+        );
+        return null;
+      }
+      if (!result.headers.get("content-type")?.includes("application/json")) {
+        return result.arrayBuffer();
+      }
+      result = await result.json();
+    }
+
+    const audio = extractAudioReference(result);
+    if (!audio) {
+      console.error("[WorkersAITTS] TTS response did not contain audio");
+      return null;
+    }
+    if (audio.startsWith("data:")) return decodeBase64AudioDataUri(audio);
+
+    const response = await fetch(audio, signal ? { signal } : undefined);
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
       console.error(
-        `[WorkersAITTS] TTS request failed: HTTP ${response.status}${body ? ` — ${body.slice(0, 200)}` : ""}`
+        `[WorkersAITTS] Audio download failed: HTTP ${response.status}`
       );
       return null;
     }
-
-    return await response.arrayBuffer();
+    return response.arrayBuffer();
   }
+}
+
+function extractAudioReference(result: unknown): string | null {
+  if (!result || typeof result !== "object") return null;
+  if ("audio" in result && typeof result.audio === "string") {
+    return result.audio;
+  }
+  if (
+    "result" in result &&
+    result.result &&
+    typeof result.result === "object" &&
+    "audio" in result.result &&
+    typeof result.result.audio === "string"
+  ) {
+    return result.result.audio;
+  }
+  return null;
+}
+
+function decodeBase64AudioDataUri(uri: string): ArrayBuffer | null {
+  const comma = uri.indexOf(",");
+  if (comma < 0 || !uri.slice(0, comma).includes(";base64")) return null;
+  const decoded = atob(uri.slice(comma + 1));
+  const audio = new Uint8Array(decoded.length);
+  for (let i = 0; i < decoded.length; i++) {
+    audio[i] = decoded.charCodeAt(i);
+  }
+  return audio.buffer;
 }
 
 export type WorkersAIRealtimeTTSOptions = {
@@ -288,6 +366,8 @@ export interface WorkersAIGrokTTSOptions {
   voice?: string;
   /** BCP-47 language code. @default "en" */
   language?: string;
+  /** Emitted audio format. @default "pcm16" */
+  audioFormat?: "mp3" | "pcm16";
   /**
    * xAI streaming latency optimization. `1` lowers first-audio latency with a
    * minor quality tradeoff. @default 1
@@ -295,66 +375,17 @@ export interface WorkersAIGrokTTSOptions {
   optimizeStreamingLatency?: 0 | 1 | 2;
 }
 
-/** Incrementally exposes new mono PCM16 samples from an MP3 byte stream. */
-class StreamingMp3ToPcm16 {
-  #chunks: Uint8Array[] = [];
-  #byteLength = 0;
-  #emittedFrames = 0;
-
-  constructor(
-    private readonly wasm: WebAssembly.Exports,
-    private readonly sampleRate: number
-  ) {}
-
-  push(chunk: Uint8Array): Uint8Array | null {
-    this.#chunks.push(chunk);
-    this.#byteLength += chunk.byteLength;
-    const mp3 = new Uint8Array(this.#byteLength);
-    let offset = 0;
-    for (const buffered of this.#chunks) {
-      mp3.set(buffered, offset);
-      offset += buffered.byteLength;
-    }
-
-    // ponytail: TTS utterances are short, so re-decoding the buffered stream
-    // keeps this dependency tiny; use a stateful decoder if CPU profiles show
-    // long-form TTS needs it.
-    const result = new Mp3Decoder(this.wasm, mp3).decode(
-      Number.POSITIVE_INFINITY
-    );
-    if (result.samplingRate !== 0 && result.samplingRate !== this.sampleRate) {
-      throw new Error(
-        `MP3 stream returned ${result.samplingRate} Hz audio; expected ${this.sampleRate} Hz`
-      );
-    }
-    if (result.numChannels < 1) return null;
-    const decodedFrames = Math.floor(result.numSamples / result.numChannels);
-    if (decodedFrames <= this.#emittedFrames) return null;
-    const pcm = new Int16Array(decodedFrames - this.#emittedFrames);
-    for (let frame = this.#emittedFrames; frame < decodedFrames; frame++) {
-      let sample = 0;
-      for (let channel = 0; channel < result.numChannels; channel++) {
-        sample += result.pcm[frame * result.numChannels + channel] ?? 0;
-      }
-      pcm[frame - this.#emittedFrames] = Math.round(
-        sample / result.numChannels
-      );
-    }
-    this.#emittedFrames = decodedFrames;
-    return new Uint8Array(pcm.buffer);
-  }
-}
-
 /**
  * Streaming xAI Grok TTS through the Workers AI binding.
  *
- * Grok's MP3 WebSocket output is decoded to PCM16 as each chunk arrives, so
- * callers do not need an xAI API key or a complete audio download.
+ * Grok's MP3 WebSocket output can be emitted directly or decoded to PCM16 as
+ * each chunk arrives, so callers need neither an xAI API key nor a complete
+ * audio download.
  */
 export class WorkersAIGrokTTS
   implements TTSProvider, StreamingTTSProvider, StreamingTextTTSProvider
 {
-  readonly audioFormat: VoiceAudioFormat = "pcm16";
+  readonly audioFormat: VoiceAudioFormat;
   readonly sampleRate = 24000;
   #ai: AiLike;
   #voice: string;
@@ -363,6 +394,7 @@ export class WorkersAIGrokTTS
 
   constructor(ai: AiLike, options?: WorkersAIGrokTTSOptions) {
     this.#ai = ai;
+    this.audioFormat = options?.audioFormat ?? "pcm16";
     this.#voice = options?.voice ?? "ara";
     this.#language = options?.language ?? "en";
     this.#optimizeStreamingLatency = options?.optimizeStreamingLatency ?? 1;
@@ -408,18 +440,18 @@ export class WorkersAIGrokTTS
   ): AsyncGenerator<ArrayBuffer> {
     if (signal?.aborted) return;
 
-    const [decoderInstance, ws] = await Promise.all([
-      WebAssembly.instantiate(mp3DecoderModule, {}),
+    const [normalizer, ws] = await Promise.all([
+      this.audioFormat === "pcm16"
+        ? StreamingMp3ToPcm16.create({
+            sampleRate: this.sampleRate,
+            channels: 1
+          })
+        : null,
       this.#open()
     ]);
-    const frames = new AudioFrameStream(
-      (this.sampleRate * FRAME_MS * 2) / 1000,
-      2
-    );
-    const normalizer = new StreamingMp3ToPcm16(
-      decoderInstance.exports,
-      this.sampleRate
-    );
+    const output = normalizer
+      ? new AudioFrameStream((this.sampleRate * FRAME_MS * 2) / 1000, 2)
+      : new AudioFrameStream();
 
     ws.addEventListener("message", (event: MessageEvent) => {
       if (typeof event.data !== "string") return;
@@ -443,27 +475,33 @@ export class WorkersAIGrokTTS
           for (let i = 0; i < decoded.length; i++) {
             chunk[i] = decoded.charCodeAt(i);
           }
-          const pcm = normalizer.push(chunk);
-          if (pcm) frames.push(pcm);
+          if (normalizer) {
+            const pcm = normalizer.push(chunk);
+            if (pcm) output.push(pcm.audio);
+          } else {
+            output.push(chunk);
+          }
         } catch (error) {
-          frames.fail(
+          output.fail(
             error instanceof Error
               ? error
               : new Error("Workers AI Grok MP3 decode failed")
           );
         }
       } else if (message.type === "audio.done") {
-        frames.finish();
+        const pcm = normalizer?.finish();
+        if (pcm) output.push(pcm.audio);
+        output.finish();
       } else if (message.type === "error") {
         const detail =
           "message" in message && typeof message.message === "string"
             ? `: ${message.message}`
             : "";
-        frames.fail(new Error(`Workers AI Grok TTS error${detail}`));
+        output.fail(new Error(`Workers AI Grok TTS error${detail}`));
       }
     });
     ws.addEventListener("close", (event: CloseEvent) => {
-      frames.fail(
+      output.fail(
         new Error(
           `Workers AI Grok TTS socket closed before audio.done (code ${event.code}${
             event.reason ? `: ${event.reason}` : ""
@@ -472,7 +510,7 @@ export class WorkersAIGrokTTS
       );
     });
     ws.addEventListener("error", () => {
-      frames.fail(new Error("Workers AI Grok TTS socket error"));
+      output.fail(new Error("Workers AI Grok TTS socket error"));
     });
     const abort = () => {
       try {
@@ -480,7 +518,7 @@ export class WorkersAIGrokTTS
       } catch {
         // Already closed.
       }
-      frames.finish();
+      output.finish();
       try {
         ws.close();
       } catch {
@@ -505,14 +543,14 @@ export class WorkersAIGrokTTS
         if (sentText) {
           ws.send(JSON.stringify({ type: "text.done" }));
         } else {
-          frames.finish();
+          output.finish();
         }
       } finally {
         reader.releaseLock();
       }
     })().catch((error: unknown) => {
       if (signal?.aborted) return;
-      frames.fail(
+      output.fail(
         error instanceof Error
           ? error
           : new Error("Workers AI Grok TTS input stream failed")
@@ -521,18 +559,23 @@ export class WorkersAIGrokTTS
 
     try {
       let nextYieldAt = 0;
-      for await (const frame of frames) {
+      for await (const frame of output) {
         if (signal?.aborted) return;
-        const now = Date.now();
-        if (nextYieldAt === 0) {
-          nextYieldAt = now + FRAME_MS;
-        } else {
-          if (now < nextYieldAt) {
-            await new Promise<void>((resolve) =>
-              setTimeout(resolve, nextYieldAt - now)
+        if (normalizer) {
+          const now = Date.now();
+          if (nextYieldAt === 0) {
+            nextYieldAt = now + FRAME_MS;
+          } else {
+            if (now < nextYieldAt) {
+              await new Promise<void>((resolve) =>
+                setTimeout(resolve, nextYieldAt - now)
+              );
+            }
+            nextYieldAt = Math.max(
+              nextYieldAt + FRAME_MS,
+              Date.now() + FRAME_MS
             );
           }
-          nextYieldAt = Math.max(nextYieldAt + FRAME_MS, Date.now() + FRAME_MS);
         }
         yield frame;
       }
@@ -595,8 +638,8 @@ export class WorkersAIGrokTTS
 const FRAME_MS = 20;
 
 /**
- * Bridges the TTS socket's arbitrary fragments into fixed-duration audio
- * frames, with any complete-sample remainder emitted on `Flushed`.
+ * Queues encoded chunks directly or bridges raw audio fragments into
+ * fixed-duration frames.
  */
 class AudioFrameStream {
   #frame: Uint8Array;
@@ -607,14 +650,19 @@ class AudioFrameStream {
   #wake: (() => void) | null = null;
 
   constructor(
-    private readonly frameBytes: number,
-    private readonly sampleBytes: 1 | 2
+    private readonly frameBytes?: number,
+    private readonly sampleBytes: 1 | 2 = 1
   ) {
-    this.#frame = new Uint8Array(frameBytes);
+    this.#frame = new Uint8Array(frameBytes ?? 0);
   }
 
   push(chunk: Uint8Array): void {
     if (this.#done) return;
+    if (this.frameBytes === undefined) {
+      this.#queue.push(chunk.slice().buffer);
+      this.#notify();
+      return;
+    }
     let offset = 0;
     while (offset < chunk.byteLength) {
       const copied = Math.min(

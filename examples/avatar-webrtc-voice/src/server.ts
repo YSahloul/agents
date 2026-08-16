@@ -11,10 +11,11 @@ import {
   callable,
   getAgentByName,
   routeAgentRequest,
-  type Connection,
-  type WSMessage
+  type Connection
 } from "agents";
 import {
+  convertTTSProvider,
+  mp3ToPcm16,
   streamRpcVoiceTurn,
   withSFUVoice,
   WorkersAIFluxSTT,
@@ -61,31 +62,6 @@ function reasoningEffort(value: unknown): ReasoningEffort | undefined {
 }
 
 type ResearchInput = { query: string };
-
-const CustomClientMessage = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("kick_speaker") }),
-  z.object({
-    type: z.literal("microphone_settings"),
-    settings: z
-      .object({
-        autoGainControl: z.boolean().nullable(),
-        channelCount: z.number().nullable(),
-        echoCancellation: z.boolean().nullable(),
-        noiseSuppression: z.boolean().nullable(),
-        sampleRate: z.number().nullable()
-      })
-      .nullable()
-  }),
-  z.object({
-    type: z.literal("playback_started"),
-    rms: z.number().finite().min(0)
-  }),
-  z.object({
-    type: z.literal("playback_stopped"),
-    durationMs: z.number().finite().min(0),
-    peakRms: z.number().finite().min(0)
-  })
-]);
 
 function inputText(input: unknown): string {
   if (typeof input === "string") return input;
@@ -308,7 +284,13 @@ const VoiceAgent = withSFUVoice(Agent, {
 });
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  tts = new WorkersAIGrokTTS(this.env.AI, { voice: "ara" });
+  tts = convertTTSProvider({
+    provider: new WorkersAIGrokTTS(this.env.AI, {
+      voice: "ara",
+      audioFormat: "mp3"
+    }),
+    converter: mp3ToPcm16({ sampleRate: 24000 })
+  });
   transcriber = new WorkersAIFluxSTT(this.env.AI, {
     eotThreshold: 0.7
   });
@@ -326,118 +308,6 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
       apiToken: env.REALTIME_SFU_BEARER_TOKEN,
       apiBase: env.SFU_API_BASE
     };
-  }
-
-  // --- Single-speaker enforcement ---
-  //
-  // Only one connection can be the active speaker at a time. This prevents
-  // two browser tabs from capturing audio simultaneously. Other connections
-  // can still observe transcripts and send text messages.
-
-  #activeSpeakerId: string | null = null;
-
-  beforeCallStart(connection: Connection): boolean {
-    if (this.#activeSpeakerId && this.#activeSpeakerId !== connection.id) {
-      connection.send(
-        JSON.stringify({
-          type: "speaker_conflict",
-          message:
-            "Another session is currently the active speaker. You can kick them to take over."
-        })
-      );
-      return false;
-    }
-    this.#activeSpeakerId = connection.id;
-    return true;
-  }
-
-  onCallEnd(connection: Connection) {
-    if (this.#activeSpeakerId === connection.id) {
-      this.#activeSpeakerId = null;
-    }
-  }
-
-  onClose(connection: Connection) {
-    if (this.#activeSpeakerId === connection.id) {
-      this.#activeSpeakerId = null;
-    }
-  }
-
-  onMessage(connection: Connection, message: WSMessage) {
-    // Voice protocol messages are intercepted automatically by the mixin.
-    // This handler only receives non-voice messages.
-    if (typeof message !== "string") return;
-
-    try {
-      const result = CustomClientMessage.safeParse(JSON.parse(message));
-      if (!result.success) return;
-      const parsed = result.data;
-
-      if (parsed.type === "kick_speaker") {
-        this.#handleKick(connection);
-        return;
-      }
-
-      if (parsed.type === "microphone_settings") {
-        console.log("[VoiceTrace]", {
-          event: "microphone_settings",
-          connectionId: connection.id,
-          ...parsed.settings
-        });
-        return;
-      }
-
-      if (parsed.type === "playback_started") {
-        console.log("[VoiceTrace]", {
-          event: "browser_playback_started",
-          connectionId: connection.id,
-          rms: parsed.rms
-        });
-        return;
-      }
-
-      console.log("[VoiceTrace]", {
-        event: "browser_playback_stopped",
-        connectionId: connection.id,
-        durationMs: parsed.durationMs,
-        peakRms: parsed.peakRms
-      });
-    } catch {
-      // not JSON
-    }
-  }
-
-  #handleKick(requester: Connection) {
-    if (!this.#activeSpeakerId) {
-      // No active speaker — nothing to kick
-      return;
-    }
-
-    const activeConn = [...this.getConnections()].find(
-      (c) => c.id === this.#activeSpeakerId
-    );
-
-    if (activeConn) {
-      // Notify the kicked connection
-      activeConn.send(
-        JSON.stringify({
-          type: "kicked",
-          message: "Another session has taken over as the active speaker."
-        })
-      );
-      // Force end their call — cleans up server-side state and sends idle
-      this.forceEndCall(activeConn);
-    }
-
-    this.#activeSpeakerId = null;
-
-    // Notify the requester they can now start
-    requester.send(
-      JSON.stringify({
-        type: "speaker_available",
-        message: "Previous speaker has been disconnected. You can start a call."
-      })
-    );
   }
 
   // --- Voice agent logic ---

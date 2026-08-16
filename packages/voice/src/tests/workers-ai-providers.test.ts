@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   WorkersAIGrokTTS,
   WorkersAIFluxSTT,
@@ -6,6 +6,17 @@ import {
   WorkersAINova3STT,
   WorkersAITTS
 } from "../workers-ai-providers";
+
+const MP3_FIXTURE = Uint8Array.from(
+  atob(
+    "//MUxAACeDrAAUMAAXd3dziAYGBgbh6H//MUxAECgDrYAYsAAH+QQMKhJIGTzmXx//MUxAICeDbUAYoAASwGjTcsWfofTEFN//MUxAMAAANIAcAAAEU0LjBVVVVVVVVV"
+  ),
+  (char) => char.charCodeAt(0)
+);
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 class MockWebSocket {
   accepted = false;
@@ -357,12 +368,7 @@ describe("WorkersAIGrokTTS", () => {
       ])
     );
 
-    const mp3 = Uint8Array.from(
-      atob(
-        "//MUxAACeDrAAUMAAXd3dziAYGBgbh6H//MUxAECgDrYAYsAAH+QQMKhJIGTzmXx//MUxAICeDbUAYoAASwGjTcsWfofTEFN//MUxAMAAANIAcAAAEU0LjBVVVVVVVVV"
-      ),
-      (char) => char.charCodeAt(0)
-    );
+    const mp3 = MP3_FIXTURE;
     const split = Math.floor(mp3.byteLength / 2);
     for (const chunk of [mp3.subarray(0, split), mp3.subarray(split)]) {
       socket.message(
@@ -387,6 +393,31 @@ describe("WorkersAIGrokTTS", () => {
     socket.message(JSON.stringify({ type: "audio.done" }));
     await done;
     expect(socket.closed).toBe(true);
+  });
+
+  it("can expose raw MP3 for external converter composition", async () => {
+    const ai = new MockAi();
+    const tts = new WorkersAIGrokTTS(ai, { audioFormat: "mp3" });
+    const chunks: Uint8Array[] = [];
+    const done = (async () => {
+      for await (const chunk of tts.synthesizeStream("hello")) {
+        chunks.push(new Uint8Array(chunk));
+      }
+    })();
+    const socket = await waitForConnect(ai);
+
+    socket.message(
+      JSON.stringify({
+        type: "audio.delta",
+        delta: btoa(String.fromCharCode(...MP3_FIXTURE))
+      })
+    );
+    socket.message(JSON.stringify({ type: "audio.done" }));
+    await done;
+
+    expect(tts.audioFormat).toBe("mp3");
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toEqual(MP3_FIXTURE);
   });
 
   it("closes the Grok socket immediately when synthesis is interrupted", async () => {
@@ -822,6 +853,65 @@ describe("WorkersAITTS", () => {
       },
       { returnRawResponse: true }
     );
+  });
+
+  it("runs a unified Workers AI model and downloads its MP3 result", async () => {
+    const audio = new Uint8Array([1, 2, 3, 4]);
+    const run = vi.fn(async () =>
+      Response.json({
+        state: "Completed",
+        result: { audio: "https://audio.example/elevenlabs.mp3" }
+      })
+    );
+    const fetchMock = vi.fn(async () => new Response(audio));
+    vi.stubGlobal("fetch", fetchMock);
+    const tts = new WorkersAITTS(
+      { run },
+      {
+        model: "elevenlabs/eleven-flash-v2-5",
+        input: {
+          voice_id: "JBFqnCBsd6RMkjVDRZzb",
+          output_format: "mp3_44100_128"
+        },
+        audioFormat: "mp3"
+      }
+    );
+
+    const result = await tts.synthesize("hello");
+
+    expect(tts.audioFormat).toBe("mp3");
+    expect(run).toHaveBeenCalledWith(
+      "elevenlabs/eleven-flash-v2-5",
+      {
+        text: "hello",
+        voice_id: "JBFqnCBsd6RMkjVDRZzb",
+        output_format: "mp3_44100_128"
+      },
+      { returnRawResponse: true }
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://audio.example/elevenlabs.mp3",
+      undefined
+    );
+    expect(new Uint8Array(result!)).toEqual(audio);
+  });
+
+  it("decodes unified inline audio without downloading it", async () => {
+    const run = vi.fn(async () => ({
+      audio: "data:audio/mpeg;base64,AQIDBA=="
+    }));
+    const tts = new WorkersAITTS(
+      { run },
+      {
+        model: "custom/tts",
+        input: {},
+        audioFormat: "mp3"
+      }
+    );
+
+    const result = await tts.synthesize("hello");
+
+    expect(new Uint8Array(result!)).toEqual(new Uint8Array([1, 2, 3, 4]));
   });
 
   it("returns null and logs instead of forwarding an error body as audio", async () => {

@@ -35,9 +35,9 @@ REALTIME_SFU_BEARER_TOKEN=...
 Set both values with `pnpm exec wrangler secret put <NAME>` before deploying
 the separate Worker.
 
-Workers AI provides Flux turn detection, the selectable LLM models, and Grok
-TTS. No xAI API key is required, but the AI Gateway balance must be funded and
-the `default` gateway must have authentication enabled.
+Workers AI provides Flux turn detection, selectable LLMs, and Grok TTS through
+the unified model catalog. No direct xAI API key is required; AI Gateway Unified
+Billing must be funded.
 
 ## Key pattern
 
@@ -49,6 +49,14 @@ same-named `MyThinkAgent`:
 const VoiceAgent = withSFUVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
+  tts = convertTTSProvider({
+    provider: new WorkersAIGrokTTS(this.env.AI, {
+      voice: "ara",
+      audioFormat: "mp3"
+    }),
+    converter: mp3ToPcm16({ sampleRate: 24000 })
+  });
+
   async onTurn(transcript: string, context: VoiceTurnContext) {
     const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
     return streamRpcVoiceTurn({
@@ -62,6 +70,27 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   }
 }
 ```
+
+The consumer exposes Grok's raw 24 kHz MP3 stream, then composes reusable
+MP3 → 24 kHz mono PCM16 normalization for the current SFU transport. If a
+transport accepts MP3 directly, assign `WorkersAIGrokTTS` without
+`convertTTSProvider`.
+
+The browser client enables an RMS microphone gate:
+
+```ts
+const MICROPHONE_GATE_THRESHOLD = 0.06;
+
+const audioInput = new SFUVoiceAudioInput({
+  endpoint,
+  noiseGateThreshold: MICROPHONE_GATE_THRESHOLD
+});
+```
+
+The gate opens after three loud frames and closes after 300 ms of quieter audio.
+It suppresses low-level background sound while preserving the raw RMS signal
+used for speech and interruption detection. Nearby speech above the threshold
+still passes; tune the threshold for the microphone and room.
 
 The Think agent remains the canonical conversation:
 

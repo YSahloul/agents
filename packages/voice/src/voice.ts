@@ -55,6 +55,18 @@ export { SentenceChunker } from "./sentence-chunker";
 
 // Re-export protocol version constant
 export { VOICE_PROTOCOL_VERSION } from "./types";
+export {
+  convertTTSProvider,
+  mp3ToPcm16,
+  StreamingMp3ToPcm16,
+  type AudioChunkConverter,
+  type AudioConverter,
+  type ConvertedTTSProvider,
+  type ConvertTTSProviderOptions,
+  type Mp3ToPcm16ConverterOptions,
+  type Mp3ToPcm16Options,
+  type Pcm16Chunk
+} from "./audio-converters";
 
 export type {
   VoiceStatus,

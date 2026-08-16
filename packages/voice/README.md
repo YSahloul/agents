@@ -196,7 +196,8 @@ function App() {
   const audioInput = useMemo(
     () =>
       new SFUVoiceAudioInput({
-        endpoint: "/agents/my-agent/alice/voice"
+        endpoint: "/agents/my-agent/alice/voice",
+        noiseGateThreshold: 0.06
       }),
     []
   );
@@ -212,7 +213,10 @@ function App() {
 
 Store `REALTIME_SFU_APP_ID` and `REALTIME_SFU_API_TOKEN` as Worker secrets.
 The browser transport uses native echo cancellation, noise suppression, and
-automatic gain control.
+automatic gain control. Set `noiseGateThreshold` to send silence while the
+microphone RMS stays below that level. The optional gate opens after three loud
+frames, closes after 300 ms of quieter audio, and does not suppress nearby
+speech above the configured threshold.
 
 ## Server: voice input only (`withVoiceInput`)
 
@@ -300,19 +304,46 @@ await client.setOutputDevice(selectedSpeakerId);
 
 Built-in providers use the Workers AI binding:
 
-| Class               | Type           | Workers AI model      | Recommended for  |
-| ------------------- | -------------- | --------------------- | ---------------- |
-| `WorkersAIFluxSTT`  | Continuous STT | `@cf/deepgram/flux`   | `withVoice`      |
-| `WorkersAINova3STT` | Continuous STT | `@cf/deepgram/nova-3` | `withVoiceInput` |
-| `WorkersAITTS`      | TTS            | `@cf/deepgram/aura-1` | Both             |
-| `WorkersAIGrokTTS`  | Streaming TTS  | `xai/grok-tts`        | `withVoice`      |
+| Class               | Type           | Workers AI model       | Recommended for  |
+| ------------------- | -------------- | ---------------------- | ---------------- |
+| `WorkersAIFluxSTT`  | Continuous STT | `@cf/deepgram/flux`    | `withVoice`      |
+| `WorkersAINova3STT` | Continuous STT | `@cf/deepgram/nova-3`  | `withVoiceInput` |
+| `WorkersAITTS`      | TTS            | Aura or unified models | Both             |
+| `WorkersAIGrokTTS`  | Streaming TTS  | `xai/grok-tts`         | `withVoice`      |
 
 Grok requires a funded AI Gateway Unified Billing balance and an authenticated
 `default` gateway.
 
 Grok receives model text deltas directly and returns audio before the model
-response completes. Its MP3 WebSocket output is decoded incrementally to 24 kHz
-mono PCM for the voice pipeline.
+response completes. It emits 24 kHz mono PCM by default; set
+`audioFormat: "mp3"` to expose its raw MP3 WebSocket stream.
+
+Compose a unified Workers AI model with PCM normalization through
+configuration:
+
+```typescript
+import {
+  convertTTSProvider,
+  mp3ToPcm16,
+  WorkersAITTS
+} from "@cloudflare/voice";
+
+const tts = convertTTSProvider({
+  provider: new WorkersAITTS(env.AI, {
+    model: "elevenlabs/eleven-flash-v2-5",
+    input: {
+      voice_id: "JBFqnCBsd6RMkjVDRZzb",
+      output_format: "mp3_44100_128"
+    },
+    audioFormat: "mp3"
+  }),
+  converter: mp3ToPcm16({ sampleRate: 24000 })
+});
+```
+
+`WorkersAITTS` accepts model-specific input fields and resolves raw audio,
+unified audio URLs, and inline data URIs. The conversion wrapper preserves
+batch and streaming methods and creates isolated codec state per synthesis.
 
 `WorkersAIFluxSTT` uses Flux `StartOfTurn` events for low-latency barge-in and `EndOfTurn` events for final utterances. Custom transcribers can provide the same behavior by calling `onSpeechStart` from `TranscriberSessionOptions` when user speech begins, then `onUtterance` when the turn is complete.
 
