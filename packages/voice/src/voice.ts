@@ -109,6 +109,12 @@ export { SFUVoiceTransport } from "./sfu-transport";
 export type { SFUVoiceState, SFUVoiceTransportOptions } from "./sfu-transport";
 export { withSFUVoice } from "./sfu-voice";
 export type { SFUVoiceAgentOptions } from "./sfu-voice";
+export { createVoiceAgent } from "./voice-agent-factory";
+export type {
+  VoiceAgentFactoryConfig,
+  VoiceAgentFactoryMixinMembers
+} from "./voice-agent-factory";
+
 
 // Re-export Workers AI providers
 export {

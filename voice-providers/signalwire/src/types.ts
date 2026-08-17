@@ -11,6 +11,8 @@ export interface SignalWireStartMessage {
       sampleRate: number;
       channels: number;
     };
+    /** Nested `<Stream>` `<Parameter name="..." value="..."/>` children from cXML. */
+    customParameters?: Record<string, string>;
   };
 }
 

@@ -1,13 +1,8 @@
 import { Think, type StreamCallback } from "@cloudflare/think";
+import { Agent, getAgentByName, routeAgentRequest } from "agents";
 import {
-  Agent,
-  getAgentByName,
-  routeAgentRequest,
-  type Connection
-} from "agents";
-import {
+  createVoiceAgent,
   streamRpcVoiceTurn,
-  withVoice,
   WorkersAIFluxSTT,
   WorkersAIRealtimeTTS,
   type VoiceTurnContext
@@ -112,22 +107,19 @@ export class MyThinkAgent extends Think<Env> {
   }
 }
 
-const VoiceAgent = withVoice(Agent, {
+const VoiceAgent = createVoiceAgent(Agent, {
   filterEchoedTranscripts: true,
-  listenDuringCallStart: false
+  listenDuringCallStart: false,
+  stt: (env: Env) =>
+    new WorkersAIFluxSTT(env.AI, {
+      eagerEotThreshold: 0.5,
+      eotThreshold: 0.7
+    }),
+  tts: (env: Env) => new WorkersAIRealtimeTTS(env.AI),
+  greeting: "Hello! How can I help you today?"
 });
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  transcriber = new WorkersAIFluxSTT(this.env.AI, {
-    eagerEotThreshold: 0.5,
-    eotThreshold: 0.7
-  });
-  tts = new WorkersAIRealtimeTTS(this.env.AI);
-
-  async onCallStart(connection: Connection) {
-    await this.speak(connection, "Hello! How can I help you today?");
-  }
-
   async onTurn(
     transcript: string,
     context: VoiceTurnContext

@@ -1,7 +1,7 @@
-import { Agent, routeAgentRequest, type Connection } from "agents";
+import { Agent, routeAgentRequest } from "agents";
 import { createMcpHandler } from "agents/mcp/server";
 import {
-  withVoice,
+  createVoiceAgent,
   WorkersAIFluxSTT,
   WorkersAIRealtimeTTS,
   type VoiceTurnContext
@@ -45,18 +45,19 @@ function createTestMcpServer() {
 
 const handleMcpRequest = createMcpHandler(createTestMcpServer);
 
-const VoiceAgent = withVoice(Agent, {
+const VoiceAgent = createVoiceAgent(Agent, {
   filterEchoedTranscripts: true,
-  listenDuringCallStart: false
+  listenDuringCallStart: false,
+  stt: (env: Env) =>
+    new WorkersAIFluxSTT(env.AI, {
+      eagerEotThreshold: 0.5,
+      eotThreshold: 0.7
+    }),
+  tts: (env: Env) => new WorkersAIRealtimeTTS(env.AI),
+  greeting: "Hello! How can I help you today?"
 });
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  transcriber = new WorkersAIFluxSTT(this.env.AI, {
-    eagerEotThreshold: 0.5,
-    eotThreshold: 0.7
-  });
-  tts = new WorkersAIRealtimeTTS(this.env.AI);
-
   async onStart() {
     await this.addMcpServer("voice-test-tools", this.env.MCP_SERVER_URL, {
       id: "voice-test-tools"
@@ -64,10 +65,6 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     await this.addMcpServer("retail", this.env.RETAIL_MCP_SERVER_URL, {
       id: "retail"
     });
-  }
-
-  async onCallStart(connection: Connection) {
-    await this.speak(connection, "Hello! How can I help you today?");
   }
 
   async onTurn(transcript: string, context: VoiceTurnContext) {

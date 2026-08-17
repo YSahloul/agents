@@ -1,3 +1,5 @@
+import { getAgentByName } from "agents";
+import type { Agent } from "agents";
 import {
   arrayBufferToBase64,
   meanSquaredEnergy,
@@ -55,6 +57,19 @@ export interface SignalWireAdapterOptions {
    * @default false
    */
   debugAudio?: boolean;
+  /**
+   * Resolves per-call props delivered to the connected VoiceAgent via
+   * `getAgentByName(namespace, instanceId, { props })` — read them from
+   * `onStart(props)` / a `createVoiceAgent()`-based agent's `callProps`.
+   * Called once per call with the validated `start` message, before the
+   * agent DO is addressed. Return `undefined` to start with no props.
+   */
+  resolveProps?: (
+    start: SignalWireStartMessage["start"]
+  ) =>
+    | Record<string, unknown>
+    | undefined
+    | Promise<Record<string, unknown> | undefined>;
 }
 
 /** Fallback until the agent's `audio_config` announces the real TTS rate. */
@@ -133,8 +148,13 @@ export class SignalWireAdapter {
       agentSocket.close();
     };
 
-    const connectToAgent = async (instanceId: string) => {
-      const namespace = env[agentName] as DurableObjectNamespace | undefined;
+    const connectToAgent = async (
+      instanceId: string,
+      props?: Record<string, unknown>
+    ) => {
+      const namespace = env[agentName] as
+        | DurableObjectNamespace<Agent<Cloudflare.Env>>
+        | undefined;
       if (!namespace) {
         console.error(
           `[SignalWireAdapter] DO namespace "${agentName}" not found in env`
@@ -142,7 +162,7 @@ export class SignalWireAdapter {
         return;
       }
 
-      const stub = namespace.get(namespace.idFromName(instanceId));
+      const stub = await getAgentByName(namespace, instanceId, { props });
       const agentUrl = new URL(request.url);
       agentUrl.protocol = "https:";
       agentUrl.pathname = `/agents/${agentNameToRoutePath(agentName)}/${encodeURIComponent(instanceId)}`;
@@ -295,8 +315,10 @@ export class SignalWireAdapter {
             return;
           }
           streamSid = start.start.streamSid;
+          const props = await options?.resolveProps?.(start.start);
           await connectToAgent(
-            options?.instanceName ?? start.start.callSid ?? "default"
+            options?.instanceName ?? start.start.callSid ?? "default",
+            props
           );
           return;
         }

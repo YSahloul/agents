@@ -1,6 +1,6 @@
-import { Agent, routeAgentRequest, type Connection } from "agents";
+import { Agent, routeAgentRequest } from "agents";
 import {
-  withVoice,
+  createVoiceAgent,
   WorkersAIFluxSTT,
   WorkersAIRealtimeTTS,
   type VoiceTurnContext
@@ -9,36 +9,54 @@ import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
 import { streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
+const MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
 const SYSTEM_PROMPT = `You are a phone voice assistant. Respond in 1-2 short sentences. Be direct and natural. Never exceed 30 words unless asked for detail.`;
 
-const VoiceAgent = withVoice(Agent, {
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false
-});
+// Demo per-number config lookup — stand-in for a future D1 query.
+const DEMO_CALL_CONFIGS = new Map<
+  string,
+  { systemPrompt: string; model: string }
+>([
+  [
+    "+15555550100",
+    {
+      systemPrompt:
+        "You are a phone voice assistant for Acme Plumbing. Respond in 1-2 short sentences. Be direct and natural.",
+      model: MODEL
+    }
+  ]
+]);
 
-export class MyVoiceAgent extends VoiceAgent<Env> {
-  transcriber = new WorkersAIFluxSTT(this.env.AI, {
-    // Eager end-of-turn starts the LLM draft at 0.5, confirmed end-of-turn
-    // releases it at 0.7, and resumed speech cancels it before any output.
-    eagerEotThreshold: 0.5,
-    eotThreshold: 0.7
-  });
+const VoiceAgent = createVoiceAgent(Agent, {
+  filterEchoedTranscripts: true,
+  listenDuringCallStart: false,
+  stt: (env: Env) =>
+    new WorkersAIFluxSTT(env.AI, {
+      // Eager end-of-turn starts the LLM draft at 0.5, confirmed end-of-turn
+      // releases it at 0.7, and resumed speech cancels it before any output.
+      eagerEotThreshold: 0.5,
+      eotThreshold: 0.7
+    }),
   // WebSocket μ-law TTS (the rebuilt synthesizeStream path): one socket per
   // sentence, audio streams out as it synthesizes and forwards byte-for-byte
   // (mulaw/8000 straight to the carrier — no resample, no adapter encode).
-  tts = new WorkersAIRealtimeTTS(this.env.AI);
+  tts: (env: Env) => new WorkersAIRealtimeTTS(env.AI),
+  greeting: "Hello! How can I help you today?"
+});
+
+export class MyVoiceAgent extends VoiceAgent<Env> {
   #workersAi = createWorkersAI({ binding: this.env.AI });
 
-  async onCallStart(connection: Connection) {
-    await this.speak(connection, "Hello! How can I help you today?");
-  }
-
   async onTurn(transcript: string, context: VoiceTurnContext) {
+    const systemPrompt =
+      (this.callProps?.systemPrompt as string | undefined) ?? SYSTEM_PROMPT;
+    const model = (this.callProps?.model as string | undefined) ?? MODEL;
+
     const result = streamText({
-      model: this.#workersAi("@cf/meta/llama-4-scout-17b-16e-instruct", {
+      model: this.#workersAi(model, {
         sessionAffinity: this.sessionAffinity
       }),
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: [
         ...context.messages.map((m) => ({
           role: m.role as "user" | "assistant",
@@ -60,8 +78,12 @@ export default {
     if (url.pathname === "/answer") {
       // Point the SignalWire number's "WHEN A CALL COMES IN" webhook at
       // <worker-url>/answer — SignalWire fetches this cXML on every call.
+      const body = await request.text();
+      const params = new URLSearchParams(body);
+      const toNumber = params.get("To") ?? "";
+      const fromNumber = params.get("From") ?? "";
       const streamUrl = `wss://${url.host}/signalwire`;
-      const xml = `<Response><Connect><Stream url="${streamUrl}" codec="PCMU@8000h" realtime="true" /></Connect></Response>`;
+      const xml = `<Response><Connect><Stream url="${streamUrl}" codec="PCMU@8000h" realtime="true"><Parameter name="To" value="${toNumber}" /><Parameter name="From" value="${fromNumber}" /></Stream></Connect></Response>`;
       return new Response(xml, {
         headers: { "Content-Type": "application/xml" }
       });
@@ -72,7 +94,11 @@ export default {
         request,
         env as unknown as Record<string, unknown>,
         "MyVoiceAgent",
-        { agentAudioFormat: "mulaw" }
+        {
+          agentAudioFormat: "mulaw",
+          resolveProps: (start) =>
+            DEMO_CALL_CONFIGS.get(start.customParameters?.To ?? "")
+        }
       );
     }
 

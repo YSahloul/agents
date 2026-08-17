@@ -1,37 +1,44 @@
 import {
-  a as TranscriberSessionOptions,
-  c as VoiceAudioFormat,
-  d as VoicePipelineMetrics,
-  f as VoiceRole,
-  g as VoiceTransport,
-  h as VoiceStatus,
-  i as TranscriberSession,
-  l as VoiceAudioInput,
-  m as VoiceServerMessage,
-  n as TTSProvider,
-  o as TranscriptMessage,
-  p as VoiceServerAudioTransport,
-  r as Transcriber,
-  s as VOICE_PROTOCOL_VERSION,
+  _ as VoiceTransport,
+  a as TranscriberSession,
+  c as VOICE_PROTOCOL_VERSION,
+  d as VoiceClientMessage,
+  f as VoicePipelineMetrics,
+  g as VoiceStatus,
+  h as VoiceServerMessage,
+  i as Transcriber,
+  l as VoiceAudioFormat,
+  m as VoiceServerAudioTransport,
+  n as StreamingTextTTSProvider,
+  o as TranscriberSessionOptions,
+  p as VoiceRole,
+  r as TTSProvider,
+  s as TranscriptMessage,
   t as StreamingTTSProvider,
-  u as VoiceClientMessage
-} from "./types-BmCmlGn2.js";
+  u as VoiceAudioInput
+} from "./types-l9Ypungv.js";
+import { RpcTarget } from "cloudflare:workers";
 import { Agent, Connection } from "agents";
 
 //#region src/sentence-chunker.d.ts
 /**
- * Sentence chunker — accumulates streaming text and yields complete sentences.
+ * Sentence chunker — accumulates streaming text and yields speech-ready chunks.
  *
- * Isolated and testable: no dependencies on the voice pipeline, Agent, or AI APIs.
- * Feed it tokens via `add()`, get back sentences via the return value.
- * Call `flush()` at end-of-stream to get any remaining text.
+ * By default it emits complete sentences. A finite `maxChunkLength` also emits
+ * bounded phrases at clause or word boundaries, allowing TTS to start while a
+ * long sentence is still being generated.
  *
- * Current implementation: splits on sentence-ending punctuation (. ! ?) followed
- * by a space or end-of-input. This is intentionally simple — optimize later with
- * better heuristics (abbreviations, decimal numbers, quoted speech, etc.).
+ * Isolated and testable: no dependencies on the voice pipeline, Agent, or AI
+ * APIs. Feed it tokens via `add()`, get back chunks via the return value. Call
+ * `flush()` at end-of-stream to get any remaining text.
  */
 declare class SentenceChunker {
   #private;
+  private readonly maxChunkLength;
+  /**
+   * @param maxChunkLength Maximum phrase length. Omit to split only sentences.
+   */
+  constructor(maxChunkLength?: number);
   /**
    * Add a chunk of text (e.g. a streamed LLM token).
    * Returns an array of complete sentences extracted from the buffer.
@@ -51,8 +58,8 @@ declare class SentenceChunker {
 }
 //#endregion
 //#region src/voice-input.d.ts
-type Constructor$2<T = object> = new (...args: any[]) => T;
-type AgentLike$2 = Constructor$2<Pick<Agent<Cloudflare.Env>, "keepAlive">>;
+type Constructor$3<T = object> = new (...args: any[]) => T;
+type AgentLike$3 = Constructor$3<Pick<Agent<Cloudflare.Env>, "keepAlive">>;
 /** Public surface of the voice input mixin, used as an explicit return type to satisfy TS6 declaration emit. */
 interface VoiceInputMixinMembers {
   transcriber?: Transcriber;
@@ -67,7 +74,7 @@ interface VoiceInputMixinMembers {
     connection: Connection
   ): string | null | Promise<string | null>;
 }
-type VoiceInputMixinReturn<TBase extends AgentLike$2> = TBase &
+type VoiceInputMixinReturn<TBase extends AgentLike$3> = TBase &
   (new (...args: any[]) => VoiceInputMixinMembers);
 /**
  * Voice-to-text input mixin. Adds STT-only voice input to an Agent class.
@@ -95,7 +102,7 @@ type VoiceInputMixinReturn<TBase extends AgentLike$2> = TBase &
  * }
  * ```
  */
-declare function withVoiceInput<TBase extends AgentLike$2>(
+declare function withVoiceInput<TBase extends AgentLike$3>(
   Base: TBase
 ): VoiceInputMixinReturn<TBase>;
 //#endregion
@@ -132,6 +139,61 @@ interface TextReadableStream {
  * - `AsyncIterable<string>` → re-yields each chunk.
  */
 declare function iterateText(source: TextSource): AsyncGenerator<string>;
+//#endregion
+//#region src/rpc-voice.d.ts
+interface VoiceRpcCallbackOptions {
+  /** Called when the remote turn exposes its cancellation request id. */
+  onRequestId?: (requestId: string) => void;
+}
+/**
+ * RPC callback for streaming text from any remote agent into Voice.
+ *
+ * Targets that emit JSON-serialized AI SDK stream events can call `onEvent()`.
+ * Other targets can call `onText()` directly.
+ */
+declare class VoiceRpcCallback extends RpcTarget {
+  #private;
+  constructor(options?: VoiceRpcCallbackOptions);
+  onStart(event: { requestId: string }): void;
+  /** Stream a plain text delta from a custom RPC target. */
+  onText(text: string): void;
+  /** Consume a JSON-serialized AI SDK stream event. */
+  onEvent(json: string): void;
+  onDone(): void;
+  onError(error: string): void;
+  onInterrupted(): void;
+  requestId(): string | undefined;
+  hasText(): boolean;
+  wasInterrupted(): boolean;
+  close(): void;
+  fail(error: unknown): void;
+  stream(): AsyncIterable<string>;
+}
+interface RpcVoiceTurnOptions {
+  /** The Voice turn abort signal. */
+  signal: AbortSignal;
+  /** Start the remote turn and keep this promise pending until it completes. */
+  run: (callback: VoiceRpcCallback) => Promise<void>;
+  /** Cancel the remote turn after `onStart()` exposes its request id. */
+  cancel?: (requestId: string, reason: string) => Promise<void> | void;
+  /** Observe the remote request id, for logging or correlation. */
+  onRequestId?: (requestId: string) => void;
+  /** Spoken only when the completed remote turn produced no visible text. */
+  emptyResponse?: string;
+  /** Cancellation reason passed to the remote target. */
+  interruptionReason?: string;
+}
+/**
+ * Start an RPC-backed agent turn and return its text stream to `withVoice()`.
+ *
+ * The callback is a Workers `RpcTarget`, so the remote target can stream into
+ * it while `run()` remains pending. Aborting the Voice turn closes the local
+ * stream immediately and, once available, forwards the request id to
+ * `cancel()`.
+ */
+declare function streamRpcVoiceTurn(
+  options: RpcVoiceTurnOptions
+): AsyncIterable<string>;
 //#endregion
 //#region src/sfu-utils.d.ts
 /**
@@ -190,7 +252,10 @@ declare function addSFUTracks(
 declare function renegotiateSFUSession(
   config: SFUConfig,
   sessionId: string,
-  sdp: string
+  sessionDescription: {
+    type?: string;
+    sdp: string;
+  }
 ): Promise<unknown>;
 declare function createSFUWebSocketAdapter(
   config: SFUConfig,
@@ -209,7 +274,6 @@ interface SFUVoiceState {
     sessionId: string;
     adapterId: string;
     trackName: string;
-    playerSessionId?: string;
   };
   stt?: {
     sessionId: string;
@@ -244,21 +308,72 @@ declare class SFUVoiceTransport implements VoiceServerAudioTransport {
 type SFUVoiceAgentOptions = Omit<VoiceAgentOptions, "audioFormat"> & {
   routePrefix?: string;
 };
-type Constructor$1<T = object> = new (...args: any[]) => T;
-type AgentLike$1 = Constructor$1<Agent>;
+type Constructor$2<T = object> = new (...args: any[]) => T;
+type AgentLike$2 = Constructor$2<Agent>;
 interface SFUVoiceAgentMixinMembers extends VoiceAgentMixinMembers {
   getSFUConfig(): SFUConfig;
 }
-type SFUVoiceAgentMixinReturn<TBase extends AgentLike$1> = TBase &
+type SFUVoiceAgentMixinReturn<TBase extends AgentLike$2> = TBase &
   (new (...args: any[]) => SFUVoiceAgentMixinMembers);
-declare function withSFUVoice<TBase extends AgentLike$1>(
+declare function withSFUVoice<TBase extends AgentLike$2>(
   Base: TBase,
   options?: SFUVoiceAgentOptions
 ): SFUVoiceAgentMixinReturn<TBase>;
 //#endregion
+//#region src/voice-agent-factory.d.ts
+type Constructor$1<T = object> = new (...args: any[]) => T;
+type AgentLike$1 = Constructor$1<Agent<Cloudflare.Env>>;
+interface VoiceAgentFactoryConfig extends VoiceAgentOptions {
+  /** Constructs the transcriber for this agent instance. Called once from a field initializer, after `this.env` is available. */
+  stt: (env: Cloudflare.Env) => Transcriber;
+  /** Constructs the TTS provider for this agent instance. Same lifecycle as `stt`. */
+  tts: (env: Cloudflare.Env) => TTSProvider & Partial<StreamingTTSProvider>;
+  /** Greeting spoken by the default `onCallStart()`. Omit to skip — a subclass may still override `onCallStart()` itself. */
+  greeting?: string;
+}
+interface VoiceAgentFactoryMixinMembers extends VoiceAgentMixinMembers {
+  /**
+   * Per-call config resolved by the transport adapter and delivered via
+   * `getAgentByName(namespace, name, { props })` (see
+   * `SignalWireAdapterOptions.resolveProps`). Populated in `onStart()`.
+   * A subclass that overrides `onStart()` must call `super.onStart(props)`
+   * to keep this in sync.
+   */
+  callProps?: Record<string, unknown>;
+  onStart(props?: Record<string, unknown>): void | Promise<void>;
+}
+type VoiceAgentFactoryReturn<TBase extends AgentLike$1> = TBase &
+  (new (...args: any[]) => VoiceAgentFactoryMixinMembers);
+/**
+ * Config-driven voice agent mixin. Composes `withVoice()` — same pipeline,
+ * same protocol — with STT/TTS provider construction, a default greeting,
+ * and per-call props handling collapsed into a config object. `onTurn()`
+ * is still a required subclass override (the library has no LLM/model
+ * dependency); everything else about `withVoice()`-based agents (further
+ * subclassing, lifecycle hook overrides) still applies.
+ *
+ * Usage:
+ *   const VoiceAgent = createVoiceAgent(Agent, {
+ *     stt: (env: Env) => new WorkersAIFluxSTT(env.AI, { eotThreshold: 0.7 }),
+ *     tts: (env: Env) => new WorkersAIRealtimeTTS(env.AI),
+ *     greeting: "Hello! How can I help you today?"
+ *   });
+ *
+ *   class MyAgent extends VoiceAgent<Env> {
+ *     async onTurn(transcript, context) { ... this.callProps ... }
+ *   }
+ *
+ * @experimental This API is not yet stable and may change.
+ */
+declare function createVoiceAgent<TBase extends AgentLike$1>(
+  Base: TBase,
+  config: VoiceAgentFactoryConfig
+): VoiceAgentFactoryReturn<TBase>;
+//#endregion
 //#region src/workers-ai-providers.d.ts
 /** Loose type for the Workers AI binding — avoids hard dependency on @cloudflare/workers-types. */
 interface AiLike {
+  fetch?(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   run(
     model: string,
     input: Record<string, unknown>,
@@ -292,44 +407,80 @@ declare class WorkersAITTS implements TTSProvider {
   constructor(ai: AiLike, options?: WorkersAITTSOptions);
   synthesize(text: string, signal?: AbortSignal): Promise<ArrayBuffer | null>;
 }
-interface WorkersAIMulawRealtimeTTSOptions {
-  /** TTS model name. @default "@cf/deepgram/aura-2-en" */
-  model?: string;
-  /** TTS speaker voice. @default "asteria" */
+type WorkersAIRealtimeTTSOptions = {
+  /** TTS model name. @default "@cf/deepgram/aura-2-en" */ model?: string /** TTS speaker voice. @default "asteria" */;
   speaker?: string;
-}
+} & (
+  | {
+      encoding?: "mulaw";
+      sampleRate?: 8000;
+    }
+  | {
+      encoding: "linear16";
+      sampleRate?: 24000;
+    }
+);
 /**
  * Workers AI text-to-speech over the binding's native WebSocket mode
- * (`env.AI.run(model, input, { websocket: true })`), fixed to 8 kHz μ-law —
- * the encoding a phone carrier's wire format expects, so audio forwards
- * byte-for-byte with no resampling.
+ * (`env.AI.run(model, input, { websocket: true })`).
  *
  * Implements {@link StreamingTTSProvider}: one socket per sentence, and the
- * generator returning *is* completion. There is no session to keep alive, no
- * Speak/Flush/Clear protocol to reconcile, and no acknowledgement to lose — a
- * socket that dies mid-utterance throws into the caller's `for await` instead
- * of leaving a pending promise nobody settles. Interruption is the consumer
- * abandoning the iterator (or aborting the signal), which closes the socket.
+ * generator returning *is* completion. Interruption is the consumer abandoning
+ * the iterator (or aborting the signal), which closes the socket.
  *
  * Inherits {@link WorkersAITTS.synthesize} as the non-streaming fallback.
  *
  * @example
  * ```ts
  * class MyAgent extends VoiceAgent<Env> {
- *   tts = new WorkersAIMulawRealtimeTTS(this.env.AI);
+ *   tts = new WorkersAIRealtimeTTS(this.env.AI);
  * }
  * ```
  */
-declare class WorkersAIMulawRealtimeTTS
+declare class WorkersAIRealtimeTTS
   extends WorkersAITTS
   implements StreamingTTSProvider
 {
   #private;
   readonly audioFormat: VoiceAudioFormat;
-  readonly sampleRate = 8000;
-  constructor(ai: AiLike, options?: WorkersAIMulawRealtimeTTSOptions);
+  readonly sampleRate: number;
+  constructor(ai: AiLike, options?: WorkersAIRealtimeTTSOptions);
   synthesizeStream(
     text: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer>;
+}
+interface WorkersAIGrokTTSOptions {
+  /** Grok voice. @default "ara" */
+  voice?: string;
+  /** BCP-47 language code. @default "en" */
+  language?: string;
+  /**
+   * xAI streaming latency optimization. `1` lowers first-audio latency with a
+   * minor quality tradeoff. @default 1
+   */
+  optimizeStreamingLatency?: 0 | 1 | 2;
+}
+/**
+ * Streaming xAI Grok TTS through the Workers AI binding.
+ *
+ * Grok's MP3 WebSocket output is decoded to PCM16 as each chunk arrives, so
+ * callers do not need an xAI API key or a complete audio download.
+ */
+declare class WorkersAIGrokTTS
+  implements TTSProvider, StreamingTTSProvider, StreamingTextTTSProvider
+{
+  #private;
+  readonly audioFormat: VoiceAudioFormat;
+  readonly sampleRate = 24000;
+  constructor(ai: AiLike, options?: WorkersAIGrokTTSOptions);
+  synthesize(text: string, signal?: AbortSignal): Promise<ArrayBuffer | null>;
+  synthesizeStream(
+    text: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer>;
+  synthesizeTextStream(
+    text: ReadableStream<string>,
     signal?: AbortSignal
   ): AsyncGenerator<ArrayBuffer>;
 }
@@ -456,6 +607,18 @@ interface VoiceAgentOptions {
   persistMessages?: boolean;
   /** Max conversation messages to retain. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
+  /**
+   * Drop transcriptions that closely match the previous assistant message.
+   * This suppresses speakerphone echo after STT without disabling barge-in.
+   * @default false
+   */
+  filterEchoedTranscripts?: boolean;
+  /**
+   * Accept inbound audio while `onCallStart()` runs. Disable when the hook
+   * plays an opening greeting and the transport can loop that audio back into
+   * STT. The opening hook is not interruptible while disabled. @default true
+   */
+  listenDuringCallStart?: boolean;
 }
 type Constructor<T = object> = new (...args: any[]) => T;
 type AgentLike = Constructor<Agent<Cloudflare.Env>>;
@@ -532,6 +695,7 @@ declare function withVoice<TBase extends AgentLike>(
 ): VoiceAgentMixinReturn<TBase>;
 //#endregion
 export {
+  type RpcVoiceTurnOptions,
   type SFUConfig,
   type SFUVoiceAgentOptions,
   type SFUVoiceState,
@@ -539,6 +703,7 @@ export {
   type SFUVoiceTransportOptions,
   SentenceChunker,
   type StreamingTTSProvider,
+  type StreamingTextTTSProvider,
   type TTSProvider,
   type TextSource,
   type Transcriber,
@@ -546,6 +711,8 @@ export {
   type TranscriberSessionOptions,
   type TranscriptMessage,
   VOICE_PROTOCOL_VERSION,
+  type VoiceAgentFactoryConfig,
+  type VoiceAgentFactoryMixinMembers,
   VoiceAgentMixinMembers,
   VoiceAgentOptions,
   type VoiceAudioFormat,
@@ -553,6 +720,8 @@ export {
   type VoiceClientMessage,
   type VoicePipelineMetrics,
   type VoiceRole,
+  VoiceRpcCallback,
+  type VoiceRpcCallbackOptions,
   type VoiceServerAudioTransport,
   type VoiceServerMessage,
   type VoiceStatus,
@@ -560,16 +729,19 @@ export {
   VoiceTurnContext,
   WorkersAIFluxSTT,
   type WorkersAIFluxSTTOptions,
-  WorkersAIMulawRealtimeTTS,
-  type WorkersAIMulawRealtimeTTSOptions,
+  WorkersAIGrokTTS,
+  type WorkersAIGrokTTSOptions,
   WorkersAINova3STT,
   type WorkersAINova3STTOptions,
+  WorkersAIRealtimeTTS,
+  type WorkersAIRealtimeTTSOptions,
   WorkersAITTS,
   type WorkersAITTSOptions,
   addSFUTracks,
   closeSFUWebSocketAdapter,
   createSFUSession,
   createSFUWebSocketAdapter,
+  createVoiceAgent,
   decodeVarint,
   downsample48kStereoTo16kMono,
   encodePayloadToProtobuf,
@@ -580,6 +752,7 @@ export {
   resample24kMonoTo48kStereo,
   resampleMonoTo48kStereo,
   sfuFetch,
+  streamRpcVoiceTurn,
   upsample16kMonoTo48kStereo,
   withSFUVoice,
   withVoice,

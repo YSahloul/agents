@@ -1,5 +1,24 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { SignalWireAdapter } from "../src/index.js";
+
+vi.mock("agents", () => ({
+  getAgentByName: vi.fn(
+    async (
+      _namespace: unknown,
+      name: string,
+      options?: { props?: Record<string, unknown> }
+    ) => {
+      instanceNames.push(name);
+      resolvedProps.push(options?.props);
+      return {
+        fetch: async (request: Request) => {
+          fetchedRequests.push(request);
+          return { webSocket: agentSocket };
+        }
+      };
+    }
+  )
+}));
 
 type Handler = (event: MessageEvent) => void;
 
@@ -55,6 +74,7 @@ let carrierSocket: FakeWebSocket;
 let agentSocket: FakeWebSocket;
 let instanceNames: string[];
 let fetchedRequests: Request[];
+let resolvedProps: Array<Record<string, unknown> | undefined>;
 
 beforeAll(() => {
   Object.defineProperty(globalThis, "WebSocketPair", {
@@ -87,26 +107,15 @@ function createAdapter(options?: {
   instanceName?: string;
   agentAudioFormat?: "mulaw" | "pcm16";
   sttSampleRate?: number;
+  resolveProps?: (start: {
+    customParameters?: Record<string, string>;
+  }) => Record<string, unknown> | undefined | Promise<Record<string, unknown> | undefined>;
 }) {
   agentSocket = new FakeWebSocket();
   instanceNames = [];
   fetchedRequests = [];
-  const env = {
-    MyAgent: {
-      idFromName(name: string) {
-        instanceNames.push(name);
-        return name;
-      },
-      get() {
-        return {
-          fetch: async (request: Request) => {
-            fetchedRequests.push(request);
-            return { webSocket: agentSocket };
-          }
-        };
-      }
-    }
-  };
+  resolvedProps = [];
+  const env = { MyAgent: {} };
   SignalWireAdapter.handleRequest(
     new Request("https://example.com/signalwire", {
       headers: { Upgrade: "websocket" }
@@ -124,7 +133,8 @@ async function start(
     encoding: "audio/x-mulaw",
     sampleRate: 8000,
     channels: 1
-  }
+  },
+  customParameters?: Record<string, string>
 ) {
   carrierSocket.emit(
     "message",
@@ -133,7 +143,8 @@ async function start(
       start: {
         streamSid: "stream-1",
         callSid: "call-1",
-        mediaFormat: format
+        mediaFormat: format,
+        customParameters
       }
     })
   );
@@ -276,5 +287,13 @@ describe("SignalWireAdapter", () => {
     await start({ encoding: "audio/x-L16", sampleRate: 16000, channels: 1 });
     expect(carrierSocket.closed).toBe(true);
     expect(instanceNames).toEqual([]);
+  });
+
+  it("resolves per-call props and forwards them to getAgentByName", async () => {
+    createAdapter({
+      resolveProps: (start) => ({ systemPrompt: start.customParameters?.greeting })
+    });
+    await start(undefined, { greeting: "hi" });
+    expect(resolvedProps).toEqual([{ systemPrompt: "hi" }]);
   });
 });

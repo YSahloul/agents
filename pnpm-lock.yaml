@@ -4508,6 +4508,9 @@ importers:
         specifier: '>=0.3.3 <1.0.0'
         version: link:../../packages/voice
     devDependencies:
+      agents:
+        specifier: workspace:*
+        version: link:../../packages/agents
       vitest:
         specifier: '*'
         version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.0.1)(@vitest/browser-playwright@4.1.9)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.0.1)(typescript@6.0.3))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))

@@ -21,6 +21,8 @@ export {
   TestMissingSFUConfigAgent
 } from "./agents/sfu-voice";
 
+export { TestVoiceAgentFactory } from "./agents/voice-agent-factory";
+
 export type Env = {
   TestVoiceAgent: DurableObjectNamespace;
   TestPersistentVoiceAgent: DurableObjectNamespace;
@@ -34,6 +36,7 @@ export type Env = {
   TestRejectCallVoiceInputAgent: DurableObjectNamespace;
   TestSFUVoiceAgent: DurableObjectNamespace;
   TestMissingSFUConfigAgent: DurableObjectNamespace;
+  TestVoiceAgentFactory: DurableObjectNamespace;
 };
 
 export default {
