@@ -1,33 +1,46 @@
 import { t as VOICE_PROTOCOL_VERSION } from "./types-RutX7tlR.js";
 import { TextSegmentJoiner } from "agents/chat";
+import { Decoder } from "minimp3-wasm";
+import mp3DecoderModule from "minimp3-wasm/dist/decoder.opt.wasm";
+import { RpcTarget } from "cloudflare:workers";
 //#region src/sentence-chunker.ts
 /**
-* Sentence chunker — accumulates streaming text and yields complete sentences.
+* Sentence chunker — accumulates streaming text and yields speech-ready chunks.
 *
-* Isolated and testable: no dependencies on the voice pipeline, Agent, or AI APIs.
-* Feed it tokens via `add()`, get back sentences via the return value.
-* Call `flush()` at end-of-stream to get any remaining text.
+* By default it emits complete sentences. A finite `maxChunkLength` also emits
+* bounded phrases at clause or word boundaries, allowing TTS to start while a
+* long sentence is still being generated.
 *
-* Current implementation: splits on sentence-ending punctuation (. ! ?) followed
-* by a space or end-of-input. This is intentionally simple — optimize later with
-* better heuristics (abbreviations, decimal numbers, quoted speech, etc.).
+* Isolated and testable: no dependencies on the voice pipeline, Agent, or AI
+* APIs. Feed it tokens via `add()`, get back chunks via the return value. Call
+* `flush()` at end-of-stream to get any remaining text.
 */
-/**
-* Punctuation characters that can end a sentence.
-*/
-const SENTENCE_TERMINATORS = /* @__PURE__ */ new Set([
-	".",
-	"!",
-	"?"
-]);
+const SENTENCE_TERMINATORS = {
+	".": true,
+	"!": true,
+	"?": true
+};
+const CLAUSE_TERMINATORS = {
+	",": true,
+	";": true,
+	":": true,
+	"—": true
+};
 /**
 * Minimum character count before we'll emit a sentence.
 * Prevents emitting fragments like "Dr." or "U.S." as standalone sentences,
 * while still allowing short responses like "Sure thing!" to stream quickly.
 */
 const MIN_SENTENCE_LENGTH = 10;
+const MIN_PHRASE_LENGTH = 24;
 var SentenceChunker = class {
 	#buffer = "";
+	/**
+	* @param maxChunkLength Maximum phrase length. Omit to split only sentences.
+	*/
+	constructor(maxChunkLength = Number.POSITIVE_INFINITY) {
+		this.maxChunkLength = maxChunkLength;
+	}
 	/**
 	* Add a chunk of text (e.g. a streamed LLM token).
 	* Returns an array of complete sentences extracted from the buffer.
@@ -54,15 +67,7 @@ var SentenceChunker = class {
 	reset() {
 		this.#buffer = "";
 	}
-	/**
-	* Extract complete sentences from the buffer.
-	* A sentence boundary is a terminator (. ! ?) followed by:
-	* - a space and an uppercase letter (start of next sentence)
-	* - a space and end of current buffer (likely a boundary)
-	* - end of buffer after the terminator
-	*
-	* We leave ambiguous cases in the buffer until more text arrives.
-	*/
+	/** Extract every speech-ready chunk currently buffered. */
 	#extractSentences() {
 		const sentences = [];
 		while (true) {
@@ -74,20 +79,27 @@ var SentenceChunker = class {
 		}
 		return sentences;
 	}
-	/**
-	* Find the index of the end of the first complete sentence in the buffer.
-	* Returns -1 if no complete sentence boundary is found.
-	*/
+	/** Return the inclusive end index of the next speech-ready chunk. */
 	#findSentenceBoundary() {
+		let sentenceBoundary = -1;
 		for (let i = 0; i < this.#buffer.length; i++) {
-			const char = this.#buffer[i];
-			if (!SENTENCE_TERMINATORS.has(char)) continue;
+			if (!SENTENCE_TERMINATORS[this.#buffer[i]]) continue;
 			const nextChar = this.#buffer[i + 1];
-			if (nextChar === void 0) continue;
-			if (nextChar === " " || nextChar === "\n") {
-				if (this.#buffer.slice(0, i + 1).trim().length >= MIN_SENTENCE_LENGTH) return i;
+			const candidate = this.#buffer.slice(0, i + 1).trim();
+			if (candidate.length >= MIN_SENTENCE_LENGTH && (nextChar === " " || nextChar === "\n")) {
+				sentenceBoundary = i;
+				break;
+			}
+			if (nextChar === void 0 && Number.isFinite(this.maxChunkLength) && candidate.length <= this.maxChunkLength && candidate.length >= MIN_SENTENCE_LENGTH) {
+				sentenceBoundary = i;
+				break;
 			}
 		}
+		if (sentenceBoundary !== -1 && sentenceBoundary + 1 <= this.maxChunkLength) return sentenceBoundary;
+		if (this.#buffer.length < this.maxChunkLength) return -1;
+		const limit = Math.min(this.maxChunkLength - 1, this.#buffer.length - 1);
+		for (let i = limit; i >= MIN_PHRASE_LENGTH; i--) if (CLAUSE_TERMINATORS[this.#buffer[i]] && (this.#buffer[i + 1] === " " || this.#buffer[i + 1] === "\n" || this.#buffer[i + 1] === void 0)) return i;
+		for (let i = limit; i >= MIN_PHRASE_LENGTH; i--) if (this.#buffer[i] === " " || this.#buffer[i] === "\n") return i - 1;
 		return -1;
 	}
 };
@@ -381,6 +393,165 @@ var AudioConnectionManager = class {
 	}
 };
 //#endregion
+//#region src/audio-converters.ts
+function normalizePcm16(input, inputRate, inputChannels, outputRate, outputChannels, final) {
+	const inputFrames = Math.floor(input.length / inputChannels);
+	if (inputFrames === 0) return /* @__PURE__ */ new Int16Array();
+	const completeOutputFrames = Math.floor(inputFrames * outputRate / inputRate);
+	const outputFrames = final ? completeOutputFrames : Math.min(completeOutputFrames, Math.ceil((inputFrames - 1) * outputRate / inputRate));
+	const output = new Int16Array(outputFrames * outputChannels);
+	const ratio = inputRate / outputRate;
+	const sampleAt = (frame, channel) => {
+		if (outputChannels === 1) {
+			let sum = 0;
+			for (let i = 0; i < inputChannels; i++) sum += input[frame * inputChannels + i] ?? 0;
+			return sum / inputChannels;
+		}
+		if (inputChannels === 1) return input[frame] ?? 0;
+		return input[frame * inputChannels + channel] ?? 0;
+	};
+	for (let frame = 0; frame < outputFrames; frame++) {
+		const sourceIndex = frame * ratio;
+		const low = Math.floor(sourceIndex);
+		const high = Math.min(low + 1, inputFrames - 1);
+		const fraction = sourceIndex - low;
+		for (let channel = 0; channel < outputChannels; channel++) output[frame * outputChannels + channel] = Math.round(sampleAt(low, channel) * (1 - fraction) + sampleAt(high, channel) * fraction);
+	}
+	return output;
+}
+/**
+* Incrementally decodes an MP3 byte stream to signed little-endian PCM16.
+*
+* Each instance handles one MP3 stream. It can preserve the MP3's native
+* sample rate and channel count or normalize both for a transport.
+*/
+var StreamingMp3ToPcm16 = class StreamingMp3ToPcm16 {
+	#chunks = [];
+	#byteLength = 0;
+	#emittedSamples = 0;
+	#finished = false;
+	#inputRate;
+	#inputChannels;
+	#outputRate;
+	#outputChannels;
+	constructor(wasm, options) {
+		this.wasm = wasm;
+		this.options = options;
+	}
+	static async create(options = {}) {
+		if (options.sampleRate !== void 0 && (!Number.isInteger(options.sampleRate) || options.sampleRate <= 0)) throw new Error("MP3 PCM output sampleRate must be a positive integer");
+		return new StreamingMp3ToPcm16((await WebAssembly.instantiate(mp3DecoderModule, {})).exports, options);
+	}
+	push(chunk) {
+		if (this.#finished) throw new Error("Cannot push MP3 data after finishing the stream");
+		if (chunk.byteLength === 0) return null;
+		this.#chunks.push(chunk);
+		this.#byteLength += chunk.byteLength;
+		return this.#decode(false);
+	}
+	finish() {
+		if (this.#finished) return null;
+		this.#finished = true;
+		return this.#decode(true);
+	}
+	#decode(final) {
+		if (this.#byteLength === 0) return null;
+		const mp3 = new Uint8Array(this.#byteLength);
+		let offset = 0;
+		for (const buffered of this.#chunks) {
+			mp3.set(buffered, offset);
+			offset += buffered.byteLength;
+		}
+		const result = new Decoder(this.wasm, mp3).decode(Number.POSITIVE_INFINITY);
+		if (result.samplingRate === 0 || result.numChannels === 0 || result.numSamples === 0) return null;
+		if (this.#inputRate !== void 0 && this.#inputRate !== result.samplingRate || this.#inputChannels !== void 0 && this.#inputChannels !== result.numChannels) throw new Error("MP3 stream changed its sample rate or channel count");
+		this.#inputRate = result.samplingRate;
+		this.#inputChannels = result.numChannels;
+		this.#outputRate ??= this.options.sampleRate ?? result.samplingRate;
+		this.#outputChannels ??= this.options.channels ?? result.numChannels;
+		const normalized = normalizePcm16(result.pcm, this.#inputRate, this.#inputChannels, this.#outputRate, this.#outputChannels, final);
+		if (normalized.length <= this.#emittedSamples) return null;
+		const audio = new Uint8Array(normalized.buffer, this.#emittedSamples * Int16Array.BYTES_PER_ELEMENT).slice();
+		this.#emittedSamples = normalized.length;
+		return {
+			audio,
+			sampleRate: this.#outputRate,
+			channels: this.#outputChannels
+		};
+	}
+};
+/** Configure reusable MP3-to-mono-PCM16 conversion for provider composition. */
+function mp3ToPcm16(options) {
+	return {
+		inputFormat: "mp3",
+		outputFormat: "pcm16",
+		sampleRate: options.sampleRate,
+		async createStream() {
+			const converter = await StreamingMp3ToPcm16.create({
+				sampleRate: options.sampleRate,
+				channels: 1
+			});
+			return {
+				push: (chunk) => converter.push(chunk)?.audio ?? null,
+				finish: () => converter.finish()?.audio ?? null
+			};
+		}
+	};
+}
+function hasStreamingAudio(provider) {
+	return "synthesizeStream" in provider && typeof provider.synthesizeStream === "function";
+}
+function hasStreamingText(provider) {
+	return "synthesizeTextStream" in provider && typeof provider.synthesizeTextStream === "function";
+}
+async function* convertAudio(source, converter) {
+	const stream = await converter.createStream();
+	for await (const chunk of source) {
+		const converted = stream.push(new Uint8Array(chunk));
+		if (converted) yield converted.slice().buffer;
+	}
+	const final = stream.finish();
+	if (final) yield final.slice().buffer;
+}
+async function* oneChunk(audio) {
+	const chunk = await audio;
+	if (chunk) yield chunk;
+}
+async function collectAudio(source) {
+	const chunks = [];
+	let byteLength = 0;
+	for await (const chunk of source) {
+		const bytes = new Uint8Array(chunk);
+		chunks.push(bytes);
+		byteLength += bytes.byteLength;
+	}
+	if (chunks.length === 0) return null;
+	const output = new Uint8Array(byteLength);
+	let offset = 0;
+	for (const chunk of chunks) {
+		output.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return output.buffer;
+}
+/**
+* Wrap any TTS provider with an injected audio converter.
+*
+* A fresh converter stream is created for every synthesis call, so providers
+* remain stateless and concurrent calls do not share codec state.
+*/
+function convertTTSProvider({ provider, converter }) {
+	if (provider.audioFormat !== void 0 && provider.audioFormat !== converter.inputFormat) throw new Error(`TTS provider emits ${provider.audioFormat}; converter expects ${converter.inputFormat}`);
+	const converted = {
+		audioFormat: converter.outputFormat,
+		sampleRate: converter.sampleRate,
+		synthesize: (text, signal) => collectAudio(convertAudio(hasStreamingAudio(provider) ? provider.synthesizeStream(text, signal) : oneChunk(provider.synthesize(text, signal)), converter)),
+		synthesizeStream: (text, signal) => convertAudio(hasStreamingAudio(provider) ? provider.synthesizeStream(text, signal) : oneChunk(provider.synthesize(text, signal)), converter)
+	};
+	if (hasStreamingText(provider)) converted.synthesizeTextStream = (text, signal) => convertAudio(provider.synthesizeTextStream(text, signal), converter);
+	return converted;
+}
+//#endregion
 //#region src/voice-input.ts
 /**
 * Voice-to-text input mixin. Adds STT-only voice input to an Agent class.
@@ -459,7 +630,7 @@ function withVoiceInput(Base) {
 					switch (parsed.type) {
 						case "hello": break;
 						case "start_call":
-							runBackground("start_call", () => this.#handleStartCall(connection));
+							runBackground("start_call", () => this.#handleStartCall(connection, parsed.resumed === true));
 							break;
 						case "end_call":
 							runBackground("end_call", () => this.#handleEndCall(connection));
@@ -486,13 +657,13 @@ function withVoiceInput(Base) {
 		beforeCallStart(_connection) {
 			return true;
 		}
-		onCallStart(_connection) {}
+		onCallStart(_connection, _context) {}
 		onCallEnd(_connection) {}
 		onInterrupt(_connection) {}
 		afterTranscribe(transcript, _connection) {
 			return transcript;
 		}
-		async #handleStartCall(connection) {
+		async #handleStartCall(connection, resumed = false) {
 			if (this.#cm.isInCall(connection.id)) return;
 			const startupToken = Symbol(connection.id);
 			this.#startupTokens.set(connection.id, startupToken);
@@ -538,7 +709,7 @@ function withVoiceInput(Base) {
 				type: "status",
 				status: "listening"
 			}, "VoiceInput");
-			await this.onCallStart(connection);
+			await this.onCallStart(connection, { resumed });
 		}
 		#isCurrentStartup(connectionId, startupToken) {
 			return this.#startupTokens.get(connectionId) === startupToken && this.#cm.isInCall(connectionId);
@@ -613,6 +784,152 @@ function withVoiceInput(Base) {
 		}
 	}
 	return VoiceInputMixin;
+}
+//#endregion
+//#region src/rpc-voice.ts
+/**
+* RPC callback for streaming text from any remote agent into Voice.
+*
+* Targets that emit JSON-serialized AI SDK stream events can call `onEvent()`.
+* Other targets can call `onText()` directly.
+*/
+var VoiceRpcCallback = class extends RpcTarget {
+	#onRequestId;
+	#textSegmentJoiner = new TextSegmentJoiner();
+	#chunks = [];
+	#wakeups = [];
+	#requestId;
+	#closed = false;
+	#interrupted = false;
+	#error;
+	#text = "";
+	constructor(options = {}) {
+		super();
+		this.#onRequestId = options.onRequestId;
+	}
+	onStart(event) {
+		this.#requestId = event.requestId;
+		this.#onRequestId?.(event.requestId);
+	}
+	/** Stream a plain text delta from a custom RPC target. */
+	onText(text) {
+		if (this.#closed || !text) return;
+		this.#text += text;
+		this.#chunks.push(text);
+		this.#wake();
+	}
+	/** Consume a JSON-serialized AI SDK stream event. */
+	onEvent(json) {
+		const chunk = streamChunkFromJson(json);
+		if (!chunk || this.#closed) return;
+		for (const event of this.#textSegmentJoiner.pushChunk(chunk)) if (event.type === "text") this.onText(event.text);
+	}
+	onDone() {
+		this.close();
+	}
+	onError(error) {
+		this.fail(new Error(error));
+	}
+	onInterrupted() {
+		this.#interrupted = true;
+		this.close();
+	}
+	requestId() {
+		return this.#requestId;
+	}
+	hasText() {
+		return this.#text.trim().length > 0;
+	}
+	wasInterrupted() {
+		return this.#interrupted;
+	}
+	close() {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#wake();
+	}
+	fail(error) {
+		if (this.#closed) return;
+		this.#error = error instanceof Error ? error : new Error(String(error));
+		this.#closed = true;
+		this.#wake();
+	}
+	async *stream() {
+		while (true) {
+			const next = this.#chunks.shift();
+			if (next !== void 0) {
+				yield next;
+				continue;
+			}
+			if (this.#error) throw this.#error;
+			if (this.#closed) return;
+			await new Promise((resolve) => this.#wakeups.push(resolve));
+		}
+	}
+	#wake() {
+		for (const wake of this.#wakeups.splice(0)) wake();
+	}
+};
+/**
+* Start an RPC-backed agent turn and return its text stream to `withVoice()`.
+*
+* The callback is a Workers `RpcTarget`, so the remote target can stream into
+* it while `run()` remains pending. Aborting the Voice turn closes the local
+* stream immediately and, once available, forwards the request id to
+* `cancel()`.
+*/
+function streamRpcVoiceTurn(options) {
+	const reason = options.interruptionReason ?? "Voice turn interrupted";
+	let cancelStarted = false;
+	let aborted = options.signal.aborted;
+	const cancelRemote = (requestId) => {
+		if (!options.cancel || cancelStarted) return;
+		cancelStarted = true;
+		Promise.resolve().then(() => options.cancel?.(requestId, reason)).catch((error) => {
+			console.error("[voice] RPC turn cancellation failed", error);
+		});
+	};
+	const callback = new VoiceRpcCallback({ onRequestId(requestId) {
+		options.onRequestId?.(requestId);
+		if (aborted) cancelRemote(requestId);
+	} });
+	const abort = () => {
+		aborted = true;
+		callback.close();
+		const requestId = callback.requestId();
+		if (requestId) cancelRemote(requestId);
+	};
+	options.signal.addEventListener("abort", abort, { once: true });
+	let completion;
+	if (aborted) {
+		callback.close();
+		completion = Promise.resolve();
+	} else try {
+		completion = options.run(callback);
+	} catch (error) {
+		callback.fail(error);
+		completion = Promise.resolve();
+	}
+	completion.then(() => callback.close(), (error) => callback.fail(error));
+	return (async function* () {
+		try {
+			yield* callback.stream();
+			if (aborted) return;
+			await completion;
+			if (callback.wasInterrupted()) throw new Error(reason);
+			if (!callback.hasText() && options.emptyResponse) yield options.emptyResponse;
+		} finally {
+			options.signal.removeEventListener("abort", abort);
+		}
+	})();
+}
+function streamChunkFromJson(json) {
+	try {
+		const chunk = JSON.parse(json);
+		return typeof chunk === "object" && chunk !== null ? chunk : null;
+	} catch {
+		return null;
+	}
 }
 //#endregion
 //#region src/sfu-utils.ts
@@ -768,13 +1085,14 @@ async function createSFUSession(config) {
 function addSFUTracks(config, sessionId, body) {
 	return requestSFU(config, "add tracks", `/sessions/${sessionId}/tracks/new`, "POST", body);
 }
-async function renegotiateSFUSession(config, sessionId, sdp) {
-	const result = await requestSFU(config, "renegotiate session", `/sessions/${sessionId}/renegotiate`, "PUT", { sessionDescription: {
-		type: "offer",
-		sdp
-	} });
-	if (typeof result !== "object" || result === null || !("sessionDescription" in result) || typeof result.sessionDescription !== "object" || result.sessionDescription === null || !("sdp" in result.sessionDescription) || typeof result.sessionDescription.sdp !== "string") throw new Error("SFU renegotiate session response missing sessionDescription.sdp");
-	return result;
+function updateSFUTracks(config, sessionId, body) {
+	return requestSFU(config, "update tracks", `/sessions/${sessionId}/tracks/update`, "PUT", body);
+}
+function getSFUSession(config, sessionId) {
+	return requestSFU(config, "get session", `/sessions/${sessionId}`, "GET");
+}
+function renegotiateSFUSession(config, sessionId, sessionDescription) {
+	return requestSFU(config, "renegotiate session", `/sessions/${sessionId}/renegotiate`, "PUT", { sessionDescription });
 }
 function createSFUWebSocketAdapter(config, tracks) {
 	return requestSFU(config, "create WebSocket adapter", "/adapters/websocket/new", "POST", { tracks });
@@ -798,8 +1116,10 @@ async function closeSFUWebSocketAdapter(config, adapterId) {
 }
 //#endregion
 //#region src/sfu-transport.ts
-const FRAME_BYTES$1 = 3840;
+const FRAME_BYTES = 3840;
 const FRAME_INTERVAL_MS = 20;
+const GRACE_PERIOD_MS = 3e4;
+const KEEPALIVE_INTERVAL_MS = 2e4;
 function errorMessage(error) {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -822,7 +1142,10 @@ var SFUVoiceTransport = class {
 	#sttPeak = 0;
 	#queue = [];
 	#partialFrame = /* @__PURE__ */ new Uint8Array();
+	#partialInputByte = null;
 	#pacingTimer = null;
+	#suspendTimer = null;
+	#keepaliveTimer = null;
 	constructor(options) {
 		this.#config = options.config;
 		this.#routePrefix = options.routePrefix?.replace(/^\/+|\/+$/g, "") || "voice";
@@ -833,16 +1156,20 @@ var SFUVoiceTransport = class {
 	}
 	async start(connectionId, onAudio) {
 		if (this.#connectionId && this.#connectionId !== connectionId) throw new Error("SFU voice transport already has an active call");
+		this.#clearSuspendTimer();
 		this.#connectionId = connectionId;
 		this.#onAudio = onAudio;
 		this.#sttFrameCount = 0;
 		this.#sttPeak = 0;
+		this.#partialInputByte = null;
+		this.#startKeepalive();
 		try {
 			await this.#waitForTtsSocket(1e4);
 		} catch (error) {
 			if (this.#connectionId === connectionId) {
 				this.#connectionId = null;
 				this.#onAudio = null;
+				this.#clearKeepalive();
 			}
 			throw error;
 		}
@@ -850,15 +1177,28 @@ var SFUVoiceTransport = class {
 	send(connectionId, audio) {
 		this.#requireActiveConnection(connectionId);
 		this.#requireTtsSocket();
-		const converted = resampleMonoTo48kStereo(audio, this.#inputSampleRate);
+		const input = new Uint8Array(audio);
+		let alignedAudio = audio;
+		if (this.#partialInputByte !== null) {
+			const combined = new Uint8Array(input.byteLength + 1);
+			combined[0] = this.#partialInputByte;
+			combined.set(input, 1);
+			const alignedLength = combined.byteLength - combined.byteLength % 2;
+			this.#partialInputByte = alignedLength < combined.byteLength ? combined[alignedLength] : null;
+			alignedAudio = combined.slice(0, alignedLength).buffer;
+		} else if (input.byteLength % 2 !== 0) {
+			this.#partialInputByte = input[input.byteLength - 1];
+			alignedAudio = input.slice(0, -1).buffer;
+		}
+		const converted = resampleMonoTo48kStereo(alignedAudio, this.#inputSampleRate);
 		if (converted.byteLength === 0) return;
 		const combined = new Uint8Array(this.#partialFrame.byteLength + converted.byteLength);
 		combined.set(this.#partialFrame);
 		combined.set(converted, this.#partialFrame.byteLength);
 		let offset = 0;
-		while (combined.byteLength - offset >= FRAME_BYTES$1) {
-			this.#queue.push(combined.slice(offset, offset + FRAME_BYTES$1));
-			offset += FRAME_BYTES$1;
+		while (combined.byteLength - offset >= FRAME_BYTES) {
+			this.#queue.push(combined.slice(offset, offset + FRAME_BYTES));
+			offset += FRAME_BYTES;
 		}
 		this.#partialFrame = combined.slice(offset);
 		this.#startPacing();
@@ -866,8 +1206,9 @@ var SFUVoiceTransport = class {
 	flush(connectionId) {
 		this.#requireActiveConnection(connectionId);
 		this.#requireTtsSocket();
+		this.#partialInputByte = null;
 		if (this.#partialFrame.byteLength > 0) {
-			const frame = new Uint8Array(FRAME_BYTES$1);
+			const frame = new Uint8Array(FRAME_BYTES);
 			frame.set(this.#partialFrame);
 			this.#queue.push(frame);
 			this.#partialFrame = /* @__PURE__ */ new Uint8Array();
@@ -892,6 +1233,7 @@ var SFUVoiceTransport = class {
 		this.#clearPacing();
 		this.#rejectQueue(/* @__PURE__ */ new Error("SFU output interrupted"));
 		this.#partialFrame = /* @__PURE__ */ new Uint8Array();
+		this.#partialInputByte = null;
 		socket.send(encodePayloadToProtobuf(/* @__PURE__ */ new Uint8Array()));
 		console.log("[VoiceTrace]", {
 			event: "sfu_interrupt",
@@ -900,24 +1242,69 @@ var SFUVoiceTransport = class {
 		});
 	}
 	async stop(connectionId) {
+		this.#clearSuspendTimer();
 		if (this.#connectionId !== connectionId) return;
 		this.#connectionId = null;
 		this.#onAudio = null;
+		await this.#teardown();
+	}
+	suspend(connectionId) {
+		if (this.#connectionId !== connectionId) return;
+		if (this.#suspendTimer) return;
+		this.#connectionId = null;
+		this.#onAudio = null;
+		this.#clearKeepalive();
+		this.#suspendTimer = setTimeout(() => {
+			this.#suspendTimer = null;
+			this.#teardown();
+		}, GRACE_PERIOD_MS);
+	}
+	async resume(connectionId, onAudio) {
+		this.#clearSuspendTimer();
+		this.#connectionId = connectionId;
+		this.#onAudio = onAudio;
+		this.#startKeepalive();
+		const state = await this.#loadState();
+		if (state?.stt && !state.stt.adapterId) await this.#startSttForwarding();
+		await this.#waitForTtsSocket(1e4);
+	}
+	async #teardown() {
 		this.#clearPacing();
+		this.#clearKeepalive();
 		this.#rejectQueue(/* @__PURE__ */ new Error("SFU voice transport stopped"));
 		this.#partialFrame = /* @__PURE__ */ new Uint8Array();
+		this.#partialInputByte = null;
 		this.#rejectSocketWaiters(/* @__PURE__ */ new Error("SFU voice transport stopped"));
+		const adapterIds = [];
+		await this.#updateState((state) => {
+			for (const adapterId of [state?.tts?.adapterId, state?.stt?.adapterId]) if (adapterId) adapterIds.push(adapterId);
+			return null;
+		});
+		await Promise.all(adapterIds.map((adapterId) => this.#closeAdapter(adapterId)));
 		if (this.#ttsSocket) {
 			this.#ttsSocket.close(1e3, "Voice stopped");
 			this.#ttsSocket = null;
 		}
 		for (const socket of this.#sttSockets) socket.close(1e3, "Voice stopped");
 		this.#sttSockets.clear();
-		await this.#stateWrite;
-		const state = await this.#loadState();
-		const adapterIds = [state?.tts?.adapterId, state?.stt?.adapterId].filter((adapterId) => typeof adapterId === "string");
-		await Promise.all(adapterIds.map((adapterId) => this.#closeAdapter(adapterId)));
-		await this.#replaceState(null);
+	}
+	#startKeepalive() {
+		if (this.#keepaliveTimer) return;
+		this.#keepaliveTimer = setInterval(() => {
+			const socket = this.#ttsSocket;
+			if (!socket || socket.readyState !== WebSocket.OPEN) return;
+			if (this.#queue.length === 0) socket.send(encodePayloadToProtobuf(new Uint8Array(FRAME_BYTES)));
+		}, KEEPALIVE_INTERVAL_MS);
+	}
+	#clearKeepalive() {
+		if (!this.#keepaliveTimer) return;
+		clearInterval(this.#keepaliveTimer);
+		this.#keepaliveTimer = null;
+	}
+	#clearSuspendTimer() {
+		if (!this.#suspendTimer) return;
+		clearTimeout(this.#suspendTimer);
+		this.#suspendTimer = null;
 	}
 	handleWebSocketUpgrade(request) {
 		if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return null;
@@ -930,9 +1317,9 @@ var SFUVoiceTransport = class {
 		if (request.method !== "POST") return null;
 		const path = new URL(request.url).pathname;
 		if (path.endsWith(this.#route("tts/publish"))) return this.#respond("TTS publish", () => this.#publishTts(request));
-		if (path.endsWith(this.#route("tts/connect"))) return this.#respond("TTS connect", () => this.#connectTts(request));
-		if (path.endsWith(this.#route("tts/renegotiate"))) return this.#respond("TTS renegotiate", () => this.#renegotiateTts(request));
-		if (path.endsWith(this.#route("stt/connect"))) return this.#respond("STT connect", () => this.#connectStt(request));
+		if (path.endsWith(this.#route("rtc/connect"))) return this.#respond("RTC connect", () => this.#connectRtc(request));
+		if (path.endsWith(this.#route("rtc/pull"))) return this.#respond("RTC pull", () => this.#pullTts());
+		if (path.endsWith(this.#route("rtc/renegotiate"))) return this.#respond("RTC renegotiate", () => this.#renegotiateRtc(request));
 		if (path.endsWith(this.#route("stt/start-forwarding"))) return this.#respond("STT start forwarding", () => this.#startSttForwarding());
 		if (path.endsWith(this.#route("stt/stop-forwarding"))) return this.#respond("STT stop forwarding", () => this.#stopSttForwarding());
 		return null;
@@ -946,11 +1333,12 @@ var SFUVoiceTransport = class {
 		}
 	}
 	async #publishTts(request) {
-		const state = await this.#loadState();
-		if (state?.tts?.adapterId) {
-			await this.#updateState((current) => current?.stt ? { stt: current.stt } : null);
-			await this.#closeAdapter(state.tts.adapterId);
-		}
+		let previousAdapterId;
+		await this.#updateState((state) => {
+			previousAdapterId = state?.tts?.adapterId;
+			return state?.stt ? { stt: state.stt } : null;
+		});
+		if (previousAdapterId) await this.#closeAdapter(previousAdapterId);
 		const callbackUrl = this.#callbackUrl(request, "tts/publish", "tts/subscribe");
 		const MAX_ATTEMPTS = 3;
 		for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -975,6 +1363,7 @@ var SFUVoiceTransport = class {
 			}));
 			try {
 				await this.#waitForTtsSocket(5e3);
+				this.#requireTtsSocket().send(encodePayloadToProtobuf(new Uint8Array(FRAME_BYTES)));
 				return Response.json({
 					...response,
 					sessionId: firstTrack.sessionId,
@@ -994,65 +1383,61 @@ var SFUVoiceTransport = class {
 		}
 		throw new Error("SFU TTS callback timeout after all retry attempts");
 	}
-	async #connectTts(request) {
-		const state = await this.#loadState();
-		if (!state?.tts) return new Response("TTS not published yet", { status: 400 });
-		const description = await this.#readSessionDescription(request);
-		if (!description) return new Response("Missing sessionDescription.sdp", { status: 400 });
-		const { sessionId: playerSessionId } = await createSFUSession(this.#config);
-		const result = await addSFUTracks(this.#config, playerSessionId, {
-			sessionDescription: description,
+	async #connectRtc(request) {
+		const connect = await this.#readRtcConnect(request);
+		if (!connect) return new Response("Missing sessionDescription.sdp or microphoneMid", { status: 400 });
+		const { sessionId } = await createSFUSession(this.#config);
+		const microphoneTrackName = `stt-${crypto.randomUUID()}`;
+		const result = await addSFUTracks(this.#config, sessionId, {
+			sessionDescription: connect.sessionDescription,
 			tracks: [{
-				location: "remote",
-				sessionId: state.tts.sessionId,
-				trackName: state.tts.trackName,
+				location: "local",
+				mid: connect.microphoneMid,
+				trackName: microphoneTrackName,
 				kind: "audio"
 			}]
 		});
-		const response = this.#asResponse(result, "connect TTS track");
-		if (!this.#normalizeSessionDescription(response) && response.requiresImmediateRenegotiation !== true) throw new Error("SFU connect TTS track response missing sessionDescription.sdp or requiresImmediateRenegotiation");
-		await this.#updateState((current) => {
-			if (!current?.tts) return current;
-			return {
-				...current,
-				tts: {
-					...current.tts,
-					playerSessionId
-				}
-			};
-		});
-		return Response.json(response);
-	}
-	async #renegotiateTts(request) {
-		const state = await this.#loadState();
-		if (!state?.tts?.playerSessionId) return new Response("No player session to renegotiate. Call connect first.", { status: 400 });
-		const description = await this.#readSessionDescription(request);
-		if (!description) return new Response("Missing sessionDescription.sdp", { status: 400 });
-		const result = await renegotiateSFUSession(this.#config, state.tts.playerSessionId, description.sdp);
-		return Response.json(result);
-	}
-	async #connectStt(request) {
-		const description = await this.#readSessionDescription(request);
-		if (!description) return new Response("Missing sessionDescription.sdp", { status: 400 });
-		const { sessionId } = await createSFUSession(this.#config);
-		const result = await addSFUTracks(this.#config, sessionId, {
-			autoDiscover: true,
-			sessionDescription: description
-		});
-		const response = this.#asResponse(result, "connect STT track");
-		if (!this.#normalizeSessionDescription(response)) throw new Error("SFU connect STT track response missing sessionDescription.sdp");
-		const audioTrack = (Array.isArray(response.tracks) ? response.tracks : []).find((track) => typeof track === "object" && track !== null && "trackName" in track && (track.kind === "audio" || !("kind" in track)));
-		if (typeof audioTrack !== "object" || audioTrack === null || !("trackName" in audioTrack) || typeof audioTrack.trackName !== "string") throw new Error("SFU connect STT track response missing audio trackName");
-		const callbackUrl = this.#callbackUrl(request, "stt/connect", "stt/sfu-subscribe");
+		const response = this.#asResponse(result, "connect RTC session");
+		if (!this.#normalizeSessionDescription(response)) throw new Error("SFU connect RTC session response missing sessionDescription.sdp");
+		const callbackUrl = this.#callbackUrl(request, "rtc/connect", "stt/sfu-subscribe");
 		await this.#updateState((current) => ({
 			...current ?? {},
 			stt: {
 				sessionId,
-				trackName: audioTrack.trackName,
+				trackName: microphoneTrackName,
 				callbackUrl
 			}
 		}));
 		return Response.json(response);
+	}
+	async #pullTts() {
+		const state = await this.#loadState();
+		if (!state?.tts) return new Response("TTS not published yet", { status: 400 });
+		if (!state.stt) return new Response("RTC session not connected yet", { status: 400 });
+		for (let attempt = 0;; attempt++) {
+			const result = await addSFUTracks(this.#config, state.stt.sessionId, { tracks: [{
+				location: "remote",
+				sessionId: state.tts.sessionId,
+				trackName: state.tts.trackName,
+				kind: "audio"
+			}] });
+			const response = this.#asResponse(result, "pull TTS track");
+			const firstTrack = this.#firstTrack(response, "pull TTS track");
+			if (!("errorCode" in firstTrack)) return Response.json(response);
+			if (firstTrack.errorCode === "empty_track_error" && attempt < 4) {
+				await new Promise((resolve) => setTimeout(resolve, FRAME_INTERVAL_MS * (attempt + 1)));
+				continue;
+			}
+			throw new Error(`SFU pull TTS track failed: ${String(firstTrack.errorCode)}`);
+		}
+	}
+	async #renegotiateRtc(request) {
+		const state = await this.#loadState();
+		if (!state?.stt?.sessionId) return new Response("No RTC session to renegotiate. Call connect first.", { status: 400 });
+		const description = await this.#readSessionDescription(request);
+		if (!description) return new Response("Missing sessionDescription.sdp", { status: 400 });
+		const result = await renegotiateSFUSession(this.#config, state.stt.sessionId, description);
+		return Response.json(result);
 	}
 	async #startSttForwarding() {
 		const state = await this.#loadState();
@@ -1081,18 +1466,18 @@ var SFUVoiceTransport = class {
 		return new Response("Forwarding started");
 	}
 	async #stopSttForwarding() {
-		const state = await this.#loadState();
-		if (!state?.stt?.adapterId) return new Response("Forwarding not active");
-		const adapterId = state.stt.adapterId;
-		await this.#updateState((current) => {
-			if (!current?.stt) return current;
-			const stt = { ...current.stt };
+		let adapterId;
+		await this.#updateState((state) => {
+			adapterId = state?.stt?.adapterId;
+			if (!state?.stt || !adapterId) return state;
+			const stt = { ...state.stt };
 			delete stt.adapterId;
 			return {
-				...current,
+				...state,
 				stt
 			};
 		});
+		if (!adapterId) return new Response("Forwarding not active");
 		await this.#closeAdapter(adapterId);
 		return new Response("Forwarding stopped");
 	}
@@ -1210,6 +1595,7 @@ var SFUVoiceTransport = class {
 		this.#clearPacing();
 		this.#rejectQueue(/* @__PURE__ */ new Error("SFU TTS socket closed"));
 		this.#partialFrame = /* @__PURE__ */ new Uint8Array();
+		this.#partialInputByte = null;
 	}
 	#requireActiveConnection(connectionId) {
 		if (this.#connectionId !== connectionId) throw new Error("SFU voice transport connection is not active");
@@ -1273,6 +1659,22 @@ var SFUVoiceTransport = class {
 		});
 		this.#stateWrite = write.catch(() => {});
 		return write;
+	}
+	async #readRtcConnect(request) {
+		let body;
+		try {
+			body = await request.json();
+		} catch {
+			return null;
+		}
+		if (typeof body !== "object" || body === null || !("sessionDescription" in body) || typeof body.sessionDescription !== "object" || body.sessionDescription === null || !("sdp" in body.sessionDescription) || typeof body.sessionDescription.sdp !== "string" || body.sessionDescription.sdp.length === 0 || !("microphoneMid" in body) || typeof body.microphoneMid !== "string" || body.microphoneMid.length === 0) return null;
+		return {
+			sessionDescription: {
+				type: "type" in body.sessionDescription && typeof body.sessionDescription.type === "string" ? body.sessionDescription.type : void 0,
+				sdp: body.sessionDescription.sdp
+			},
+			microphoneMid: body.microphoneMid
+		};
 	}
 	async #readSessionDescription(request) {
 		let body;
@@ -1348,9 +1750,9 @@ function withSFUVoice(Base, options) {
 				const path = new URL(request.url).pathname;
 				if (request.method === "POST" && [
 					"tts/publish",
-					"tts/connect",
-					"tts/renegotiate",
-					"stt/connect",
+					"rtc/connect",
+					"rtc/pull",
+					"rtc/renegotiate",
 					"stt/start-forwarding",
 					"stt/stop-forwarding"
 				].some((operation) => path.endsWith(`/${normalizedPrefix}/${operation}`))) {
@@ -1385,6 +1787,13 @@ function withSFUVoice(Base, options) {
 //#endregion
 //#region src/workers-ai-providers.ts
 /**
+* Workers AI provider implementations for the voice pipeline.
+*
+* These are convenience classes that wrap the Workers AI binding
+* (env.AI) for STT and TTS. They are not required — any object
+* satisfying the provider interfaces works.
+*/
+/**
 * Workers AI text-to-speech provider.
 *
 * @example
@@ -1400,81 +1809,119 @@ var WorkersAITTS = class {
 	#speaker;
 	#encoding;
 	#container;
-	#sampleRate;
+	#input;
 	constructor(ai, options) {
 		this.#ai = ai;
 		this.#model = options?.model ?? "@cf/deepgram/aura-1";
 		this.#speaker = options?.speaker ?? "asteria";
 		this.#encoding = options?.encoding;
 		this.#container = options?.container;
-		this.#sampleRate = options?.sampleRate;
+		this.#input = options?.input;
+		this.sampleRate = options?.sampleRate;
+		this.audioFormat = options?.audioFormat ?? (this.#encoding === "linear16" ? "pcm16" : this.#encoding === "mp3" || this.#encoding === "opus" || this.#encoding === "mulaw" ? this.#encoding : this.#container === "wav" ? "wav" : void 0);
 	}
 	async synthesize(text, signal) {
-		const input = {
+		const input = this.#input ? {
+			...this.#input,
+			text
+		} : {
 			text,
-			speaker: this.#speaker
+			speaker: this.#speaker,
+			...this.#encoding !== void 0 ? { encoding: this.#encoding } : {},
+			...this.#container !== void 0 ? { container: this.#container } : {},
+			...this.sampleRate !== void 0 ? { sample_rate: this.sampleRate } : {}
 		};
-		if (this.#encoding !== void 0) input.encoding = this.#encoding;
-		if (this.#container !== void 0) input.container = this.#container;
-		if (this.#sampleRate !== void 0) input.sample_rate = this.#sampleRate;
-		const response = await this.#ai.run(this.#model, input, {
+		const result = await this.#ai.run(this.#model, input, {
 			returnRawResponse: true,
 			...signal ? { signal } : {}
 		});
-		if (!response.ok) {
-			const body = await response.text().catch(() => "");
-			console.error(`[WorkersAITTS] TTS request failed: HTTP ${response.status}${body ? ` — ${body.slice(0, 200)}` : ""}`);
+		return this.#resolveAudio(result, signal);
+	}
+	async #resolveAudio(result, signal) {
+		if (result instanceof Response) {
+			if (!result.ok) {
+				const body = await result.text().catch(() => "");
+				console.error(`[WorkersAITTS] TTS request failed: HTTP ${result.status}${body ? ` — ${body.slice(0, 200)}` : ""}`);
+				return null;
+			}
+			if (!result.headers.get("content-type")?.includes("application/json")) return result.arrayBuffer();
+			result = await result.json();
+		}
+		const audio = extractAudioReference(result);
+		if (!audio) {
+			console.error("[WorkersAITTS] TTS response did not contain audio");
 			return null;
 		}
-		return await response.arrayBuffer();
+		if (audio.startsWith("data:")) return decodeBase64AudioDataUri(audio);
+		const response = await fetch(audio, signal ? { signal } : void 0);
+		if (!response.ok) {
+			console.error(`[WorkersAITTS] Audio download failed: HTTP ${response.status}`);
+			return null;
+		}
+		return response.arrayBuffer();
 	}
 };
+function extractAudioReference(result) {
+	if (!result || typeof result !== "object") return null;
+	if ("audio" in result && typeof result.audio === "string") return result.audio;
+	if ("result" in result && result.result && typeof result.result === "object" && "audio" in result.result && typeof result.result.audio === "string") return result.result.audio;
+	return null;
+}
+function decodeBase64AudioDataUri(uri) {
+	const comma = uri.indexOf(",");
+	if (comma < 0 || !uri.slice(0, comma).includes(";base64")) return null;
+	const decoded = atob(uri.slice(comma + 1));
+	const audio = new Uint8Array(decoded.length);
+	for (let i = 0; i < decoded.length; i++) audio[i] = decoded.charCodeAt(i);
+	return audio.buffer;
+}
 /**
 * Workers AI text-to-speech over the binding's native WebSocket mode
-* (`env.AI.run(model, input, { websocket: true })`), fixed to 8 kHz μ-law —
-* the encoding a phone carrier's wire format expects, so audio forwards
-* byte-for-byte with no resampling.
+* (`env.AI.run(model, input, { websocket: true })`).
 *
 * Implements {@link StreamingTTSProvider}: one socket per sentence, and the
-* generator returning *is* completion. There is no session to keep alive, no
-* Speak/Flush/Clear protocol to reconcile, and no acknowledgement to lose — a
-* socket that dies mid-utterance throws into the caller's `for await` instead
-* of leaving a pending promise nobody settles. Interruption is the consumer
-* abandoning the iterator (or aborting the signal), which closes the socket.
+* generator returning *is* completion. Interruption is the consumer abandoning
+* the iterator (or aborting the signal), which closes the socket.
 *
 * Inherits {@link WorkersAITTS.synthesize} as the non-streaming fallback.
 *
 * @example
 * ```ts
 * class MyAgent extends VoiceAgent<Env> {
-*   tts = new WorkersAIMulawRealtimeTTS(this.env.AI);
+*   tts = new WorkersAIRealtimeTTS(this.env.AI);
 * }
 * ```
 */
-var WorkersAIMulawRealtimeTTS = class extends WorkersAITTS {
+var WorkersAIRealtimeTTS = class extends WorkersAITTS {
 	#ai;
 	#model;
 	#speaker;
+	#encoding;
 	constructor(ai, options) {
 		const model = options?.model ?? "@cf/deepgram/aura-2-en";
 		const speaker = options?.speaker ?? "asteria";
+		const encoding = options?.encoding ?? "mulaw";
+		const sampleRate = options?.sampleRate ?? (encoding === "mulaw" ? 8e3 : 24e3);
+		if (!(encoding === "mulaw" && sampleRate === 8e3 || encoding === "linear16" && sampleRate === 24e3)) throw new Error("Workers AI realtime TTS supports only mulaw/8000 or linear16/24000");
 		super(ai, {
 			model,
 			speaker,
-			encoding: "mulaw",
-			sampleRate: 8e3,
+			encoding,
+			sampleRate,
 			container: "none"
 		});
-		this.audioFormat = "mulaw";
-		this.sampleRate = 8e3;
+		this.audioFormat = encoding === "mulaw" ? "mulaw" : "pcm16";
+		this.sampleRate = sampleRate;
 		this.#ai = ai;
 		this.#model = model;
 		this.#speaker = speaker;
+		this.#encoding = encoding;
 	}
 	async *synthesizeStream(text, signal) {
 		if (!text || signal?.aborted) return;
 		const ws = await this.#open();
-		const frames = new MulawFrameStream();
+		const sampleBytes = this.#encoding === "mulaw" ? 1 : 2;
+		const frames = new AudioFrameStream(this.sampleRate * FRAME_MS * sampleBytes / 1e3, sampleBytes);
 		ws.addEventListener("message", (event) => {
 			if (typeof event.data === "string") {
 				try {
@@ -1490,10 +1937,10 @@ var WorkersAIMulawRealtimeTTS = class extends WorkersAITTS {
 			}
 		});
 		ws.addEventListener("close", (event) => {
-			frames.fail(/* @__PURE__ */ new Error(`Workers AI mulaw TTS socket closed before flush (code ${event.code}${event.reason ? `: ${event.reason}` : ""})`));
+			frames.fail(/* @__PURE__ */ new Error(`Workers AI realtime TTS socket closed before flush (code ${event.code}${event.reason ? `: ${event.reason}` : ""})`));
 		});
 		ws.addEventListener("error", () => {
-			frames.fail(/* @__PURE__ */ new Error("Workers AI mulaw TTS socket error"));
+			frames.fail(/* @__PURE__ */ new Error("Workers AI realtime TTS socket error"));
 		});
 		try {
 			ws.send(JSON.stringify({
@@ -1521,49 +1968,221 @@ var WorkersAIMulawRealtimeTTS = class extends WorkersAITTS {
 	}
 	async #open() {
 		const response = await this.#ai.run(this.#model, {
-			encoding: "mulaw",
-			sample_rate: "8000",
+			encoding: this.#encoding,
+			sample_rate: String(this.sampleRate),
 			speaker: this.#speaker,
 			container: "none"
 		}, { websocket: true });
-		if (!response || typeof response !== "object" || !("webSocket" in response) || !isWebSocket(response.webSocket)) throw new Error("Workers AI mulaw TTS did not return a WebSocket");
+		if (!response || typeof response !== "object" || !("webSocket" in response) || !isWebSocket(response.webSocket)) throw new Error("Workers AI realtime TTS did not return a WebSocket");
 		const ws = response.webSocket;
 		ws.accept();
 		ws.binaryType = "arraybuffer";
 		return ws;
 	}
 };
-/** 20 ms of 8 kHz μ-law. */
-const FRAME_BYTES = 160;
+/**
+* Streaming xAI Grok TTS through the Workers AI binding.
+*
+* Grok's MP3 WebSocket output can be emitted directly or decoded to PCM16 as
+* each chunk arrives, so callers need neither an xAI API key nor a complete
+* audio download.
+*/
+var WorkersAIGrokTTS = class {
+	#ai;
+	#voice;
+	#language;
+	#optimizeStreamingLatency;
+	constructor(ai, options) {
+		this.sampleRate = 24e3;
+		this.#ai = ai;
+		this.audioFormat = options?.audioFormat ?? "pcm16";
+		this.#voice = options?.voice ?? "ara";
+		this.#language = options?.language ?? "en";
+		this.#optimizeStreamingLatency = options?.optimizeStreamingLatency ?? 1;
+	}
+	async synthesize(text, signal) {
+		const chunks = [];
+		let byteLength = 0;
+		for await (const chunk of this.synthesizeStream(text, signal)) {
+			chunks.push(chunk);
+			byteLength += chunk.byteLength;
+		}
+		if (chunks.length === 0) return null;
+		const audio = new Uint8Array(byteLength);
+		let offset = 0;
+		for (const chunk of chunks) {
+			audio.set(new Uint8Array(chunk), offset);
+			offset += chunk.byteLength;
+		}
+		return audio.buffer;
+	}
+	async *synthesizeStream(text, signal) {
+		if (!text || signal?.aborted) return;
+		const source = new ReadableStream({ start(controller) {
+			controller.enqueue(text);
+			controller.close();
+		} });
+		yield* this.synthesizeTextStream(source, signal);
+	}
+	async *synthesizeTextStream(text, signal) {
+		if (signal?.aborted) return;
+		const [normalizer, ws] = await Promise.all([this.audioFormat === "pcm16" ? StreamingMp3ToPcm16.create({
+			sampleRate: this.sampleRate,
+			channels: 1
+		}) : null, this.#open()]);
+		const output = normalizer ? new AudioFrameStream(this.sampleRate * FRAME_MS * 2 / 1e3, 2) : new AudioFrameStream();
+		ws.addEventListener("message", (event) => {
+			if (typeof event.data !== "string") return;
+			let message;
+			try {
+				message = JSON.parse(event.data);
+			} catch {
+				return;
+			}
+			if (!message || typeof message !== "object" || !("type" in message)) return;
+			if (message.type === "audio.delta" && "delta" in message && typeof message.delta === "string") try {
+				const decoded = atob(message.delta);
+				const chunk = new Uint8Array(decoded.length);
+				for (let i = 0; i < decoded.length; i++) chunk[i] = decoded.charCodeAt(i);
+				if (normalizer) {
+					const pcm = normalizer.push(chunk);
+					if (pcm) output.push(pcm.audio);
+				} else output.push(chunk);
+			} catch (error) {
+				output.fail(error instanceof Error ? error : /* @__PURE__ */ new Error("Workers AI Grok MP3 decode failed"));
+			}
+			else if (message.type === "audio.done") {
+				const pcm = normalizer?.finish();
+				if (pcm) output.push(pcm.audio);
+				output.finish();
+			} else if (message.type === "error") {
+				const detail = "message" in message && typeof message.message === "string" ? `: ${message.message}` : "";
+				output.fail(/* @__PURE__ */ new Error(`Workers AI Grok TTS error${detail}`));
+			}
+		});
+		ws.addEventListener("close", (event) => {
+			output.fail(/* @__PURE__ */ new Error(`Workers AI Grok TTS socket closed before audio.done (code ${event.code}${event.reason ? `: ${event.reason}` : ""})`));
+		});
+		ws.addEventListener("error", () => {
+			output.fail(/* @__PURE__ */ new Error("Workers AI Grok TTS socket error"));
+		});
+		const abort = () => {
+			try {
+				ws.send(JSON.stringify({ type: "text.clear" }));
+			} catch {}
+			output.finish();
+			try {
+				ws.close();
+			} catch {}
+		};
+		signal?.addEventListener("abort", abort, { once: true });
+		if (signal?.aborted) abort();
+		const inputPromise = (async () => {
+			const reader = text.getReader();
+			let sentText = false;
+			try {
+				while (!signal?.aborted) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					if (!value) continue;
+					sentText = true;
+					ws.send(JSON.stringify({
+						type: "text.delta",
+						delta: value
+					}));
+				}
+				if (signal?.aborted) return;
+				if (sentText) ws.send(JSON.stringify({ type: "text.done" }));
+				else output.finish();
+			} finally {
+				reader.releaseLock();
+			}
+		})().catch((error) => {
+			if (signal?.aborted) return;
+			output.fail(error instanceof Error ? error : /* @__PURE__ */ new Error("Workers AI Grok TTS input stream failed"));
+		});
+		try {
+			let nextYieldAt = 0;
+			for await (const frame of output) {
+				if (signal?.aborted) return;
+				if (normalizer) {
+					const now = Date.now();
+					if (nextYieldAt === 0) nextYieldAt = now + FRAME_MS;
+					else {
+						if (now < nextYieldAt) await new Promise((resolve) => setTimeout(resolve, nextYieldAt - now));
+						nextYieldAt = Math.max(nextYieldAt + FRAME_MS, Date.now() + FRAME_MS);
+					}
+				}
+				yield frame;
+			}
+			await inputPromise;
+		} finally {
+			signal?.removeEventListener("abort", abort);
+			try {
+				ws.close();
+			} catch {}
+		}
+	}
+	async #open() {
+		if (!this.#ai.fetch) throw new Error("Workers AI Grok TTS requires the native AI binding");
+		const model = "xai/grok-tts";
+		const endpoint = new URL("https://workers-binding.ai/run");
+		endpoint.searchParams.set("model", model);
+		endpoint.searchParams.set("language", this.#language);
+		endpoint.searchParams.set("voice_id", this.#voice);
+		endpoint.searchParams.set("websocket", "true");
+		endpoint.searchParams.set("output_format.codec", "mp3");
+		endpoint.searchParams.set("output_format.sample_rate", String(this.sampleRate));
+		endpoint.searchParams.set("optimize_streaming_latency", String(this.#optimizeStreamingLatency));
+		const response = await this.#ai.fetch(endpoint, { headers: {
+			Upgrade: "websocket",
+			"cf-aig-gateway-id": "default",
+			"cf-consn-sdk-version": "2.0.0",
+			"cf-consn-model-id": model
+		} });
+		const socket = "webSocket" in response && isWebSocket(response.webSocket) ? response.webSocket : null;
+		if (!socket) {
+			const body = await response.text().catch(() => "");
+			throw new Error(`Workers AI Grok TTS WebSocket failed: HTTP ${response.status}${body ? ` — ${body.slice(0, 200)}` : ""}`);
+		}
+		socket.accept();
+		socket.binaryType = "arraybuffer";
+		return socket;
+	}
+};
 const FRAME_MS = 20;
 /**
-* Bridges the TTS socket's events into an async iterable of 20 ms μ-law
-* frames.
-*
-* Aura's WebSocket messages are transport fragments, not audio frames — it
-* splits μ-law into arbitrary-sized pieces — so bytes are coalesced to 160 and
-* any remainder is emitted when the server acknowledges the flush. The
-* iterator ends on `Flushed` and throws if the socket dies first, so a
-* consumer can never be left waiting on an acknowledgement that is not coming.
+* Queues encoded chunks directly or bridges raw audio fragments into
+* fixed-duration frames.
 */
-var MulawFrameStream = class {
-	#frame = new Uint8Array(FRAME_BYTES);
+var AudioFrameStream = class {
+	#frame;
 	#frameLength = 0;
 	#queue = [];
 	#done = false;
 	#error = null;
 	#wake = null;
+	constructor(frameBytes, sampleBytes = 1) {
+		this.frameBytes = frameBytes;
+		this.sampleBytes = sampleBytes;
+		this.#frame = new Uint8Array(frameBytes ?? 0);
+	}
 	push(chunk) {
 		if (this.#done) return;
+		if (this.frameBytes === void 0) {
+			this.#queue.push(chunk.slice().buffer);
+			this.#notify();
+			return;
+		}
 		let offset = 0;
 		while (offset < chunk.byteLength) {
-			const copied = Math.min(FRAME_BYTES - this.#frameLength, chunk.byteLength - offset);
+			const copied = Math.min(this.frameBytes - this.#frameLength, chunk.byteLength - offset);
 			this.#frame.set(chunk.subarray(offset, offset + copied), this.#frameLength);
 			this.#frameLength += copied;
 			offset += copied;
-			if (this.#frameLength === FRAME_BYTES) {
+			if (this.#frameLength === this.frameBytes) {
 				this.#queue.push(this.#frame.buffer);
-				this.#frame = new Uint8Array(FRAME_BYTES);
+				this.#frame = new Uint8Array(this.frameBytes);
 				this.#frameLength = 0;
 			}
 		}
@@ -1572,6 +2191,10 @@ var MulawFrameStream = class {
 	/** Server acknowledged the flush: emit the partial frame and end. */
 	finish() {
 		if (this.#done) return;
+		if (this.#frameLength % this.sampleBytes !== 0) {
+			this.fail(/* @__PURE__ */ new Error("Workers AI realtime TTS returned incomplete linear16 sample"));
+			return;
+		}
 		if (this.#frameLength > 0) {
 			this.#queue.push(this.#frame.slice(0, this.#frameLength).buffer);
 			this.#frameLength = 0;
@@ -1669,6 +2292,8 @@ var FluxSession = class {
 	#onUtterance;
 	#onEagerUtterance;
 	#onTurnResumed;
+	#ai;
+	#config;
 	#ws = null;
 	#connected = false;
 	#closed = false;
@@ -1678,6 +2303,8 @@ var FluxSession = class {
 	#resolveReady = null;
 	#rejectReady = null;
 	constructor(ai, config, options) {
+		this.#ai = ai;
+		this.#config = config;
 		this.#onInterim = options?.onInterim;
 		this.#onSpeechStart = options?.onSpeechStart;
 		this.#onUtterance = options?.onUtterance;
@@ -1688,22 +2315,22 @@ var FluxSession = class {
 			this.#rejectReady = reject;
 		});
 		this.#ready.catch(() => {});
-		this.#connect(ai, config);
+		this.#connect();
 	}
 	waitUntilReady() {
 		return this.#ready;
 	}
-	async #connect(ai, config) {
+	async #connect() {
 		try {
 			const input = {
 				encoding: "linear16",
-				sample_rate: String(config.sampleRate)
+				sample_rate: String(this.#config.sampleRate)
 			};
-			if (config.eotThreshold != null) input.eot_threshold = String(config.eotThreshold);
-			if (config.eagerEotThreshold != null) input.eager_eot_threshold = String(config.eagerEotThreshold);
-			if (config.eotTimeoutMs != null) input.eot_timeout_ms = String(config.eotTimeoutMs);
-			if (config.keyterms?.length) input.keyterm = config.keyterms;
-			const resp = await ai.run("@cf/deepgram/flux", input, { websocket: true });
+			if (this.#config.eotThreshold != null) input.eot_threshold = String(this.#config.eotThreshold);
+			if (this.#config.eagerEotThreshold != null) input.eager_eot_threshold = String(this.#config.eagerEotThreshold);
+			if (this.#config.eotTimeoutMs != null) input.eot_timeout_ms = String(this.#config.eotTimeoutMs);
+			if (this.#config.keyterms?.length) input.keyterm = this.#config.keyterms;
+			const resp = await this.#ai.run("@cf/deepgram/flux", input, { websocket: true });
 			if (this.#closed) {
 				const ws = resp.webSocket;
 				if (ws) {
@@ -1715,8 +2342,13 @@ var FluxSession = class {
 			}
 			const ws = resp.webSocket;
 			if (!ws) {
-				const error = /* @__PURE__ */ new Error("Workers AI Flux STT did not return a WebSocket");
-				console.error("[FluxSTT] Failed to establish WebSocket connection");
+				let message = "Workers AI Flux STT did not return a WebSocket";
+				if (resp instanceof Response) {
+					const body = await resp.text().catch(() => "");
+					message = `Workers AI Flux STT failed: HTTP ${resp.status}${body ? ` — ${body.slice(0, 500)}` : ""}`;
+				}
+				const error = new Error(message);
+				console.error("[FluxSTT] Failed to establish WebSocket:", error);
 				this.#rejectReadiness(error);
 				return;
 			}
@@ -1726,12 +2358,17 @@ var FluxSession = class {
 			ws.addEventListener("message", (event) => {
 				this.#handleMessage(event);
 			});
-			ws.addEventListener("close", () => {
+			const reconnect = () => {
+				if (this.#closed || this.#ws !== ws) return;
 				this.#connected = false;
-			});
+				this.#ws = null;
+				this.#currentTranscript = "";
+				this.#connect();
+			};
+			ws.addEventListener("close", reconnect);
 			ws.addEventListener("error", (event) => {
 				console.error("[FluxSTT] WebSocket error:", event);
-				this.#connected = false;
+				reconnect();
 			});
 			for (const chunk of this.#pendingChunks) ws.send(chunk);
 			this.#pendingChunks = [];
@@ -1990,15 +2627,23 @@ var Nova3Session = class {
 };
 //#endregion
 //#region src/voice.ts
+function readClientRms(message, key) {
+	const value = message[key];
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+}
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1e3;
 const DEFAULT_SAMPLE_RATE = 16e3;
-/** Minimum time between barge-ins per connection. Without this, a burst of
-* spurious `StartOfTurn` events (background noise, line static, a stray
-* syllable) can abort a turn the instant a new one starts — over and over —
-* so nothing ever gets a chance to finish. StartOfTurn has no confidence or
-* duration floor of its own; this is that floor. */
-const BARGE_IN_COOLDOWN_MS = 750;
+const STREAMING_TTS_MAX_CHARS = 48;
+function isEchoOf(transcript, assistantText) {
+	if (!assistantText) return false;
+	const assistant = assistantText.toLowerCase().match(/[\p{L}\p{N}]+/gu)?.join(" ") ?? "";
+	const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+	if (heard.length >= 3 && assistant.includes(heard.join(" "))) return true;
+	const assistantWords = new Set(assistant.split(" "));
+	const hits = heard.filter((word) => assistantWords.has(word)).length;
+	return hits >= 4 && hits / heard.length >= .6;
+}
 /**
 * Voice pipeline mixin. Adds the full voice pipeline to an Agent class.
 *
@@ -2037,8 +2682,9 @@ function withVoice(Base, voiceOptions) {
 		#audioTransports = /* @__PURE__ */ new Map();
 		#conversationHistory = [];
 		#speculativeTurns = /* @__PURE__ */ new Map();
-		#assistantEchoText = /* @__PURE__ */ new Map();
-		#lastBargeInAt = /* @__PURE__ */ new Map();
+		#activeAssistantText = /* @__PURE__ */ new Map();
+		#callStartInputSuppressed = /* @__PURE__ */ new Set();
+		#clientSpeechEnergy = /* @__PURE__ */ new Map();
 		#startupTokens = /* @__PURE__ */ new Map();
 		static #VOICE_MESSAGES = /* @__PURE__ */ new Set([
 			"hello",
@@ -2080,16 +2726,17 @@ function withVoice(Base, voiceOptions) {
 			};
 			this.onClose = (connection, ...rest) => {
 				this.#startupTokens.delete(connection.id);
+				this.#callStartInputSuppressed.delete(connection.id);
+				this.#clientSpeechEnergy.delete(connection.id);
 				this.#releaseKeepAlive(connection.id);
-				this.#assistantEchoText.delete(connection.id);
 				this.#cm.cleanup(connection.id);
 				const transport = this.#audioTransports.get(connection.id);
 				if (transport) {
 					this.#audioTransports.delete(connection.id);
-					runBackground("audio_transport_stop", () => transport.stop(connection.id));
+					if (transport.suspend) transport.suspend(connection.id);
+					else runBackground("audio_transport_stop", () => transport.stop(connection.id));
 				}
 				this.#cancelSpeculativeTurn(connection.id, "connection_closed");
-				this.#lastBargeInAt.delete(connection.id);
 				return _onClose?.(connection, ...rest);
 			};
 			this.onMessage = (connection, message) => {
@@ -2099,27 +2746,50 @@ function withVoice(Base, voiceOptions) {
 				}
 				if (typeof message !== "string") return _onMessage?.(connection, message);
 				let parsed;
+				let messageType;
 				try {
-					parsed = JSON.parse(message);
+					const value = JSON.parse(message);
+					if (!value || typeof value !== "object" || !("type" in value) || typeof value.type !== "string") return _onMessage?.(connection, message);
+					parsed = value;
+					messageType = value.type;
 				} catch {
 					return _onMessage?.(connection, message);
 				}
-				if (VoiceAgentMixin.#VOICE_MESSAGES.has(parsed.type)) {
-					switch (parsed.type) {
+				if (VoiceAgentMixin.#VOICE_MESSAGES.has(messageType)) {
+					switch (messageType) {
 						case "hello": break;
-						case "start_call":
-							runBackground("start_call", () => this.#handleStartCall(connection, parsed.preferred_format));
+						case "start_call": {
+							const preferredFormat = "preferred_format" in parsed && typeof parsed.preferred_format === "string" ? parsed.preferred_format : void 0;
+							const resumed = "resumed" in parsed && parsed.resumed === true;
+							runBackground("start_call", () => this.#handleStartCall(connection, preferredFormat, resumed));
 							break;
+						}
 						case "end_call":
 							runBackground("end_call", () => this.#handleEndCall(connection));
 							break;
 						case "start_of_speech":
-						case "end_of_speech": break;
-						case "interrupt":
-							runBackground("interrupt", () => this.#handleInterrupt(connection));
+							this.#clientSpeechEnergy.set(connection.id, {
+								startRms: readClientRms(parsed, "rms"),
+								peakRms: null,
+								threshold: readClientRms(parsed, "threshold")
+							});
 							break;
+						case "end_of_speech": {
+							const energy = this.#clientSpeechEnergy.get(connection.id);
+							this.#clientSpeechEnergy.set(connection.id, {
+								startRms: energy?.startRms ?? null,
+								peakRms: readClientRms(parsed, "peak_rms"),
+								threshold: readClientRms(parsed, "threshold") ?? energy?.threshold ?? null
+							});
+							break;
+						}
+						case "interrupt": {
+							const source = "source" in parsed && parsed.source === "audio_level" ? "client_audio_level" : "client_interrupt";
+							runBackground("interrupt", () => this.#handleInterrupt(connection, source));
+							break;
+						}
 						case "text_message": {
-							const text = parsed.text;
+							const text = "text" in parsed ? parsed.text : void 0;
 							if (typeof text === "string") runBackground("text_message", () => this.#handleTextMessage(connection, text));
 							break;
 						}
@@ -2144,27 +2814,24 @@ function withVoice(Base, voiceOptions) {
 			return null;
 		}
 		receiveAudio(connectionId, audio) {
+			if (this.#callStartInputSuppressed.has(connectionId)) return;
 			this.#cm.bufferAudio(connectionId, audio);
 		}
 		beforeCallStart(_connection) {
 			return true;
 		}
-		onCallStart(_connection) {}
+		onCallStart(_connection, _context) {}
 		onCallEnd(_connection) {}
 		onInterrupt(_connection) {}
 		afterTranscribe(transcript, connection) {
-			const lastAssistant = this.getConversationHistory(1).find((message) => message.role === "assistant");
-			const assistantTexts = [this.#assistantEchoText.get(connection.id), lastAssistant?.content];
-			const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-			for (const text of assistantTexts) {
-				const assistant = text?.toLowerCase().match(/[\p{L}\p{N}]+/gu)?.join(" ") ?? "";
-				if (!assistant) continue;
-				if (heard.length >= 3 && assistant.includes(heard.join(" "))) return null;
-				const assistantWords = new Set(assistant.split(" "));
-				const hits = heard.filter((word) => assistantWords.has(word)).length;
-				if (hits >= 4 && hits / heard.length >= .6) return null;
-			}
-			return transcript;
+			return opt("filterEchoedTranscripts", false) && this.#isEchoTranscript(connection.id, transcript) ? null : transcript;
+		}
+		#isEchoTranscript(connectionId, transcript) {
+			const active = this.#activeAssistantText.get(connectionId);
+			if (active && isEchoOf(transcript, active.text)) return true;
+			const history = this.getConversationHistory();
+			for (let i = history.length - 1; i >= 0; i--) if (history[i].role === "assistant") return isEchoOf(transcript, history[i].content);
+			return false;
 		}
 		beforeSynthesize(text, _connection) {
 			return text;
@@ -2225,7 +2892,7 @@ function withVoice(Base, voiceOptions) {
 		}
 		#cancelSpeculativeTurn(connectionId, reason) {
 			const turn = this.#speculativeTurns.get(connectionId);
-			if (!turn) return false;
+			if (!turn) return null;
 			this.#speculativeTurns.delete(connectionId);
 			console.log("[VoiceTrace]", {
 				event: "speculative_turn_cancelled",
@@ -2234,11 +2901,10 @@ function withVoice(Base, voiceOptions) {
 				reason
 			});
 			turn.settle(false);
-			return true;
+			return turn;
 		}
 		#startSpeculativeTurn(connection, transcript) {
 			if (this.#speculativeTurns.has(connection.id)) return;
-			if (this.#cm.hasActivePipeline(connection.id) && !this.#handleBargeIn(connection, true)) return;
 			let settle = () => {};
 			const outcome = new Promise((resolve) => {
 				settle = resolve;
@@ -2247,7 +2913,8 @@ function withVoice(Base, voiceOptions) {
 				provisionalTranscript: transcript.trim(),
 				startedAt: Date.now(),
 				outcome,
-				settle
+				settle,
+				pipelineStarted: false
 			};
 			this.#speculativeTurns.set(connection.id, turn);
 			console.log("[VoiceTrace]", {
@@ -2348,8 +3015,9 @@ function withVoice(Base, voiceOptions) {
 			if (audio && !signal.aborted) await this.#sendAudio(connection, audio);
 			if (!signal.aborted) await this.#flushAudio(connection);
 		}
-		async #handleStartCall(connection, _preferredFormat) {
+		async #handleStartCall(connection, _preferredFormat, resumed = false) {
 			if (this.#cm.isInCall(connection.id)) return;
+			this.#clientSpeechEnergy.delete(connection.id);
 			const startupToken = Symbol(connection.id);
 			this.#startupTokens.set(connection.id, startupToken);
 			this.#cm.initConnection(connection.id);
@@ -2377,7 +3045,9 @@ function withVoice(Base, voiceOptions) {
 				const transport = await this.createAudioTransport(connection);
 				if (transport) {
 					this.#audioTransports.set(connection.id, transport);
-					await transport.start(connection.id, (audio) => this.receiveAudio(connection.id, audio));
+					const onAudio = (audio) => this.receiveAudio(connection.id, audio);
+					if (resumed === true && transport.resume) await transport.resume(connection.id, onAudio);
+					else await transport.start(connection.id, onAudio);
 					if (!this.#isCurrentStartup(connection.id, startupToken)) return;
 				}
 				if (!this.#isCurrentStartup(connection.id, startupToken)) return;
@@ -2402,26 +3072,49 @@ function withVoice(Base, voiceOptions) {
 							text
 						});
 					},
-					onSpeechStart: () => {
-						if (this.#cancelSpeculativeTurn(connection.id, "speech_start")) {
-							this.#cm.abortPipeline(connection.id);
-							return;
-						}
-						this.#handleBargeIn(connection);
+					onSpeechStart: (transcript) => {
+						const echoed = opt("filterEchoedTranscripts", false) && Boolean(transcript && this.#isEchoTranscript(connection.id, transcript));
+						const energy = this.#clientSpeechEnergy.get(connection.id);
+						console.log("[VoiceTrace]", {
+							event: "stt_speech_start",
+							connectionId: connection.id,
+							transcript: transcript ?? null,
+							echoed,
+							clientStartRms: energy?.startRms ?? null,
+							clientThreshold: energy?.threshold ?? null
+						});
+						if (echoed) return;
+						this.#handleBargeIn(connection, "flux_speech_start", transcript);
 					},
 					onEagerUtterance: (transcript) => {
+						const echoed = opt("filterEchoedTranscripts", false) && this.#isEchoTranscript(connection.id, transcript);
+						const energy = this.#clientSpeechEnergy.get(connection.id);
+						console.log("[VoiceTrace]", {
+							event: "stt_eager_utterance",
+							connectionId: connection.id,
+							transcript,
+							echoed,
+							clientStartRms: energy?.startRms ?? null,
+							clientThreshold: energy?.threshold ?? null
+						});
+						if (echoed) return;
+						if (opt("filterEchoedTranscripts", false)) this.#handleBargeIn(connection, "flux_eager_utterance", transcript);
 						this.#startSpeculativeTurn(connection, transcript);
 					},
 					onTurnResumed: () => {
-						if (!this.#cancelSpeculativeTurn(connection.id, "turn_resumed")) return;
-						this.#cm.abortPipeline(connection.id);
+						if (this.#cancelSpeculativeTurn(connection.id, "turn_resumed")?.pipelineStarted) this.#cm.abortPipeline(connection.id);
 					},
 					onUtterance: (transcript) => {
+						const energy = this.#clientSpeechEnergy.get(connection.id);
 						console.log("[VoiceTrace]", {
 							event: "stt_utterance",
 							connectionId: connection.id,
-							text: transcript
+							text: transcript,
+							clientStartRms: energy?.startRms ?? null,
+							clientPeakRms: energy?.peakRms ?? null,
+							clientThreshold: energy?.threshold ?? null
 						});
+						this.#clientSpeechEnergy.delete(connection.id);
 						this.#sendJSON(connection, {
 							type: "transcript_interim",
 							text: ""
@@ -2441,8 +3134,7 @@ function withVoice(Base, voiceOptions) {
 							}
 							const eagerText = speculative.provisionalTranscript;
 							const startedAt = speculative.startedAt;
-							this.#cancelSpeculativeTurn(connection.id, "transcript_mismatch");
-							this.#cm.abortPipeline(connection.id);
+							if (this.#cancelSpeculativeTurn(connection.id, "transcript_mismatch")?.pipelineStarted) this.#cm.abortPipeline(connection.id);
 							console.log("[VoiceTrace]", {
 								event: "speculative_turn_restarted",
 								connectionId: connection.id,
@@ -2467,13 +3159,19 @@ function withVoice(Base, voiceOptions) {
 				type: "status",
 				status: "listening"
 			});
-			await this.onCallStart(connection);
+			if (!opt("listenDuringCallStart", true)) this.#callStartInputSuppressed.add(connection.id);
+			try {
+				await this.onCallStart(connection, { resumed });
+			} finally {
+				this.#callStartInputSuppressed.delete(connection.id);
+			}
 		}
 		#isCurrentStartup(connectionId, startupToken) {
 			return this.#startupTokens.get(connectionId) === startupToken && this.#cm.isInCall(connectionId);
 		}
 		async #handleTranscriberStartupFailure(connection, startupToken, error) {
-			await this.#handleStartupFailure(connection, startupToken, error, "Speech recognition failed to start", "[VoiceAgent] Transcriber startup failed:");
+			const detail = error instanceof Error ? `: ${error.message}` : "";
+			await this.#handleStartupFailure(connection, startupToken, error, `Speech recognition failed to start${detail}`, "[VoiceAgent] Transcriber startup failed:");
 		}
 		async #handleStartupFailure(connection, startupToken, error, clientMessage, logPrefix = "[VoiceAgent] Call startup failed:") {
 			if (!this.#isCurrentStartup(connection.id, startupToken)) return;
@@ -2504,14 +3202,12 @@ function withVoice(Base, voiceOptions) {
 		}
 		async #handleEndCall(connection) {
 			this.#startupTokens.delete(connection.id);
-			this.#cm.abortPipeline(connection.id);
+			this.#clientSpeechEnergy.delete(connection.id);
 			this.#cancelSpeculativeTurn(connection.id, "end_call");
-			this.#lastBargeInAt.delete(connection.id);
-			this.#assistantEchoText.delete(connection.id);
+			this.#cm.cleanup(connection.id);
 			try {
 				await this.#stopAudioTransport(connection.id);
 			} finally {
-				this.#cm.cleanup(connection.id);
 				this.#releaseKeepAlive(connection.id);
 				this.#sendJSON(connection, {
 					type: "status",
@@ -2520,10 +3216,14 @@ function withVoice(Base, voiceOptions) {
 				await this.onCallEnd(connection);
 			}
 		}
-		async #handleInterrupt(connection) {
+		async #handleInterrupt(connection, trigger) {
 			console.log("[VoiceTrace]", {
-				event: "interrupt",
-				connectionId: connection.id
+				event: "interrupt_trigger",
+				connectionId: connection.id,
+				trigger,
+				transcript: null,
+				activePipeline: this.#cm.hasActivePipeline(connection.id),
+				action: "interrupt"
 			});
 			this.#cm.abortPipeline(connection.id);
 			this.#cancelSpeculativeTurn(connection.id, "interrupt");
@@ -2538,17 +3238,32 @@ function withVoice(Base, voiceOptions) {
 				await this.onInterrupt(connection);
 			}
 		}
-		#handleBargeIn(connection, bypassCooldown = false) {
-			const now = Date.now();
-			const lastBargeInAt = this.#lastBargeInAt.get(connection.id) ?? 0;
-			if (!bypassCooldown && now - lastBargeInAt < BARGE_IN_COOLDOWN_MS) return false;
-			if (!this.#cm.abortPipeline(connection.id)) return false;
+		#handleBargeIn(connection, trigger, transcript) {
+			const minWords = opt("minInterruptWords", 0);
+			const wordCount = transcript?.trim() ? transcript.trim().split(/\s+/).length : 0;
+			if (minWords > 0 && wordCount < minWords) {
+				console.log("[VoiceTrace]", {
+					event: "interrupt_trigger",
+					connectionId: connection.id,
+					trigger,
+					transcript: transcript ?? null,
+					activePipeline: this.#cm.hasActivePipeline(connection.id),
+					action: "below_min_words"
+				});
+				return;
+			}
 			this.#cancelSpeculativeTurn(connection.id, "speech_start");
-			this.#lastBargeInAt.set(connection.id, now);
+			const activePipeline = this.#cm.hasActivePipeline(connection.id);
+			const interrupted = this.#cm.abortPipeline(connection.id);
 			console.log("[VoiceTrace]", {
-				event: "barge_in",
-				connectionId: connection.id
+				event: "interrupt_trigger",
+				connectionId: connection.id,
+				trigger,
+				transcript: transcript ?? null,
+				activePipeline,
+				action: interrupted ? "interrupt" : "no_active_pipeline"
 			});
+			if (!interrupted) return;
 			this.#sendJSON(connection, { type: "playback_interrupt" });
 			this.#sendJSON(connection, {
 				type: "status",
@@ -2561,7 +3276,6 @@ function withVoice(Base, voiceOptions) {
 					await this.onInterrupt(connection);
 				}
 			});
-			return true;
 		}
 		async #handleTextMessage(connection, text) {
 			if (!text || text.trim().length === 0) return;
@@ -2663,7 +3377,7 @@ function withVoice(Base, voiceOptions) {
 			}
 		}
 		async #runPipeline(connection, transcript, speculative) {
-			const signal = this.#cm.createPipelineAbort(connection.id);
+			let signal;
 			const pipelineStart = Date.now();
 			try {
 				let userText;
@@ -2671,20 +3385,22 @@ function withVoice(Base, voiceOptions) {
 					userText = await this.afterTranscribe(transcript, connection);
 				} catch (error) {
 					if (!speculative) throw error;
-					if (!await speculative.outcome || signal.aborted) return;
+					if (!await speculative.outcome) return;
 					throw error;
 				}
-				if (signal.aborted) return;
 				if (!userText) {
 					if (speculative) {
-						if (!await speculative.outcome || signal.aborted) return;
+						if (!await speculative.outcome) return;
 					}
-					this.#sendJSON(connection, {
+					if (!this.#cm.hasActivePipeline(connection.id)) this.#sendJSON(connection, {
 						type: "status",
 						status: "listening"
 					});
 					return;
 				}
+				if (!speculative && opt("filterEchoedTranscripts", false) && this.#cm.hasActivePipeline(connection.id)) this.#handleBargeIn(connection, "flux_confirmed_utterance", userText);
+				signal = this.#cm.createPipelineAbort(connection.id);
+				if (speculative) speculative.pipelineStarted = true;
 				const priorMessages = this.getConversationHistory();
 				if (!speculative) {
 					this.saveMessage("user", userText);
@@ -2704,20 +3420,33 @@ function withVoice(Base, voiceOptions) {
 					signal
 				};
 				const llmStart = Date.now();
-				let turnResult;
-				try {
-					turnResult = await this.onTurn(userText, context);
-				} catch (error) {
-					if (!speculative) throw error;
-					if (!await speculative.outcome || signal.aborted) return;
+				const pendingTurnResult = Promise.resolve().then(() => this.onTurn(userText, context)).then((value) => ({
+					ok: true,
+					value
+				}), (error) => ({
+					ok: false,
+					error
+				}));
+				if (speculative) {
+					if (!await speculative.outcome) return;
 					this.saveMessage("user", userText);
 					this.#sendJSON(connection, {
 						type: "transcript",
 						role: "user",
 						text: userText
 					});
-					throw error;
+					if (signal.aborted) return;
+					this.#sendJSON(connection, {
+						type: "status",
+						status: "thinking"
+					});
 				}
+				const settledTurnResult = await pendingTurnResult;
+				if (!settledTurnResult.ok) {
+					if (signal.aborted) return;
+					throw settledTurnResult.error;
+				}
+				const turnResult = settledTurnResult.value;
 				console.log("[VoiceTrace]", {
 					event: "onTurn_call",
 					connectionId: connection.id,
@@ -2725,30 +3454,12 @@ function withVoice(Base, voiceOptions) {
 					history: context.messages
 				});
 				if (signal.aborted) return;
-				if (speculative) {
-					if (!await speculative.outcome || signal.aborted) return;
-					this.saveMessage("user", userText);
-					this.#sendJSON(connection, {
-						type: "transcript",
-						role: "user",
-						text: userText
-					});
-					this.#sendJSON(connection, {
-						type: "status",
-						status: "thinking"
-					});
-				}
 				this.#sendJSON(connection, {
 					type: "status",
 					status: "speaking"
 				});
 				const { text: fullText, llmMs, ttsMs, firstModelDeltaMs, firstSentenceMs, firstAudioMs } = await this.#streamResponse(connection, turnResult, llmStart, pipelineStart, signal);
-				if (signal.aborted) {
-					if (!fullText || fullText.trim().length === 0) return;
-					this.#cm.updateAgentContext(connection.id, fullText);
-					this.saveMessage("assistant", fullText);
-					return;
-				}
+				if (signal.aborted) return;
 				if (!fullText || fullText.trim().length === 0) {
 					console.log("[VoiceTrace]", {
 						event: "turn_empty",
@@ -2797,7 +3508,7 @@ function withVoice(Base, voiceOptions) {
 					status: "listening"
 				});
 			} catch (error) {
-				if (signal.aborted) return;
+				if (signal?.aborted) return;
 				console.error("[VoiceAgent] Pipeline error:", error);
 				this.#sendJSON(connection, {
 					type: "error",
@@ -2808,12 +3519,16 @@ function withVoice(Base, voiceOptions) {
 					status: "listening"
 				});
 			} finally {
-				this.#cm.clearPipelineAbort(connection.id, signal);
+				if (signal && this.#activeAssistantText.get(connection.id)?.signal === signal) this.#activeAssistantText.delete(connection.id);
+				if (signal) this.#cm.clearPipelineAbort(connection.id, signal);
 			}
 		}
 		async #streamResponse(connection, response, llmStart, pipelineStart, signal) {
-			this.#assistantEchoText.set(connection.id, "");
 			if (typeof response === "string") {
+				this.#activeAssistantText.set(connection.id, {
+					signal,
+					text: response
+				});
 				const llmMs = Date.now() - llmStart;
 				if (response.trim().length === 0) return {
 					text: response,
@@ -2823,7 +3538,6 @@ function withVoice(Base, voiceOptions) {
 					firstSentenceMs: llmMs,
 					firstAudioMs: 0
 				};
-				this.#assistantEchoText.set(connection.id, response);
 				this.#sendJSON(connection, {
 					type: "transcript_start",
 					role: "assistant"
@@ -2846,10 +3560,105 @@ function withVoice(Base, voiceOptions) {
 					firstAudioMs: Date.now() - pipelineStart
 				};
 			}
-			return this.#streamingTTSPipeline(connection, iterateTextEvents(response), llmStart, pipelineStart, signal);
+			const tts = this.#requireTTS();
+			const tokenStream = iterateTextEvents(response);
+			if (typeof tts.synthesizeTextStream === "function") return this.#textStreamingTTSPipeline(connection, tokenStream, llmStart, pipelineStart, signal, tts);
+			return this.#streamingTTSPipeline(connection, tokenStream, llmStart, pipelineStart, signal);
+		}
+		async #textStreamingTTSPipeline(connection, tokenStream, llmStart, pipelineStart, signal, tts) {
+			const textStream = new TransformStream();
+			const writer = textStream.writable.getWriter();
+			let fullText = "";
+			let pendingTranscriptText = "";
+			let transcriptStarted = false;
+			let firstModelDeltaAt = null;
+			let firstAudioSentAt = null;
+			const ttsStart = Date.now();
+			const trace = (event, details = {}) => {
+				console.log("[VoiceTrace]", {
+					event,
+					connectionId: connection.id,
+					elapsedMs: Date.now() - pipelineStart,
+					...details
+				});
+			};
+			const sendAssistantDelta = (token) => {
+				if (!transcriptStarted) {
+					pendingTranscriptText += token;
+					if (pendingTranscriptText.trim().length === 0) return;
+					this.#sendJSON(connection, {
+						type: "transcript_start",
+						role: "assistant"
+					});
+					transcriptStarted = true;
+					token = pendingTranscriptText;
+					pendingTranscriptText = "";
+				}
+				this.#sendJSON(connection, {
+					type: "transcript_delta",
+					text: token
+				});
+			};
+			const audioPromise = (async () => {
+				for await (const chunk of tts.synthesizeTextStream(textStream.readable, signal)) {
+					if (signal.aborted) return;
+					await this.#sendAudio(connection, chunk);
+					if (firstAudioSentAt === null) {
+						firstAudioSentAt = Date.now();
+						trace("tts_first_audio", { bytes: chunk.byteLength });
+					}
+				}
+			})();
+			try {
+				for await (const event of tokenStream) {
+					if (signal.aborted) break;
+					if (event.type === "boundary") continue;
+					if (event.type === "error") throw event.error;
+					const token = event.text;
+					if (firstModelDeltaAt === null) {
+						firstModelDeltaAt = Date.now();
+						trace("model_first_delta");
+					}
+					fullText += token;
+					this.#activeAssistantText.set(connection.id, {
+						signal,
+						text: fullText
+					});
+					sendAssistantDelta(token);
+					await writer.write(token);
+				}
+				if (signal.aborted) await writer.abort(signal.reason).catch(() => void 0);
+				else await writer.close();
+				await audioPromise;
+			} catch (error) {
+				await writer.abort(error).catch(() => void 0);
+				await audioPromise.catch(() => void 0);
+				throw error;
+			}
+			const llmMs = Date.now() - llmStart;
+			trace("model_stream_complete", {
+				generatedChars: fullText.length,
+				aborted: signal.aborted,
+				text: fullText
+			});
+			if (transcriptStarted) this.#sendJSON(connection, {
+				type: "transcript_end",
+				text: fullText
+			});
+			if (!signal.aborted) await this.#flushAudio(connection);
+			const firstModelDeltaMs = firstModelDeltaAt ? firstModelDeltaAt - pipelineStart : 0;
+			return {
+				text: fullText,
+				llmMs,
+				ttsMs: Date.now() - ttsStart,
+				firstModelDeltaMs,
+				firstSentenceMs: firstModelDeltaMs,
+				firstAudioMs: firstAudioSentAt ? firstAudioSentAt - pipelineStart : 0
+			};
 		}
 		async #streamingTTSPipeline(connection, tokenStream, llmStart, pipelineStart, signal) {
-			const chunker = new SentenceChunker();
+			const tts = this.#requireTTS();
+			const chunker = new SentenceChunker(typeof tts.synthesizeStream === "function" ? STREAMING_TTS_MAX_CHARS : Number.POSITIVE_INFINITY);
 			const ttsQueue = [];
 			let fullText = "";
 			let pendingTranscriptText = "";
@@ -2893,7 +3702,6 @@ function withVoice(Base, voiceOptions) {
 					drainWaiters.set(target, waiters);
 				});
 			};
-			const tts = this.#requireTTS();
 			const drainPromise = (async () => {
 				let i = 0;
 				while (true) {
@@ -3007,7 +3815,10 @@ function withVoice(Base, voiceOptions) {
 					trace("model_first_delta");
 				}
 				fullText += token;
-				this.#assistantEchoText.set(connection.id, fullText);
+				this.#activeAssistantText.set(connection.id, {
+					signal,
+					text: fullText
+				});
 				sendAssistantDelta(token);
 				const sentences = chunker.add(token);
 				for (const sentence of sentences) enqueueSentence(sentence);
@@ -3041,7 +3852,14 @@ function withVoice(Base, voiceOptions) {
 			};
 		}
 		#sendJSON(connection, data) {
-			sendVoiceJSON(connection, data, "VoiceAgent", data.type === "transcript_delta");
+			const parsed = data;
+			if ((parsed.type === "transcript" || parsed.type === "transcript_interim" || parsed.type === "transcript_end") && typeof parsed.text === "string") console.log("[VoiceTrace]", {
+				event: parsed.type === "transcript_interim" ? "client_transcript_interim" : "client_transcript",
+				connectionId: connection.id,
+				role: parsed.type === "transcript_end" ? "assistant" : "user",
+				text: parsed.text
+			});
+			sendVoiceJSON(connection, data, "VoiceAgent", parsed.type === "transcript_delta");
 		}
 	}
 	return VoiceAgentMixin;
@@ -3090,6 +3908,6 @@ function eagerAsyncIterable(source) {
 	} };
 }
 //#endregion
-export { SFUVoiceTransport, SentenceChunker, VOICE_PROTOCOL_VERSION, WorkersAIFluxSTT, WorkersAIMulawRealtimeTTS, WorkersAINova3STT, WorkersAITTS, addSFUTracks, closeSFUWebSocketAdapter, createSFUSession, createSFUWebSocketAdapter, decodeVarint, downsample48kStereoTo16kMono, encodePayloadToProtobuf, encodeVarint, extractPayloadFromProtobuf, iterateText, renegotiateSFUSession, resample24kMonoTo48kStereo, resampleMonoTo48kStereo, sfuFetch, upsample16kMonoTo48kStereo, withSFUVoice, withVoice, withVoiceInput };
+export { SFUVoiceTransport, SentenceChunker, StreamingMp3ToPcm16, VOICE_PROTOCOL_VERSION, VoiceRpcCallback, WorkersAIFluxSTT, WorkersAIGrokTTS, WorkersAINova3STT, WorkersAIRealtimeTTS, WorkersAITTS, addSFUTracks, closeSFUWebSocketAdapter, convertTTSProvider, createSFUSession, createSFUWebSocketAdapter, decodeVarint, downsample48kStereoTo16kMono, encodePayloadToProtobuf, encodeVarint, extractPayloadFromProtobuf, getSFUSession, iterateText, mp3ToPcm16, renegotiateSFUSession, resample24kMonoTo48kStereo, resampleMonoTo48kStereo, sfuFetch, streamRpcVoiceTurn, updateSFUTracks, upsample16kMonoTo48kStereo, withSFUVoice, withVoice, withVoiceInput };
 
 //# sourceMappingURL=voice.js.map

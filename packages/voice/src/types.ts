@@ -295,6 +295,10 @@ export interface VoiceAudioInput {
   setMuted?(muted: boolean): void;
   /** Select the input-owned assistant playback device. */
   setOutputDevice?(deviceId: string): void | Promise<void>;
+  /** True when the input's media session is still connected. */
+  isConnected?(): boolean;
+  /** Called by the input when its media connection is lost. */
+  onConnectionLost?: (() => void) | null;
 }
 
 // --- Server audio transport ---
@@ -308,6 +312,13 @@ export interface VoiceServerAudioTransport {
   flush(connectionId: string): void | Promise<void>;
   interrupt(connectionId: string): void | Promise<void>;
   stop(connectionId: string): void | Promise<void>;
+  /** Suspend the transport, keeping media alive for a brief grace window. */
+  suspend?(connectionId: string): void;
+  /** Re-attach after suspension. */
+  resume?(
+    connectionId: string,
+    onAudio: (audio: ArrayBuffer) => void
+  ): void | Promise<void>;
 }
 
 // --- Voice transport ---

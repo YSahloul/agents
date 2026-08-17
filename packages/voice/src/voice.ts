@@ -133,6 +133,8 @@ export {
   sfuFetch,
   createSFUSession,
   addSFUTracks,
+  updateSFUTracks,
+  getSFUSession,
   renegotiateSFUSession,
   createSFUWebSocketAdapter,
   closeSFUWebSocketAdapter
@@ -436,9 +438,13 @@ export function withVoice<TBase extends AgentLike>(
         const transport = this.#audioTransports.get(connection.id);
         if (transport) {
           this.#audioTransports.delete(connection.id);
-          runBackground("audio_transport_stop", () =>
-            transport.stop(connection.id)
-          );
+          if (transport.suspend) {
+            transport.suspend(connection.id);
+          } else {
+            runBackground("audio_transport_stop", () =>
+              transport.stop(connection.id)
+            );
+          }
         }
         this.#cancelSpeculativeTurn(connection.id, "connection_closed");
         return _onClose?.(connection, ...rest);
@@ -894,9 +900,13 @@ export function withVoice<TBase extends AgentLike>(
         const transport = await this.createAudioTransport(connection);
         if (transport) {
           this.#audioTransports.set(connection.id, transport);
-          await transport.start(connection.id, (audio) =>
-            this.receiveAudio(connection.id, audio)
-          );
+          const onAudio = (audio: ArrayBuffer) =>
+            this.receiveAudio(connection.id, audio);
+          if (resumed === true && transport.resume) {
+            await transport.resume(connection.id, onAudio);
+          } else {
+            await transport.start(connection.id, onAudio);
+          }
           if (!this.#isCurrentStartup(connection.id, startupToken)) return;
         }
         if (!this.#isCurrentStartup(connection.id, startupToken)) return;

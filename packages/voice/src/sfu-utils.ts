@@ -194,7 +194,7 @@ export interface SFUConfig {
 
 const DEFAULT_SFU_API_BASE = "https://rtc.live.cloudflare.com/v1";
 
-type SFUMethod = "POST" | "PUT";
+type SFUMethod = "GET" | "POST" | "PUT";
 
 async function requestSFU(
   config: SFUConfig,
@@ -262,6 +262,27 @@ export function addSFUTracks(
     "POST",
     body
   );
+}
+
+export function updateSFUTracks(
+  config: SFUConfig,
+  sessionId: string,
+  body: unknown
+): Promise<unknown> {
+  return requestSFU(
+    config,
+    "update tracks",
+    `/sessions/${sessionId}/tracks/update`,
+    "PUT",
+    body
+  );
+}
+
+export function getSFUSession(
+  config: SFUConfig,
+  sessionId: string
+): Promise<unknown> {
+  return requestSFU(config, "get session", `/sessions/${sessionId}`, "GET");
 }
 
 export function renegotiateSFUSession(

@@ -697,4 +697,110 @@ describe("SFUVoiceTransport", () => {
     expect(await publish?.text()).toContain("callback timeout after all retry");
     expect(loadState).toHaveBeenCalledTimes(1);
   });
+  it("suspends media without teardown and resumes to rebind the connection", async () => {
+    const { calls, fetchMock } = createSfuFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    let state: SFUVoiceState | null = {
+      tts: {
+        sessionId: "tts-session",
+        adapterId: "tts-adapter",
+        trackName: "track"
+      },
+      stt: {
+        sessionId: "stt-session",
+        adapterId: "stt-adapter",
+        trackName: "mic",
+        callbackUrl: "wss://example.com/callback"
+      }
+    };
+    const transport = new SFUVoiceTransport({
+      config: CONFIG,
+      loadState: async () => state,
+      saveState: async (next) => {
+        state = next;
+      }
+    });
+    upgrade(transport, "/voice/tts/subscribe");
+    await transport.start("call", () => {});
+
+    transport.suspend("call");
+    expect(
+      calls.filter((call) => call.path.endsWith("/adapters/websocket/close"))
+    ).toHaveLength(0);
+    expect(state).not.toBeNull();
+    expect(() => transport.send("call", new ArrayBuffer(0))).toThrow(
+      "SFU voice transport connection is not active"
+    );
+
+    await transport.resume("call2", () => {});
+    expect(() => transport.send("call2", new ArrayBuffer(0))).not.toThrow();
+    expect(() => transport.send("call", new ArrayBuffer(0))).toThrow(
+      "SFU voice transport connection is not active"
+    );
+
+    // Resume cancels the grace timer: nothing tears down after 30s.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(
+      calls.filter((call) => call.path.endsWith("/adapters/websocket/close"))
+    ).toHaveLength(0);
+    expect(state).not.toBeNull();
+  });
+
+  it("tears down after the grace period expires while suspended", async () => {
+    const { calls, fetchMock } = createSfuFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    let state: SFUVoiceState | null = {
+      tts: {
+        sessionId: "tts-session",
+        adapterId: "tts-adapter",
+        trackName: "track"
+      },
+      stt: {
+        sessionId: "stt-session",
+        adapterId: "stt-adapter",
+        trackName: "mic",
+        callbackUrl: "wss://example.com/callback"
+      }
+    };
+    const transport = new SFUVoiceTransport({
+      config: CONFIG,
+      loadState: async () => state,
+      saveState: async (next) => {
+        state = next;
+      }
+    });
+    upgrade(transport, "/voice/tts/subscribe");
+    await transport.start("call", () => {});
+
+    transport.suspend("call");
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(
+      calls.filter((call) => call.path.endsWith("/adapters/websocket/close"))
+    ).toHaveLength(2);
+    expect(state).toBeNull();
+  });
+
+  it("emits a silent keepalive frame when idle and stops after stop()", async () => {
+    const { fetchMock } = createSfuFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new SFUVoiceTransport({ config: CONFIG });
+    const socket = upgrade(transport, "/voice/tts/subscribe");
+    await transport.start("call", () => {});
+
+    const frames: ArrayBuffer[] = [];
+    socket.addEventListener("message", (event) => {
+      frames.push(event.data as ArrayBuffer);
+    });
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(frames).toHaveLength(1);
+    const payload = extractPayloadFromProtobuf(frames[0]);
+    expect(payload?.byteLength).toBe(3840);
+    expect(new Set(new Int16Array(payload!.buffer))).toEqual(new Set([0]));
+
+    await transport.stop("call");
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(frames).toHaveLength(1);
+  });
 });

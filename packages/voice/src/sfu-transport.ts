@@ -60,6 +60,8 @@ type SocketWaiter = {
 
 const FRAME_BYTES = 3840;
 const FRAME_INTERVAL_MS = 20;
+const GRACE_PERIOD_MS = 30_000;
+const KEEPALIVE_INTERVAL_MS = 20_000;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -93,6 +95,8 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
   #partialFrame = new Uint8Array();
   #partialInputByte: number | null = null;
   #pacingTimer: ReturnType<typeof setInterval> | null = null;
+  #suspendTimer: ReturnType<typeof setTimeout> | null = null;
+  #keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: SFUVoiceTransportOptions) {
     this.#config = options.config;
@@ -113,17 +117,20 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     if (this.#connectionId && this.#connectionId !== connectionId) {
       throw new Error("SFU voice transport already has an active call");
     }
+    this.#clearSuspendTimer();
     this.#connectionId = connectionId;
     this.#onAudio = onAudio;
     this.#sttFrameCount = 0;
     this.#sttPeak = 0;
     this.#partialInputByte = null;
+    this.#startKeepalive();
     try {
       await this.#waitForTtsSocket(10_000);
     } catch (error) {
       if (this.#connectionId === connectionId) {
         this.#connectionId = null;
         this.#onAudio = null;
+        this.#clearKeepalive();
       }
       throw error;
     }
@@ -211,11 +218,45 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
   }
 
   async stop(connectionId: string): Promise<void> {
+    this.#clearSuspendTimer();
     if (this.#connectionId !== connectionId) return;
 
     this.#connectionId = null;
     this.#onAudio = null;
+    await this.#teardown();
+  }
+
+  suspend(connectionId: string): void {
+    if (this.#connectionId !== connectionId) return;
+    if (this.#suspendTimer) return;
+    this.#connectionId = null;
+    this.#onAudio = null;
+    this.#clearKeepalive();
+    this.#suspendTimer = setTimeout(() => {
+      this.#suspendTimer = null;
+      void this.#teardown();
+    }, GRACE_PERIOD_MS);
+  }
+
+  async resume(
+    connectionId: string,
+    onAudio: (audio: ArrayBuffer) => void
+  ): Promise<void> {
+    this.#clearSuspendTimer();
+    this.#connectionId = connectionId;
+    this.#onAudio = onAudio;
+    this.#startKeepalive();
+
+    const state = await this.#loadState();
+    if (state?.stt && !state.stt.adapterId) {
+      await this.#startSttForwarding();
+    }
+    await this.#waitForTtsSocket(10_000);
+  }
+
+  async #teardown(): Promise<void> {
     this.#clearPacing();
+    this.#clearKeepalive();
     this.#rejectQueue(new Error("SFU voice transport stopped"));
     this.#partialFrame = new Uint8Array();
     this.#partialInputByte = null;
@@ -240,6 +281,29 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
       socket.close(1000, "Voice stopped");
     }
     this.#sttSockets.clear();
+  }
+
+  #startKeepalive(): void {
+    if (this.#keepaliveTimer) return;
+    this.#keepaliveTimer = setInterval(() => {
+      const socket = this.#ttsSocket;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      if (this.#queue.length === 0) {
+        socket.send(encodePayloadToProtobuf(new Uint8Array(FRAME_BYTES)));
+      }
+    }, KEEPALIVE_INTERVAL_MS);
+  }
+
+  #clearKeepalive(): void {
+    if (!this.#keepaliveTimer) return;
+    clearInterval(this.#keepaliveTimer);
+    this.#keepaliveTimer = null;
+  }
+
+  #clearSuspendTimer(): void {
+    if (!this.#suspendTimer) return;
+    clearTimeout(this.#suspendTimer);
+    this.#suspendTimer = null;
   }
 
   handleWebSocketUpgrade(request: Request): Response | null {

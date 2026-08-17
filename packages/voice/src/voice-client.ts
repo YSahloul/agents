@@ -462,6 +462,11 @@ export class VoiceClient {
         this.#transport.sendBinary(pcm);
       }
     };
+    audioInput.onConnectionLost = () => {
+      if (this.#inCall && this.#transport) {
+        void this.#recoverCall(this.#transport);
+      }
+    };
   }
 
   #clearCallRecovery(): void {
@@ -489,6 +494,10 @@ export class VoiceClient {
 
     const callGeneration = ++this.#callGeneration;
     this.#configureAudioInput(audioInput);
+    if (audioInput.isConnected?.()) {
+      transport.sendJSON(this.#callStartMessage(true));
+      return;
+    }
     try {
       await audioInput.start();
       if (

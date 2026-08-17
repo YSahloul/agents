@@ -34,6 +34,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   readonly handlesPlayback = true;
   onAudioLevel: ((rms: number) => void) | null = null;
   onAudioData: ((pcm: ArrayBuffer) => void) | null = null;
+  onConnectionLost: (() => void) | null = null;
 
   readonly #endpoint: string;
   readonly #iceServers: RTCIceServer[];
@@ -55,6 +56,8 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   #playbackAnalyser: AnalyserNode | null = null;
   #playbackSamples: Float32Array<ArrayBuffer> | null = null;
   #shouldStopForwarding = false;
+  #disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  #connectionLostFired = false;
 
   constructor(options: SFUVoiceAudioInputOptions) {
     this.#endpoint = options.endpoint.replace(/\/$/, "");
@@ -68,6 +71,14 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
 
   get microphoneSettings(): MediaTrackSettings | null {
     return this.#microphoneStream?.getAudioTracks()[0]?.getSettings() ?? null;
+  }
+
+  isConnected(): boolean {
+    return (
+      this.#peer !== null &&
+      (this.#peer.connectionState === "connected" ||
+        this.#peer.connectionState === "connecting")
+    );
   }
 
   async start(): Promise<void> {
@@ -164,6 +175,21 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
 
       await this.#waitForConnected(peer, generation);
       this.#assertCurrent(generation);
+      this.#connectionLostFired = false;
+      this.#clearDisconnectTimer();
+      peer.addEventListener("connectionstatechange", () => {
+        if (generation !== this.#generation) return;
+        if (peer.connectionState === "failed") {
+          this.#fireConnectionLost();
+        } else if (peer.connectionState === "disconnected") {
+          this.#disconnectTimer ??= setTimeout(() => {
+            this.#disconnectTimer = null;
+            if (generation === this.#generation) this.#fireConnectionLost();
+          }, 5_000);
+        } else if (peer.connectionState === "connected") {
+          this.#clearDisconnectTimer();
+        }
+      });
 
       const pullResponse = await this.#postJSON("rtc/pull", {});
       this.#assertCurrent(generation);
@@ -209,6 +235,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     this.#playbackAnalyser = null;
     this.#playbackSamples = null;
     this.#onPlaybackAudioLevel?.(0);
+    this.#clearDisconnectTimer();
     this.#peer?.close();
     this.#peer = null;
     this.#microphoneStream?.getTracks().forEach((track) => track.stop());
@@ -227,6 +254,21 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     if (clearCallbacks) {
       this.onAudioLevel = null;
       this.onAudioData = null;
+      this.onConnectionLost = null;
+    }
+  }
+
+  #fireConnectionLost(): void {
+    if (this.#connectionLostFired) return;
+    this.#connectionLostFired = true;
+    this.#clearDisconnectTimer();
+    this.onConnectionLost?.();
+  }
+
+  #clearDisconnectTimer(): void {
+    if (this.#disconnectTimer !== null) {
+      clearTimeout(this.#disconnectTimer);
+      this.#disconnectTimer = null;
     }
   }
 

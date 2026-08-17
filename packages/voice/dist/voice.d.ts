@@ -1,37 +1,45 @@
 import {
-  a as TranscriberSessionOptions,
-  c as VoiceAudioFormat,
-  d as VoicePipelineMetrics,
-  f as VoiceRole,
-  g as VoiceTransport,
-  h as VoiceStatus,
-  i as TranscriberSession,
-  l as VoiceAudioInput,
-  m as VoiceServerMessage,
-  n as TTSProvider,
-  o as TranscriptMessage,
-  p as VoiceServerAudioTransport,
-  r as Transcriber,
-  s as VOICE_PROTOCOL_VERSION,
+  _ as VoiceStatus,
+  a as TranscriberSession,
+  c as VOICE_PROTOCOL_VERSION,
+  d as VoiceCallStartContext,
+  f as VoiceClientMessage,
+  g as VoiceServerMessage,
+  h as VoiceServerAudioTransport,
+  i as Transcriber,
+  l as VoiceAudioFormat,
+  m as VoiceRole,
+  n as StreamingTextTTSProvider,
+  o as TranscriberSessionOptions,
+  p as VoicePipelineMetrics,
+  r as TTSProvider,
+  s as TranscriptMessage,
   t as StreamingTTSProvider,
-  u as VoiceClientMessage
-} from "./types-BmCmlGn2.js";
+  u as VoiceAudioInput,
+  v as VoiceTransport
+} from "./types-DN26t5k2.js";
+import { RpcTarget } from "cloudflare:workers";
 import { Agent, Connection } from "agents";
 
 //#region src/sentence-chunker.d.ts
 /**
- * Sentence chunker — accumulates streaming text and yields complete sentences.
+ * Sentence chunker — accumulates streaming text and yields speech-ready chunks.
  *
- * Isolated and testable: no dependencies on the voice pipeline, Agent, or AI APIs.
- * Feed it tokens via `add()`, get back sentences via the return value.
- * Call `flush()` at end-of-stream to get any remaining text.
+ * By default it emits complete sentences. A finite `maxChunkLength` also emits
+ * bounded phrases at clause or word boundaries, allowing TTS to start while a
+ * long sentence is still being generated.
  *
- * Current implementation: splits on sentence-ending punctuation (. ! ?) followed
- * by a space or end-of-input. This is intentionally simple — optimize later with
- * better heuristics (abbreviations, decimal numbers, quoted speech, etc.).
+ * Isolated and testable: no dependencies on the voice pipeline, Agent, or AI
+ * APIs. Feed it tokens via `add()`, get back chunks via the return value. Call
+ * `flush()` at end-of-stream to get any remaining text.
  */
 declare class SentenceChunker {
   #private;
+  private readonly maxChunkLength;
+  /**
+   * @param maxChunkLength Maximum phrase length. Omit to split only sentences.
+   */
+  constructor(maxChunkLength?: number);
   /**
    * Add a chunk of text (e.g. a streamed LLM token).
    * Returns an array of complete sentences extracted from the buffer.
@@ -50,6 +58,68 @@ declare class SentenceChunker {
   reset(): void;
 }
 //#endregion
+//#region src/audio-converters.d.ts
+interface Mp3ToPcm16Options {
+  /** Output sample rate. Preserve the MP3 sample rate when omitted. */
+  sampleRate?: number;
+  /** Output channel count. Preserve the MP3 channel count when omitted. */
+  channels?: 1 | 2;
+}
+interface Pcm16Chunk {
+  audio: Uint8Array;
+  sampleRate: number;
+  channels: number;
+}
+interface AudioChunkConverter {
+  push(chunk: Uint8Array): Uint8Array | null;
+  finish(): Uint8Array | null;
+}
+interface AudioConverter {
+  readonly inputFormat: VoiceAudioFormat;
+  readonly outputFormat: VoiceAudioFormat;
+  readonly sampleRate?: number;
+  createStream(): Promise<AudioChunkConverter>;
+}
+interface Mp3ToPcm16ConverterOptions {
+  sampleRate: number;
+}
+interface ConvertTTSProviderOptions {
+  provider: TTSProvider;
+  converter: AudioConverter;
+}
+type ConvertedTTSProvider = TTSProvider &
+  StreamingTTSProvider &
+  Partial<StreamingTextTTSProvider>;
+/**
+ * Incrementally decodes an MP3 byte stream to signed little-endian PCM16.
+ *
+ * Each instance handles one MP3 stream. It can preserve the MP3's native
+ * sample rate and channel count or normalize both for a transport.
+ */
+declare class StreamingMp3ToPcm16 {
+  #private;
+  private readonly wasm;
+  private readonly options;
+  private constructor();
+  static create(options?: Mp3ToPcm16Options): Promise<StreamingMp3ToPcm16>;
+  push(chunk: Uint8Array): Pcm16Chunk | null;
+  finish(): Pcm16Chunk | null;
+}
+/** Configure reusable MP3-to-mono-PCM16 conversion for provider composition. */
+declare function mp3ToPcm16(
+  options: Mp3ToPcm16ConverterOptions
+): AudioConverter;
+/**
+ * Wrap any TTS provider with an injected audio converter.
+ *
+ * A fresh converter stream is created for every synthesis call, so providers
+ * remain stateless and concurrent calls do not share codec state.
+ */
+declare function convertTTSProvider({
+  provider,
+  converter
+}: ConvertTTSProviderOptions): ConvertedTTSProvider;
+//#endregion
 //#region src/voice-input.d.ts
 type Constructor$2<T = object> = new (...args: any[]) => T;
 type AgentLike$2 = Constructor$2<Pick<Agent<Cloudflare.Env>, "keepAlive">>;
@@ -59,7 +129,10 @@ interface VoiceInputMixinMembers {
   onTranscript(text: string, connection: Connection): void | Promise<void>;
   createTranscriber(connection: Connection): Transcriber | null;
   beforeCallStart(connection: Connection): boolean | Promise<boolean>;
-  onCallStart(connection: Connection): void | Promise<void>;
+  onCallStart(
+    connection: Connection,
+    context: VoiceCallStartContext
+  ): void | Promise<void>;
   onCallEnd(connection: Connection): void | Promise<void>;
   onInterrupt(connection: Connection): void | Promise<void>;
   afterTranscribe(
@@ -133,6 +206,61 @@ interface TextReadableStream {
  */
 declare function iterateText(source: TextSource): AsyncGenerator<string>;
 //#endregion
+//#region src/rpc-voice.d.ts
+interface VoiceRpcCallbackOptions {
+  /** Called when the remote turn exposes its cancellation request id. */
+  onRequestId?: (requestId: string) => void;
+}
+/**
+ * RPC callback for streaming text from any remote agent into Voice.
+ *
+ * Targets that emit JSON-serialized AI SDK stream events can call `onEvent()`.
+ * Other targets can call `onText()` directly.
+ */
+declare class VoiceRpcCallback extends RpcTarget {
+  #private;
+  constructor(options?: VoiceRpcCallbackOptions);
+  onStart(event: { requestId: string }): void;
+  /** Stream a plain text delta from a custom RPC target. */
+  onText(text: string): void;
+  /** Consume a JSON-serialized AI SDK stream event. */
+  onEvent(json: string): void;
+  onDone(): void;
+  onError(error: string): void;
+  onInterrupted(): void;
+  requestId(): string | undefined;
+  hasText(): boolean;
+  wasInterrupted(): boolean;
+  close(): void;
+  fail(error: unknown): void;
+  stream(): AsyncIterable<string>;
+}
+interface RpcVoiceTurnOptions {
+  /** The Voice turn abort signal. */
+  signal: AbortSignal;
+  /** Start the remote turn and keep this promise pending until it completes. */
+  run: (callback: VoiceRpcCallback) => Promise<void>;
+  /** Cancel the remote turn after `onStart()` exposes its request id. */
+  cancel?: (requestId: string, reason: string) => Promise<void> | void;
+  /** Observe the remote request id, for logging or correlation. */
+  onRequestId?: (requestId: string) => void;
+  /** Spoken only when the completed remote turn produced no visible text. */
+  emptyResponse?: string;
+  /** Cancellation reason passed to the remote target. */
+  interruptionReason?: string;
+}
+/**
+ * Start an RPC-backed agent turn and return its text stream to `withVoice()`.
+ *
+ * The callback is a Workers `RpcTarget`, so the remote target can stream into
+ * it while `run()` remains pending. Aborting the Voice turn closes the local
+ * stream immediately and, once available, forwards the request id to
+ * `cancel()`.
+ */
+declare function streamRpcVoiceTurn(
+  options: RpcVoiceTurnOptions
+): AsyncIterable<string>;
+//#endregion
 //#region src/sfu-utils.d.ts
 /**
  * Pure utility functions for the Cloudflare Realtime SFU integration.
@@ -187,10 +315,22 @@ declare function addSFUTracks(
   sessionId: string,
   body: unknown
 ): Promise<unknown>;
+declare function updateSFUTracks(
+  config: SFUConfig,
+  sessionId: string,
+  body: unknown
+): Promise<unknown>;
+declare function getSFUSession(
+  config: SFUConfig,
+  sessionId: string
+): Promise<unknown>;
 declare function renegotiateSFUSession(
   config: SFUConfig,
   sessionId: string,
-  sdp: string
+  sessionDescription: {
+    type?: string;
+    sdp: string;
+  }
 ): Promise<unknown>;
 declare function createSFUWebSocketAdapter(
   config: SFUConfig,
@@ -209,7 +349,6 @@ interface SFUVoiceState {
     sessionId: string;
     adapterId: string;
     trackName: string;
-    playerSessionId?: string;
   };
   stt?: {
     sessionId: string;
@@ -236,6 +375,11 @@ declare class SFUVoiceTransport implements VoiceServerAudioTransport {
   flush(connectionId: string): Promise<void>;
   interrupt(connectionId: string): void;
   stop(connectionId: string): Promise<void>;
+  suspend(connectionId: string): void;
+  resume(
+    connectionId: string,
+    onAudio: (audio: ArrayBuffer) => void
+  ): Promise<void>;
   handleWebSocketUpgrade(request: Request): Response | null;
   handleHttpRequest(request: Request): Promise<Response | null>;
 }
@@ -259,6 +403,7 @@ declare function withSFUVoice<TBase extends AgentLike$1>(
 //#region src/workers-ai-providers.d.ts
 /** Loose type for the Workers AI binding — avoids hard dependency on @cloudflare/workers-types. */
 interface AiLike {
+  fetch?(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   run(
     model: string,
     input: Record<string, unknown>,
@@ -268,6 +413,13 @@ interface AiLike {
 interface WorkersAITTSOptions {
   /** TTS model name. @default "@cf/deepgram/aura-1" */
   model?: string;
+  /**
+   * Model-specific fields merged with the synthesized text. When provided,
+   * Deepgram-specific speaker and encoding fields are not added.
+   */
+  input?: Record<string, unknown>;
+  /** Declared output format for model-specific inputs. */
+  audioFormat?: VoiceAudioFormat;
   /** TTS speaker voice. @default "asteria" */
   speaker?: string;
   /** Output audio encoding. */
@@ -289,47 +441,88 @@ interface WorkersAITTSOptions {
  */
 declare class WorkersAITTS implements TTSProvider {
   #private;
+  readonly audioFormat: VoiceAudioFormat | undefined;
+  readonly sampleRate: number | undefined;
   constructor(ai: AiLike, options?: WorkersAITTSOptions);
   synthesize(text: string, signal?: AbortSignal): Promise<ArrayBuffer | null>;
 }
-interface WorkersAIMulawRealtimeTTSOptions {
-  /** TTS model name. @default "@cf/deepgram/aura-2-en" */
-  model?: string;
-  /** TTS speaker voice. @default "asteria" */
+type WorkersAIRealtimeTTSOptions = {
+  /** TTS model name. @default "@cf/deepgram/aura-2-en" */ model?: string /** TTS speaker voice. @default "asteria" */;
   speaker?: string;
-}
+} & (
+  | {
+      encoding?: "mulaw";
+      sampleRate?: 8000;
+    }
+  | {
+      encoding: "linear16";
+      sampleRate?: 24000;
+    }
+);
 /**
  * Workers AI text-to-speech over the binding's native WebSocket mode
- * (`env.AI.run(model, input, { websocket: true })`), fixed to 8 kHz μ-law —
- * the encoding a phone carrier's wire format expects, so audio forwards
- * byte-for-byte with no resampling.
+ * (`env.AI.run(model, input, { websocket: true })`).
  *
  * Implements {@link StreamingTTSProvider}: one socket per sentence, and the
- * generator returning *is* completion. There is no session to keep alive, no
- * Speak/Flush/Clear protocol to reconcile, and no acknowledgement to lose — a
- * socket that dies mid-utterance throws into the caller's `for await` instead
- * of leaving a pending promise nobody settles. Interruption is the consumer
- * abandoning the iterator (or aborting the signal), which closes the socket.
+ * generator returning *is* completion. Interruption is the consumer abandoning
+ * the iterator (or aborting the signal), which closes the socket.
  *
  * Inherits {@link WorkersAITTS.synthesize} as the non-streaming fallback.
  *
  * @example
  * ```ts
  * class MyAgent extends VoiceAgent<Env> {
- *   tts = new WorkersAIMulawRealtimeTTS(this.env.AI);
+ *   tts = new WorkersAIRealtimeTTS(this.env.AI);
  * }
  * ```
  */
-declare class WorkersAIMulawRealtimeTTS
+declare class WorkersAIRealtimeTTS
   extends WorkersAITTS
   implements StreamingTTSProvider
 {
   #private;
   readonly audioFormat: VoiceAudioFormat;
-  readonly sampleRate = 8000;
-  constructor(ai: AiLike, options?: WorkersAIMulawRealtimeTTSOptions);
+  readonly sampleRate: number;
+  constructor(ai: AiLike, options?: WorkersAIRealtimeTTSOptions);
   synthesizeStream(
     text: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer>;
+}
+interface WorkersAIGrokTTSOptions {
+  /** Grok voice. @default "ara" */
+  voice?: string;
+  /** BCP-47 language code. @default "en" */
+  language?: string;
+  /** Emitted audio format. @default "pcm16" */
+  audioFormat?: "mp3" | "pcm16";
+  /**
+   * xAI streaming latency optimization. `1` lowers first-audio latency with a
+   * minor quality tradeoff. @default 1
+   */
+  optimizeStreamingLatency?: 0 | 1 | 2;
+}
+/**
+ * Streaming xAI Grok TTS through the Workers AI binding.
+ *
+ * Grok's MP3 WebSocket output can be emitted directly or decoded to PCM16 as
+ * each chunk arrives, so callers need neither an xAI API key nor a complete
+ * audio download.
+ */
+declare class WorkersAIGrokTTS
+  implements TTSProvider, StreamingTTSProvider, StreamingTextTTSProvider
+{
+  #private;
+  readonly audioFormat: VoiceAudioFormat;
+  readonly sampleRate = 24000;
+  constructor(ai: AiLike, options?: WorkersAIGrokTTSOptions);
+  synthesize(text: string, signal?: AbortSignal): Promise<ArrayBuffer | null>;
+  synthesizeStream(
+    text: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer>;
+  synthesizeTextStream(
+    text: ReadableStream<string>,
     signal?: AbortSignal
   ): AsyncGenerator<ArrayBuffer>;
 }
@@ -456,6 +649,28 @@ interface VoiceAgentOptions {
   persistMessages?: boolean;
   /** Max conversation messages to retain. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
+  /**
+   * Drop transcriptions that closely match the previous assistant message.
+   * This suppresses speakerphone echo after STT without disabling barge-in.
+   * @default false
+   */
+  filterEchoedTranscripts?: boolean;
+  /**
+   * Accept inbound audio while `onCallStart()` runs. Disable when the hook
+   * plays an opening greeting and the transport can loop that audio back into
+   * STT. The opening hook is not interruptible while disabled. @default true
+   */
+  listenDuringCallStart?: boolean;
+  /**
+   * Minimum words the transcript must contain before a barge-in is allowed
+   * to interrupt active playback. Suppresses single-word backchannels
+   * ("yeah", "okay") and short echo fragments from cutting off the
+   * assistant mid-sentence. Applies to every transcript-bearing trigger
+   * (`flux_speech_start`, `flux_eager_utterance`, `flux_confirmed_utterance`)
+   * -- client-side `audio_level` interrupts carry no transcript and are
+   * never gated by this option. `0` disables the gate. @default 0
+   */
+  minInterruptWords?: number;
 }
 type Constructor<T = object> = new (...args: any[]) => T;
 type AgentLike = Constructor<Agent<Cloudflare.Env>>;
@@ -472,7 +687,10 @@ interface VoiceAgentMixinMembers {
     | Promise<VoiceServerAudioTransport | null>;
   receiveAudio(connectionId: string, audio: ArrayBuffer): void;
   beforeCallStart(connection: Connection): boolean | Promise<boolean>;
-  onCallStart(connection: Connection): void | Promise<void>;
+  onCallStart(
+    connection: Connection,
+    context: VoiceCallStartContext
+  ): void | Promise<void>;
   onCallEnd(connection: Connection): void | Promise<void>;
   onInterrupt(connection: Connection): void | Promise<void>;
   afterTranscribe(
@@ -532,13 +750,23 @@ declare function withVoice<TBase extends AgentLike>(
 ): VoiceAgentMixinReturn<TBase>;
 //#endregion
 export {
+  type AudioChunkConverter,
+  type AudioConverter,
+  type ConvertTTSProviderOptions,
+  type ConvertedTTSProvider,
+  type Mp3ToPcm16ConverterOptions,
+  type Mp3ToPcm16Options,
+  type Pcm16Chunk,
+  type RpcVoiceTurnOptions,
   type SFUConfig,
   type SFUVoiceAgentOptions,
   type SFUVoiceState,
   SFUVoiceTransport,
   type SFUVoiceTransportOptions,
   SentenceChunker,
+  StreamingMp3ToPcm16,
   type StreamingTTSProvider,
+  type StreamingTextTTSProvider,
   type TTSProvider,
   type TextSource,
   type Transcriber,
@@ -550,9 +778,12 @@ export {
   VoiceAgentOptions,
   type VoiceAudioFormat,
   type VoiceAudioInput,
+  type VoiceCallStartContext,
   type VoiceClientMessage,
   type VoicePipelineMetrics,
   type VoiceRole,
+  VoiceRpcCallback,
+  type VoiceRpcCallbackOptions,
   type VoiceServerAudioTransport,
   type VoiceServerMessage,
   type VoiceStatus,
@@ -560,14 +791,17 @@ export {
   VoiceTurnContext,
   WorkersAIFluxSTT,
   type WorkersAIFluxSTTOptions,
-  WorkersAIMulawRealtimeTTS,
-  type WorkersAIMulawRealtimeTTSOptions,
+  WorkersAIGrokTTS,
+  type WorkersAIGrokTTSOptions,
   WorkersAINova3STT,
   type WorkersAINova3STTOptions,
+  WorkersAIRealtimeTTS,
+  type WorkersAIRealtimeTTSOptions,
   WorkersAITTS,
   type WorkersAITTSOptions,
   addSFUTracks,
   closeSFUWebSocketAdapter,
+  convertTTSProvider,
   createSFUSession,
   createSFUWebSocketAdapter,
   decodeVarint,
@@ -575,11 +809,15 @@ export {
   encodePayloadToProtobuf,
   encodeVarint,
   extractPayloadFromProtobuf,
+  getSFUSession,
   iterateText,
+  mp3ToPcm16,
   renegotiateSFUSession,
   resample24kMonoTo48kStereo,
   resampleMonoTo48kStereo,
   sfuFetch,
+  streamRpcVoiceTurn,
+  updateSFUTracks,
   upsample16kMonoTo48kStereo,
   withSFUVoice,
   withVoice,
