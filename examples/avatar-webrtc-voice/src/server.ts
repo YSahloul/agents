@@ -316,7 +316,8 @@ export class MyThinkAgent extends Think<Env> {
 
 const VoiceAgent = withSFUVoice(Agent, {
   filterEchoedTranscripts: true,
-  listenDuringCallStart: false
+  listenDuringCallStart: false,
+  minInterruptWords: 3
 });
 
 export class MyVoiceAgent extends VoiceAgent<Env> {

@@ -81,6 +81,11 @@ The browser client keeps the upstream speech-detection defaults
 `interruptThreshold: 0.05`, and `interruptChunks: 2`) with continuous
 microphone forwarding -- no client-side gate.
 
+`MyVoiceAgent` sets `minInterruptWords: 3` server-side. Short fragments the
+client-side echo cancellation lets bleed through (a stray word or two of the
+assistant's own TTS) no longer trigger a false barge-in; only transcripts of
+three or more words interrupt active playback.
+
 The Think agent remains the canonical conversation:
 
 ```ts

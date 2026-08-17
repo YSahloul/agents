@@ -72,6 +72,10 @@ function uniqueStreamingTTSPath() {
   return `/agents/test-streaming-tts-voice-agent/voice-test-${++instanceCounter}`;
 }
 
+function uniqueMinInterruptPath() {
+  return `/agents/test-min-interrupt-voice-agent/voice-test-${++instanceCounter}`;
+}
+
 function waitForStatus(ws: WebSocket, status: string) {
   return waitForMessageMatching(
     ws,
@@ -2078,6 +2082,32 @@ describe("VoiceAgent — interrupt", () => {
       unknown
     >;
     expect(counts.interrupt).toBe(1);
+
+    ws.close();
+  });
+
+  it("suppresses barge-in below minInterruptWords but allows longer transcripts", async () => {
+    const { ws } = await connectWS(uniqueMinInterruptPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    sendJSON(ws, { type: "text_message", text: "long response" });
+    await waitForStatus(ws, "thinking");
+
+    sendJSON(ws, { type: "_emit_speech_start", text: "no way" });
+    const belowCounts = await getCounts(ws);
+    expect(belowCounts.interrupt).toBe(0);
+
+    const playbackInterrupt = waitForType(ws, "playback_interrupt");
+    sendJSON(ws, {
+      type: "_emit_speech_start",
+      text: "actually let's talk now"
+    });
+    await playbackInterrupt;
+    const aboveCounts = await getCounts(ws);
+    expect(aboveCounts.interrupt).toBe(1);
 
     ws.close();
   });
