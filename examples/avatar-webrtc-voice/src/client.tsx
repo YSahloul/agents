@@ -26,7 +26,6 @@ import "./styles.css";
 
 const SESSION_ID_KEY = "avatar-voice-session-id";
 const PANEL_STATE_KEY = "avatar-voice-panels";
-const MICROPHONE_GATE_THRESHOLD = 0.06;
 
 type PanelState = {
   activity: boolean;
@@ -237,7 +236,6 @@ function App() {
     () =>
       new SFUVoiceAudioInput({
         endpoint: `/agents/my-voice-agent/${encodeURIComponent(sessionId)}/voice`,
-        noiseGateThreshold: MICROPHONE_GATE_THRESHOLD,
         onPlaybackAudioLevel: (rms) => {
           if (rms > 0.01) {
             if (playbackSilenceTimer.current !== undefined) {
@@ -283,8 +281,6 @@ function App() {
     name: sessionId,
     query: { llm: llmModel, reasoning },
     audioInput,
-    silenceThreshold: MICROPHONE_GATE_THRESHOLD,
-    interruptThreshold: MICROPHONE_GATE_THRESHOLD,
     outputDeviceId,
     onReconnect: () => {
       setToast("Reconnected to agent.");

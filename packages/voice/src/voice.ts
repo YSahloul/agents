@@ -42,7 +42,8 @@ import type {
   StreamingTextTTSProvider,
   Transcriber,
   TranscriberSession,
-  VoiceServerAudioTransport
+  VoiceServerAudioTransport,
+  VoiceCallStartContext
 } from "./types";
 import {
   AudioConnectionManager,
@@ -91,6 +92,7 @@ export type {
   VoiceStatus,
   VoiceRole,
   VoiceAudioFormat,
+  VoiceCallStartContext,
   VoiceAudioInput,
   VoiceTransport,
   VoiceServerAudioTransport,
@@ -261,7 +263,10 @@ export interface VoiceAgentMixinMembers {
     | Promise<VoiceServerAudioTransport | null>;
   receiveAudio(connectionId: string, audio: ArrayBuffer): void;
   beforeCallStart(connection: Connection): boolean | Promise<boolean>;
-  onCallStart(connection: Connection): void | Promise<void>;
+  onCallStart(
+    connection: Connection,
+    context: VoiceCallStartContext
+  ): void | Promise<void>;
   onCallEnd(connection: Connection): void | Promise<void>;
   onInterrupt(connection: Connection): void | Promise<void>;
   afterTranscribe(
@@ -367,7 +372,6 @@ export function withVoice<TBase extends AgentLike>(
       "end_call",
       "start_of_speech",
       "end_of_speech",
-      "noise_gate",
       "interrupt",
       "text_message"
     ]);
@@ -472,8 +476,9 @@ export function withVoice<TBase extends AgentLike>(
                 typeof parsed.preferred_format === "string"
                   ? parsed.preferred_format
                   : undefined;
+              const resumed = "resumed" in parsed && parsed.resumed === true;
               runBackground("start_call", () =>
-                this.#handleStartCall(connection, preferredFormat)
+                this.#handleStartCall(connection, preferredFormat, resumed)
               );
               break;
             }
@@ -497,26 +502,6 @@ export function withVoice<TBase extends AgentLike>(
                   energy?.threshold ??
                   null
               });
-              break;
-            }
-            case "noise_gate": {
-              const event =
-                "event" in parsed &&
-                (parsed.event === "open" ||
-                  parsed.event === "closed" ||
-                  parsed.event === "rejected")
-                  ? parsed.event
-                  : null;
-              const rms = readClientRms(parsed, "rms");
-              const threshold = readClientRms(parsed, "threshold");
-              if (event && rms !== null && threshold !== null) {
-                console.log("[VoiceTrace]", {
-                  event: `noise_gate_${event}`,
-                  connectionId: connection.id,
-                  clientRms: rms,
-                  clientThreshold: threshold
-                });
-              }
               break;
             }
             case "interrupt": {
@@ -584,7 +569,10 @@ export function withVoice<TBase extends AgentLike>(
       return true;
     }
 
-    onCallStart(_connection: Connection): void | Promise<void> {}
+    onCallStart(
+      _connection: Connection,
+      _context: VoiceCallStartContext
+    ): void | Promise<void> {}
     onCallEnd(_connection: Connection): void | Promise<void> {}
     onInterrupt(_connection: Connection): void | Promise<void> {}
 
@@ -845,7 +833,11 @@ export function withVoice<TBase extends AgentLike>(
 
     // --- Internal: call lifecycle ---
 
-    async #handleStartCall(connection: Connection, _preferredFormat?: string) {
+    async #handleStartCall(
+      connection: Connection,
+      _preferredFormat?: string,
+      resumed = false
+    ) {
       if (this.#cm.isInCall(connection.id)) return;
       this.#clientSpeechEnergy.delete(connection.id);
 
@@ -1051,7 +1043,7 @@ export function withVoice<TBase extends AgentLike>(
         this.#callStartInputSuppressed.add(connection.id);
       }
       try {
-        await this.onCallStart(connection);
+        await this.onCallStart(connection, { resumed });
       } finally {
         this.#callStartInputSuppressed.delete(connection.id);
       }

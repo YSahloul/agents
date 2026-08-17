@@ -1,10 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VoiceClient } from "../voice-client";
-import type {
-  VoiceAudioInput,
-  VoiceNoiseGateEvent,
-  VoiceTransport
-} from "../types";
+import type { VoiceAudioInput, VoiceTransport } from "../types";
 
 class MockTransport implements VoiceTransport {
   sentJSON: Record<string, unknown>[] = [];
@@ -170,7 +166,6 @@ class FakeAudioElement {
 class FakeAudioInput implements VoiceAudioInput {
   onAudioLevel: ((rms: number) => void) | null = null;
   onAudioData: ((pcm: ArrayBuffer) => void) | null = null;
-  onNoiseGateEvent: ((event: VoiceNoiseGateEvent) => void) | null = null;
   started = false;
   stopped = false;
   startCount = 0;
@@ -1098,18 +1093,6 @@ describe("VoiceClient speech energy telemetry", () => {
         peak_rms: 0.2,
         threshold: 0.06
       });
-
-      audioInput.onNoiseGateEvent?.({
-        event: "rejected",
-        rms: 0.03,
-        threshold: 0.06
-      });
-      expect(transport.sentJSON).toContainEqual({
-        type: "noise_gate",
-        event: "rejected",
-        rms: 0.03,
-        threshold: 0.06
-      });
     } finally {
       vi.useRealTimers();
     }
@@ -1190,7 +1173,7 @@ describe("VoiceClient playback-owning audio inputs", () => {
       transport.sentJSON.filter((message) => message.type === "start_call")
     ).toEqual([
       { type: "start_call", preferred_format: "pcm16" },
-      { type: "start_call", preferred_format: "pcm16" }
+      { type: "start_call", preferred_format: "pcm16", resumed: true }
     ]);
   });
 

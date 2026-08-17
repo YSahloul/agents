@@ -25,7 +25,7 @@
 
 import type { Agent, Connection, WSMessage } from "agents";
 import { VOICE_PROTOCOL_VERSION } from "./types";
-import type { Transcriber } from "./types";
+import type { Transcriber, VoiceCallStartContext } from "./types";
 import {
   AudioConnectionManager,
   runBackground,
@@ -45,7 +45,10 @@ export interface VoiceInputMixinMembers {
   onTranscript(text: string, connection: Connection): void | Promise<void>;
   createTranscriber(connection: Connection): Transcriber | null;
   beforeCallStart(connection: Connection): boolean | Promise<boolean>;
-  onCallStart(connection: Connection): void | Promise<void>;
+  onCallStart(
+    connection: Connection,
+    context: VoiceCallStartContext
+  ): void | Promise<void>;
   onCallEnd(connection: Connection): void | Promise<void>;
   onInterrupt(connection: Connection): void | Promise<void>;
   afterTranscribe(
@@ -160,7 +163,7 @@ export function withVoiceInput<TBase extends AgentLike>(
           return _onMessage?.(connection, message);
         }
 
-        let parsed: { type: string };
+        let parsed: { type: string; resumed?: unknown };
         try {
           parsed = JSON.parse(message);
         } catch {
@@ -173,7 +176,7 @@ export function withVoiceInput<TBase extends AgentLike>(
               break;
             case "start_call":
               runBackground("start_call", () =>
-                this.#handleStartCall(connection)
+                this.#handleStartCall(connection, parsed.resumed === true)
               );
               break;
             case "end_call":
@@ -214,7 +217,10 @@ export function withVoiceInput<TBase extends AgentLike>(
       return true;
     }
 
-    onCallStart(_connection: Connection): void | Promise<void> {}
+    onCallStart(
+      _connection: Connection,
+      _context: VoiceCallStartContext
+    ): void | Promise<void> {}
     onCallEnd(_connection: Connection): void | Promise<void> {}
     onInterrupt(_connection: Connection): void | Promise<void> {}
 
@@ -227,7 +233,7 @@ export function withVoiceInput<TBase extends AgentLike>(
 
     // --- Internal: call lifecycle ---
 
-    async #handleStartCall(connection: Connection) {
+    async #handleStartCall(connection: Connection, resumed = false) {
       if (this.#cm.isInCall(connection.id)) return;
 
       const startupToken = Symbol(connection.id);
@@ -305,7 +311,7 @@ export function withVoiceInput<TBase extends AgentLike>(
         "VoiceInput"
       );
 
-      await this.onCallStart(connection);
+      await this.onCallStart(connection, { resumed });
     }
 
     #isCurrentStartup(connectionId: string, startupToken: symbol): boolean {

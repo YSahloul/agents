@@ -388,6 +388,24 @@ describe("VoiceAgent — protocol", () => {
     expect(msg).toEqual({ type: "status", status: "listening" });
     ws.close();
   });
+
+  it("identifies recovered call starts", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "end_call" });
+    await waitForStatus(ws, "idle");
+    sendJSON(ws, { type: "start_call", resumed: true });
+    await waitForStatus(ws, "listening");
+
+    expect(await getCounts(ws)).toMatchObject({
+      callStart: 2,
+      callStartResumed: [false, true]
+    });
+    ws.close();
+  });
   it("drops inbound audio while the opening hook runs when configured", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
@@ -2107,25 +2125,6 @@ describe("VoiceAgent — client speech energy telemetry", () => {
       await waitForStatus(ws, "listening");
 
       sendJSON(ws, {
-        type: "noise_gate",
-        event: "rejected",
-        rms: 0.03,
-        threshold: 0.06
-      });
-      sendJSON(ws, {
-        type: "noise_gate",
-        event: "open",
-        rms: 0.08,
-        threshold: 0.06
-      });
-      sendJSON(ws, {
-        type: "noise_gate",
-        event: "closed",
-        rms: 0.02,
-        threshold: 0.06
-      });
-
-      sendJSON(ws, {
         type: "start_of_speech",
         rms: 0.07,
         threshold: 0.06
@@ -2156,24 +2155,6 @@ describe("VoiceAgent — client speech energy telemetry", () => {
         text: "utterance 1 (20000 bytes)",
         clientStartRms: 0.07,
         clientPeakRms: 0.21,
-        clientThreshold: 0.06
-      });
-      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
-        event: "noise_gate_rejected",
-        connectionId: expect.any(String),
-        clientRms: 0.03,
-        clientThreshold: 0.06
-      });
-      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
-        event: "noise_gate_open",
-        connectionId: expect.any(String),
-        clientRms: 0.08,
-        clientThreshold: 0.06
-      });
-      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
-        event: "noise_gate_closed",
-        connectionId: expect.any(String),
-        clientRms: 0.02,
         clientThreshold: 0.06
       });
     } finally {

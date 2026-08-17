@@ -21,6 +21,7 @@ import {
   WorkersAIFluxSTT,
   WorkersAIGrokTTS,
   type SFUConfig,
+  type VoiceCallStartContext,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { createWorkersAI } from "workers-ai-provider";
@@ -38,6 +39,41 @@ function isReasoningModel(m: {
   return (m.properties ?? []).some(
     (p) => p.property_id === "reasoning" && p.value === "true"
   );
+}
+
+/**
+ * Some reasoning models (Kimi K2, DeepSeek-R1/QwQ-style templates) prime the
+ * prompt with an implicit `<think>` and only emit the closing `</think>` in
+ * the completion -- even with `chat_template_kwargs: { enable_thinking: false }`
+ * set, Workers AI does not honor it for every reasoning model. Buffer text
+ * until the first `</think>` and drop everything up to it so reasoning is
+ * never spoken or shown. If no closing tag ever appears, flush the buffered
+ * text unchanged at stream end -- normal answers are never lost, only
+ * unbuffered late.
+ * ponytail: buffers the whole turn when a model never emits `</think>`,
+ * losing early TTS start for that turn. Upgrade: key this off the model's
+ * `reasoning` catalog flag once `onTurn` can see it.
+ */
+async function* stripThinkTags(
+  source: AsyncIterable<string>
+): AsyncGenerator<string> {
+  const CLOSE_TAG = "</think>";
+  let buffering = true;
+  let buffer = "";
+  for await (const chunk of source) {
+    if (!buffering) {
+      yield chunk;
+      continue;
+    }
+    buffer += chunk;
+    const closeIndex = buffer.indexOf(CLOSE_TAG);
+    if (closeIndex === -1) continue;
+    buffering = false;
+    const after = buffer.slice(closeIndex + CLOSE_TAG.length);
+    buffer = "";
+    if (after) yield after;
+  }
+  if (buffering && buffer) yield buffer;
 }
 
 const DEFAULT_MODEL = "@cf/moonshotai/kimi-k2.7-code";
@@ -326,26 +362,31 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
 
     const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
     const turnId = crypto.randomUUID();
-    return streamRpcVoiceTurn({
-      signal: context.signal,
-      run: (callback) =>
-        brain.runVoiceTurn(turnId, transcript, callback, {
-          model,
-          ...(effort !== undefined && { reasoningEffort: effort })
-        }),
-      cancel: (requestId, reason) => brain.cancelChat(requestId, reason),
-      onRequestId: (requestId) => {
-        console.log("[ThinkTrace]", {
-          event: "request_start",
-          turnId,
-          requestId
-        });
-      }
-    });
+    return stripThinkTags(
+      streamRpcVoiceTurn({
+        signal: context.signal,
+        run: (callback) =>
+          brain.runVoiceTurn(turnId, transcript, callback, {
+            model,
+            ...(effort !== undefined && { reasoningEffort: effort })
+          }),
+        cancel: (requestId, reason) => brain.cancelChat(requestId, reason),
+        onRequestId: (requestId) => {
+          console.log("[ThinkTrace]", {
+            event: "request_start",
+            turnId,
+            requestId
+          });
+        }
+      })
+    );
   }
 
-  async onCallStart(connection: Connection) {
-    await this.speak(connection, this.#greeting);
+  async onCallStart(
+    connection: Connection,
+    { resumed }: VoiceCallStartContext
+  ) {
+    if (!resumed) await this.speak(connection, this.#greeting);
   }
 }
 

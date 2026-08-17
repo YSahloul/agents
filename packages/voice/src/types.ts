@@ -28,17 +28,20 @@ export type VoiceAudioFormat = "mp3" | "pcm16" | "wav" | "opus" | "mulaw";
 
 export type VoiceRole = "user" | "assistant";
 
-export type VoiceNoiseGateEvent = {
-  event: "open" | "closed" | "rejected";
-  rms: number;
-  threshold: number;
-};
+export interface VoiceCallStartContext {
+  /** True when an active call is rebuilding its transport after reconnecting. */
+  resumed: boolean;
+}
 
 // --- Wire protocol: Client → Server ---
 
 export type VoiceClientMessage =
   | { type: "hello"; protocol_version?: number }
-  | { type: "start_call"; preferred_format?: VoiceAudioFormat }
+  | {
+      type: "start_call";
+      preferred_format?: VoiceAudioFormat;
+      resumed?: boolean;
+    }
   | { type: "end_call" }
   | {
       type: "start_of_speech";
@@ -49,12 +52,6 @@ export type VoiceClientMessage =
       type: "end_of_speech";
       peak_rms?: number;
       threshold?: number;
-    }
-  | {
-      type: "noise_gate";
-      event: VoiceNoiseGateEvent["event"];
-      rms: number;
-      threshold: number;
     }
   | { type: "interrupt"; source?: "audio_level" }
   | { type: "text_message"; text: string };
@@ -279,8 +276,6 @@ export interface VoiceAudioInput {
    * silence detection, interrupt detection, and update the UI.
    */
   onAudioLevel: ((rms: number) => void) | null;
-  /** Reports aggregated noise-gate transitions without continuous level traffic. */
-  onNoiseGateEvent?: ((event: VoiceNoiseGateEvent) => void) | null;
 
   /**
    * Set by VoiceClient before start(). If the audio input provides

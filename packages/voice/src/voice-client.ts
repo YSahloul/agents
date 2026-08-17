@@ -446,11 +446,12 @@ export class VoiceClient {
       );
     }
   }
-  #callStartMessage(): Record<string, unknown> {
+  #callStartMessage(resumed = false): Record<string, unknown> {
     const message: Record<string, unknown> = { type: "start_call" };
     if (this.#options.preferredFormat) {
       message.preferred_format = this.#options.preferredFormat;
     }
+    if (resumed) message.resumed = true;
     return message;
   }
 
@@ -459,16 +460,6 @@ export class VoiceClient {
     audioInput.onAudioData = (pcm) => {
       if (this.#transport?.connected && !this.#isMuted) {
         this.#transport.sendBinary(pcm);
-      }
-    };
-    audioInput.onNoiseGateEvent = ({ event, rms, threshold }) => {
-      if (this.#transport?.connected) {
-        this.#transport.sendJSON({
-          type: "noise_gate",
-          event,
-          rms,
-          threshold
-        });
       }
     };
   }
@@ -492,7 +483,7 @@ export class VoiceClient {
 
     const audioInput = this.#options.audioInput;
     if (!audioInput?.handlesPlayback) {
-      transport.sendJSON(this.#callStartMessage());
+      transport.sendJSON(this.#callStartMessage(true));
       return;
     }
 
@@ -519,7 +510,7 @@ export class VoiceClient {
       this.#clearCallRecovery();
       this.#error = null;
       this.#emit("error", null);
-      transport.sendJSON(this.#callStartMessage());
+      transport.sendJSON(this.#callStartMessage(true));
     } catch (error) {
       if (
         !this.#isCurrentCallStartup(callGeneration) ||
@@ -701,7 +692,6 @@ export class VoiceClient {
       this.#options.audioInput.stop();
       this.#options.audioInput.onAudioLevel = null;
       this.#options.audioInput.onAudioData = null;
-      this.#options.audioInput.onNoiseGateEvent = null;
     } else {
       this.#stopMic();
     }

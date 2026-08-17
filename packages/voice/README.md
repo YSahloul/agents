@@ -126,15 +126,15 @@ const VoiceAgent = withVoice(Agent, {
 
 ### Lifecycle hooks
 
-| Method                           | Description                                                                                                    |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `onTurn(transcript, context)`    | **Required.** Handle a user utterance. Return `string`, AI SDK `stream`, or `AsyncIterable<string>`.           |
-| `createTranscriber(connection)`  | Override to create a transcriber dynamically per connection.                                                   |
-| `onCallStart(connection)`        | Called when a voice call begins.                                                                               |
-| `onCallEnd(connection)`          | Called when a voice call ends.                                                                                 |
-| `onInterrupt(connection)`        | Called when user interrupts playback, either from client audio-level detection or model-detected speech start. |
-| `beforeCallStart(connection)`    | Return `false` to reject a call.                                                                               |
-| `onMessage(connection, message)` | Handle non-voice WebSocket messages (voice protocol is intercepted automatically).                             |
+| Method                             | Description                                                                                                    |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `onTurn(transcript, context)`      | **Required.** Handle a user utterance. Return `string`, AI SDK `stream`, or `AsyncIterable<string>`.           |
+| `createTranscriber(connection)`    | Override to create a transcriber dynamically per connection.                                                   |
+| `onCallStart(connection, context)` | Called when a voice call begins. `context.resumed` is `true` after transport recovery.                         |
+| `onCallEnd(connection)`            | Called when a voice call ends.                                                                                 |
+| `onInterrupt(connection)`          | Called when user interrupts playback, either from client audio-level detection or model-detected speech start. |
+| `beforeCallStart(connection)`      | Return `false` to reject a call.                                                                               |
+| `onMessage(connection, message)`   | Handle non-voice WebSocket messages (voice protocol is intercepted automatically).                             |
 
 ### Pipeline hooks
 
@@ -196,8 +196,7 @@ function App() {
   const audioInput = useMemo(
     () =>
       new SFUVoiceAudioInput({
-        endpoint: "/agents/my-agent/alice/voice",
-        noiseGateThreshold: 0.06
+        endpoint: "/agents/my-agent/alice/voice"
       }),
     []
   );
@@ -213,13 +212,7 @@ function App() {
 
 Store `REALTIME_SFU_APP_ID` and `REALTIME_SFU_API_TOKEN` as Worker secrets.
 The browser transport uses native echo cancellation, noise suppression, and
-automatic gain control. Set `noiseGateThreshold` to send silence while the
-microphone RMS stays below that level. The optional gate opens after three loud
-frames, closes after 300 ms of quieter audio, and does not suppress nearby
-speech above the configured threshold.
-
-`VoiceClient` forwards aggregated `noise_gate_rejected`, `noise_gate_open`, and
-`noise_gate_closed` traces. It does not send per-frame microphone levels.
+automatic gain control.
 
 ## Server: voice input only (`withVoiceInput`)
 

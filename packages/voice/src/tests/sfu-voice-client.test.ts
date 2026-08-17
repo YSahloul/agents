@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SFUVoiceAudioInput } from "../sfu-voice-client";
-import type { VoiceNoiseGateEvent } from "../types";
 
 declare global {
   interface PromiseConstructor {
@@ -442,65 +441,6 @@ describe("SFUVoiceAudioInput", () => {
     expect(audio.paused).toBe(true);
     expect(audio.removed).toBe(true);
     expect(requests.at(-1)).toBe("stt/stop-forwarding");
-  });
-
-  it("gates quiet microphone audio while preserving level detection", async () => {
-    const input = new SFUVoiceAudioInput({
-      endpoint: "/voice",
-      noiseGateThreshold: 0.1
-    });
-    const levels: number[] = [];
-    input.onAudioLevel = (level) => levels.push(level);
-    const gateEvents: VoiceNoiseGateEvent[] = [];
-    input.onNoiseGateEvent = (event) => gateEvents.push(event);
-
-    const start = input.start();
-    const peer = await waitForPeer();
-    const outboundTrack = stream.track?.clones[0];
-    expect(outboundTrack?.enabled).toBe(false);
-    expect(peer.transceiverCalls[0]?.track).toBe(outboundTrack);
-
-    peer.connect();
-    await start;
-    const context = FakeAudioContext.instances[0];
-    const measure = animationFrames.find((callback) => callback);
-    expect(measure).toBeDefined();
-
-    context.analyser.level = 0.05;
-    measure?.(0);
-
-    context.analyser.level = 0.2;
-    measure?.(16);
-    measure?.(32);
-    measure?.(48);
-    expect(outboundTrack?.enabled).toBe(true);
-    expect(levels.at(-1)).toBeCloseTo(0.2);
-
-    vi.useFakeTimers();
-    context.analyser.level = 0.01;
-    measure?.(64);
-    await vi.advanceTimersByTimeAsync(299);
-    expect(outboundTrack?.enabled).toBe(true);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(outboundTrack?.enabled).toBe(false);
-    expect(gateEvents.map(({ event }) => event)).toEqual([
-      "rejected",
-      "open",
-      "closed"
-    ]);
-    expect(gateEvents.every(({ threshold }) => threshold === 0.1)).toBe(true);
-    expect(gateEvents[0]?.rms).toBeCloseTo(0.05);
-    expect(gateEvents[1]?.rms).toBeCloseTo(0.2);
-    expect(gateEvents[2]?.rms).toBeCloseTo(0.01);
-
-    context.analyser.level = 0.03;
-    measure?.(80);
-
-    input.stop();
-    expect(gateEvents.at(-1)?.event).toBe("rejected");
-    expect(gateEvents.at(-1)?.rms).toBeCloseTo(0.03);
-    expect(gateEvents.at(-1)?.threshold).toBe(0.1);
-    expect(outboundTrack?.stopped).toBe(true);
   });
 
   it("rejects browser capture when echo cancellation is not applied", async () => {

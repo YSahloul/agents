@@ -76,24 +76,10 @@ MP3 → 24 kHz mono PCM16 normalization for the current SFU transport. If a
 transport accepts MP3 directly, assign `WorkersAIGrokTTS` without
 `convertTTSProvider`.
 
-The browser client enables an RMS microphone gate:
-
-```ts
-const MICROPHONE_GATE_THRESHOLD = 0.06;
-
-const audioInput = new SFUVoiceAudioInput({
-  endpoint,
-  noiseGateThreshold: MICROPHONE_GATE_THRESHOLD
-});
-```
-
-The gate opens after three loud frames and closes after 300 ms of quieter audio.
-It suppresses low-level background sound while preserving the raw RMS signal
-used for speech and interruption detection. Nearby speech above the threshold
-still passes; tune the threshold for the microphone and room.
-
-Worker logs include aggregated `noise_gate_rejected`, `noise_gate_open`, and
-`noise_gate_closed` events, never continuous microphone levels.
+The browser client keeps the upstream speech-detection defaults
+(`silenceThreshold: 0.04`, `silenceDurationMs: 500`,
+`interruptThreshold: 0.05`, and `interruptChunks: 2`) with continuous
+microphone forwarding -- no client-side gate.
 
 The Think agent remains the canonical conversation:
 

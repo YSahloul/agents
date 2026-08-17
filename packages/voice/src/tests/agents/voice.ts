@@ -15,7 +15,8 @@ import type {
   Transcriber,
   TranscriberSession,
   TranscriberSessionOptions,
-  VoiceServerAudioTransport
+  VoiceServerAudioTransport,
+  VoiceCallStartContext
 } from "../../types";
 
 /** Deterministic TTS provider for tests — encodes text as bytes. */
@@ -498,6 +499,7 @@ export class TestVoiceAgent extends VoiceBase {
   #callStartCount = 0;
   #callEndCount = 0;
   #interruptCount = 0;
+  #callStartResumed: boolean[] = [];
   #beforeCallStartResult: boolean | "throw" = true;
   #keepAliveShouldThrow = false;
   #turnDelayMs = 0;
@@ -618,8 +620,12 @@ export class TestVoiceAgent extends VoiceBase {
     return this.#beforeCallStartResult;
   }
 
-  async onCallStart(_connection: Connection) {
+  async onCallStart(
+    _connection: Connection,
+    { resumed }: VoiceCallStartContext
+  ) {
     this.#callStartCount++;
+    this.#callStartResumed.push(resumed);
     await this.#callStartGate?.promise;
   }
 
@@ -777,6 +783,7 @@ export class TestVoiceAgent extends VoiceBase {
             JSON.stringify({
               type: "_counts",
               callStart: this.#callStartCount,
+              callStartResumed: this.#callStartResumed,
               callEnd: this.#callEndCount,
               interrupt: this.#interruptCount,
               keepAliveAcquired: this.#keepAliveAcquiredCount,
