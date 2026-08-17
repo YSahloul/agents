@@ -803,4 +803,15 @@ describe("SFUVoiceTransport", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     expect(frames).toHaveLength(1);
   });
+
+  it("fails fast on resume when the grace window already expired", async () => {
+    const transport = new SFUVoiceTransport({ config: CONFIG });
+
+    await expect(transport.resume("call", () => {})).rejects.toThrow(
+      "SFU voice transport has no suspended session to resume"
+    );
+    expect(() => transport.send("call", new ArrayBuffer(0))).toThrow(
+      "SFU voice transport connection is not active"
+    );
+  });
 });

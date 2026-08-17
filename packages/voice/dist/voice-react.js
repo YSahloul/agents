@@ -1,4 +1,4 @@
-import { n as WebSocketVoiceTransport, r as SFUVoiceAudioInput, t as VoiceClient } from "./voice-client-Cr7f8uf4.js";
+import { n as WebSocketVoiceTransport, r as SFUVoiceAudioInput, t as VoiceClient } from "./voice-client-dSooYLNY.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 //#region src/voice-react.tsx
 /**

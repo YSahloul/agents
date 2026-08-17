@@ -1264,9 +1264,19 @@ var SFUVoiceTransport = class {
 		this.#connectionId = connectionId;
 		this.#onAudio = onAudio;
 		this.#startKeepalive();
-		const state = await this.#loadState();
-		if (state?.stt && !state.stt.adapterId) await this.#startSttForwarding();
-		await this.#waitForTtsSocket(1e4);
+		try {
+			const state = await this.#loadState();
+			if (!state?.tts) throw new Error("SFU voice transport has no suspended session to resume");
+			if (state.stt && !state.stt.adapterId) await this.#startSttForwarding();
+			await this.#waitForTtsSocket(1e4);
+		} catch (error) {
+			if (this.#connectionId === connectionId) {
+				this.#connectionId = null;
+				this.#onAudio = null;
+				this.#clearKeepalive();
+			}
+			throw error;
+		}
 	}
 	async #teardown() {
 		this.#clearPacing();

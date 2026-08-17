@@ -280,6 +280,7 @@ export class VoiceClient {
   #serverCallAcknowledged = false;
   #callRecoveryTimer: number | null = null;
   #callRecoveryAttempt = 0;
+  #pendingResumeAck: ((acknowledged: boolean) => void) | null = null;
 
   // Options (with defaults applied)
   #silenceThreshold: number;
@@ -496,7 +497,18 @@ export class VoiceClient {
     this.#configureAudioInput(audioInput);
     if (audioInput.isConnected?.()) {
       transport.sendJSON(this.#callStartMessage(true));
-      return;
+      const acknowledged = await this.#waitForResumeAck(5000);
+      if (acknowledged) return;
+      if (
+        !this.#isCurrentCallStartup(callGeneration) ||
+        this.#transport !== transport ||
+        !transport.connected
+      ) {
+        return;
+      }
+      // The RTCPeerConnection looked alive but the server had nothing to
+      // resume (its grace window already expired) -- fall through to a
+      // full rebuild instead of leaving the call dead.
     }
     try {
       await audioInput.start();
@@ -538,6 +550,28 @@ export class VoiceClient {
         void this.#recoverCall(transport);
       }, delay);
     }
+  }
+
+  /**
+   * Waits for the server to confirm a fast-path `resumed:true` attempt
+   * (a `listening` status) or report its failure (an `idle` status while
+   * still in-call). Resolves false on timeout so #recoverCall falls back
+   * to a full rebuild instead of leaving the call stuck.
+   */
+  #waitForResumeAck(timeoutMs: number): Promise<boolean> {
+    // Promise.withResolvers is untyped in this browser-lib (DOM) context;
+    // the server-side voice.ts equivalent gets it via workers-types, but
+    // this file doesn't -- use the plain executor form instead.
+    return new Promise((resolve) => {
+      const settle = (acknowledged: boolean) => {
+        if (this.#pendingResumeAck !== settle) return;
+        this.#pendingResumeAck = null;
+        clearTimeout(timer);
+        resolve(acknowledged);
+      };
+      const timer = setTimeout(() => settle(false), timeoutMs);
+      this.#pendingResumeAck = settle;
+    });
   }
 
   // --- Connection ---
@@ -828,18 +862,26 @@ export class VoiceClient {
       case "status":
         this.#status = msg.status as VoiceStatus;
         if (msg.status === "idle" && this.#inCall) {
-          const shouldEndLocalCall =
-            this.#serverCallAcknowledged || this.#error !== null;
-          if (!shouldEndLocalCall) {
-            this.#emit("statuschange", this.#status);
-            break;
+          if (this.#pendingResumeAck) {
+            // A fast-path resume attempt failed server-side -- let
+            // #recoverCall's fallback rebuild own recovery instead of
+            // tearing the call down here.
+            this.#pendingResumeAck(false);
+          } else {
+            const shouldEndLocalCall =
+              this.#serverCallAcknowledged || this.#error !== null;
+            if (!shouldEndLocalCall) {
+              this.#emit("statuschange", this.#status);
+              break;
+            }
+            this.#callGeneration++;
+            this.#inCall = false;
+            this.#serverCallAcknowledged = false;
+            this.#stopLocalCall();
           }
-          this.#callGeneration++;
-          this.#inCall = false;
-          this.#serverCallAcknowledged = false;
-          this.#stopLocalCall();
         }
         if (msg.status === "listening") {
+          this.#pendingResumeAck?.(true);
           this.#serverCallAcknowledged = true;
           this.#error = null;
           this.#emit("error", null);

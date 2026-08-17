@@ -246,12 +246,28 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#connectionId = connectionId;
     this.#onAudio = onAudio;
     this.#startKeepalive();
-
-    const state = await this.#loadState();
-    if (state?.stt && !state.stt.adapterId) {
-      await this.#startSttForwarding();
+    try {
+      const state = await this.#loadState();
+      if (!state?.tts) {
+        // Grace window already expired (or nothing was ever suspended) --
+        // fail fast instead of waiting out the full TTS callback timeout
+        // for a socket that will never arrive on its own.
+        throw new Error(
+          "SFU voice transport has no suspended session to resume"
+        );
+      }
+      if (state.stt && !state.stt.adapterId) {
+        await this.#startSttForwarding();
+      }
+      await this.#waitForTtsSocket(10_000);
+    } catch (error) {
+      if (this.#connectionId === connectionId) {
+        this.#connectionId = null;
+        this.#onAudio = null;
+        this.#clearKeepalive();
+      }
+      throw error;
     }
-    await this.#waitForTtsSocket(10_000);
   }
 
   async #teardown(): Promise<void> {

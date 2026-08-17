@@ -202,6 +202,14 @@ class PlaybackOwningAudioInput extends FakeAudioInput {
   }
 }
 
+class ResumableAudioInput extends PlaybackOwningAudioInput {
+  connected = false;
+
+  isConnected(): boolean {
+    return this.connected;
+  }
+}
+
 class DeferredAudioInput implements VoiceAudioInput {
   onAudioLevel: ((rms: number) => void) | null = null;
   onAudioData: ((pcm: ArrayBuffer) => void) | null = null;
@@ -1175,6 +1183,73 @@ describe("VoiceClient playback-owning audio inputs", () => {
       { type: "start_call", preferred_format: "pcm16" },
       { type: "start_call", preferred_format: "pcm16", resumed: true }
     ]);
+  });
+
+  it("skips the rebuild and resumes when the server confirms the resume", async () => {
+    const transport = new MockTransport();
+    const audioInput = new ResumableAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput,
+      preferredFormat: "pcm16"
+    });
+
+    client.connect();
+    await client.startCall();
+    audioInput.connected = true;
+
+    transport.disconnect();
+    transport.connect();
+    await Promise.resolve();
+    transport.receive(JSON.stringify({ type: "status", status: "listening" }));
+    await Promise.resolve();
+
+    expect(audioInput.startCount).toBe(1);
+    expect(
+      transport.sentJSON.filter((message) => message.type === "start_call")
+    ).toEqual([
+      { type: "start_call", preferred_format: "pcm16" },
+      { type: "start_call", preferred_format: "pcm16", resumed: true }
+    ]);
+  });
+
+  it("falls back to a full rebuild when a resumed fast path isn't acknowledged", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = new MockTransport();
+      const audioInput = new ResumableAudioInput();
+      const client = new VoiceClient({
+        agent: "test-agent",
+        transport,
+        audioInput,
+        preferredFormat: "pcm16"
+      });
+
+      client.connect();
+      await client.startCall();
+      audioInput.connected = true;
+
+      transport.disconnect();
+      transport.connect();
+      await Promise.resolve();
+
+      // Server never confirms -- e.g. its grace window already expired --
+      // advance past the client-side ack timeout so the fallback fires.
+      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(audioInput.startCount).toBe(2);
+      expect(
+        transport.sentJSON.filter((message) => message.type === "start_call")
+      ).toEqual([
+        { type: "start_call", preferred_format: "pcm16" },
+        { type: "start_call", preferred_format: "pcm16", resumed: true },
+        { type: "start_call", preferred_format: "pcm16", resumed: true }
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("restores idle when playback-owning input startup rejects", async () => {
