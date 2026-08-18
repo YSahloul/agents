@@ -94,6 +94,7 @@ import {
   type Observability,
   type ObservabilityEvent
 } from "./observability";
+import { agentSpanAttributes } from "./observability/agent-span-attributes";
 import { tracer } from "./observability/tracing/cloudflare";
 import {
   withInvocationScope,
@@ -1922,8 +1923,11 @@ export class Agent<
     return tracer.withSpan(
       operation,
       {
-        "cloudflare.agents.agent.id": agentId,
-        "cloudflare.agents.agent.name": this._ParentClass.name,
+        ...agentSpanAttributes({
+          agentClassName: this._ParentClass.name,
+          sessionId: this.ctx.id.toString(),
+          sessionName: agentId
+        }),
         "cloudflare.agents.operation.name": operation,
         "cloudflare.agents.storage.grouped": true,
         "cloudflare.agents.storage.system": "durable_object",
@@ -11258,7 +11262,8 @@ export class Agent<
     // Create the workflow instance
     const instance = await workflow.create({
       id: workflowId,
-      params: augmentedParams
+      params: augmentedParams,
+      retention: options?.retention
     });
 
     // Track the workflow in our database
