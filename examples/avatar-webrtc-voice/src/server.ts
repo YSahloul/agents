@@ -1,7 +1,9 @@
 import {
   Think,
-  type StepContext,
+  Session,
   type StreamCallback,
+  type StepContext,
+  type ThinkChannels,
   type ToolCallContext,
   type ToolCallResultContext,
   type TurnConfig
@@ -25,8 +27,9 @@ import {
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { createWorkersAI } from "workers-ai-provider";
+import { createCompactFunction } from "agents/experimental/memory/utils";
 import type { ToolSet } from "ai";
-import { hasToolCall, tool } from "ai";
+import { generateText, hasToolCall, tool } from "ai";
 import { z } from "zod";
 
 /** The catalog marks reasoning models with a `reasoning: true` property
@@ -78,8 +81,6 @@ async function* stripThinkTags(
 
 const DEFAULT_MODEL = "@cf/moonshotai/kimi-k2.7-code";
 const SYSTEM_PROMPT = `You are a helpful assistant with access to a persistent workspace filesystem.
-
-You are speaking in a live WebRTC voice chat, so keep responses concise and natural for text-to-speech. Always return speakable text except when dispatching research_background: call it silently. Do not mention its start, progress, or completion unless the user asks.
 
 Use the workspace tools to create, read, update, find, list, and delete files when requested. Confirm completed actions briefly.`;
 
@@ -176,7 +177,6 @@ export class Researcher extends Think<Env> {
  * agent over RPC.
  */
 export class MyThinkAgent extends Think<Env> {
-  override maxSteps = 3;
   override workspaceBash = false;
   readonly #workersAi = createWorkersAI({ binding: this.env.AI });
 
@@ -186,6 +186,32 @@ export class MyThinkAgent extends Think<Env> {
 
   override getSystemPrompt() {
     return SYSTEM_PROMPT;
+  }
+
+  override configureChannels(): ThinkChannels {
+    return {
+      voice: {
+        kind: "voice",
+        ingress: { transport: "voice" },
+        instructions:
+          "You are speaking in a live WebRTC voice chat, so keep responses concise and natural for text-to-speech. Always return speakable text except when dispatching research_background: call it silently. Do not mention its start, progress, or completion unless the user asks.",
+        maxTurns: 3
+      }
+    };
+  }
+
+  override configureSession(session: Session): Session {
+    return session
+      .onCompaction(
+        createCompactFunction({
+          summarize: (prompt) =>
+            generateText({ model: this.resolveModel(), prompt }).then(
+              (r) => r.text
+            ),
+          tailTokenBudget: 8_000
+        })
+      )
+      .compactAfter(20_000);
   }
 
   override beforeTurn(): TurnConfig {
@@ -206,7 +232,7 @@ export class MyThinkAgent extends Think<Env> {
           })
         })
       }),
-      maxOutputTokens: 8192,
+      maxOutputTokens: 500,
       stopWhen: hasToolCall("research_background"),
       sendReasoning: false
     };
@@ -296,7 +322,10 @@ export class MyThinkAgent extends Think<Env> {
     });
 
     try {
-      await this.chat(transcript, callback, { metadata: options });
+      await this.chat(transcript, callback, {
+        metadata: options,
+        channel: "voice"
+      });
       console.log("[ThinkTrace]", {
         event: "turn_end",
         turnId,
