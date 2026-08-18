@@ -3519,7 +3519,7 @@ function withVoice(Base, voiceOptions) {
 						text
 					});
 				}
-				return eagerAsyncIterable(generate());
+				return generate();
 			};
 			const enqueueSentence = (sentence) => {
 				firstSentenceAt ??= Date.now();
@@ -3620,49 +3620,6 @@ function withVoice(Base, voiceOptions) {
 		}
 	}
 	return VoiceAgentMixin;
-}
-function eagerAsyncIterable(source) {
-	const buffer = [];
-	let finished = false;
-	let error = null;
-	let waitResolve = null;
-	const notify = () => {
-		if (waitResolve) {
-			const resolve = waitResolve;
-			waitResolve = null;
-			resolve();
-		}
-	};
-	(async () => {
-		try {
-			for await (const item of source) {
-				buffer.push(item);
-				notify();
-			}
-		} catch (err) {
-			error = err;
-		} finally {
-			finished = true;
-			notify();
-		}
-	})();
-	return { [Symbol.asyncIterator]() {
-		let index = 0;
-		return { async next() {
-			while (index >= buffer.length && !finished) await new Promise((r) => {
-				waitResolve = r;
-			});
-			if (error) throw error;
-			if (index >= buffer.length) return {
-				done: true,
-				value: void 0
-			};
-			return {
-				done: false,
-				value: buffer[index++]
-			};
-		} };
-	} };
 }
 //#endregion
 export { SFUVoiceTransport, SentenceChunker, VOICE_PROTOCOL_VERSION, VoiceRpcCallback, WorkersAIFluxSTT, WorkersAIGrokTTS, WorkersAINova3STT, WorkersAIRealtimeTTS, WorkersAITTS, addSFUTracks, closeSFUWebSocketAdapter, createSFUSession, createSFUWebSocketAdapter, createVoiceAgent, decodeVarint, downsample48kStereoTo16kMono, encodePayloadToProtobuf, encodeVarint, extractPayloadFromProtobuf, iterateText, renegotiateSFUSession, resample24kMonoTo48kStereo, resampleMonoTo48kStereo, sfuFetch, streamRpcVoiceTurn, upsample16kMonoTo48kStereo, withSFUVoice, withVoice, withVoiceInput };
