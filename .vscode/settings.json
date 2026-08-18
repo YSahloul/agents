@@ -41,6 +41,7 @@
     "examples/avatar-webrtc-voice/node_modules": true,
     "examples/avatar-webrtc-voice/vite.config.ts": true,
     "packages/think/dist": true,
-    "packages/think/node_modules": true
+    "packages/think/node_modules": true,
+    "packages/voice/.wrangler": true
   }
 }
