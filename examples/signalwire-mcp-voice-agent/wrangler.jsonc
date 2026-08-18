@@ -8,6 +8,14 @@
     "MCP_SERVER_URL": "https://signalwire-mcp-voice-agent-example.agenticflows.workers.dev/mcp",
     "RETAIL_MCP_SERVER_URL": "https://wpros-mcp.agenticflows.workers.dev/retail/mcp"
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "signalwire-mcp-voice-agent-db",
+      "database_id": "8d0fd81b-ec57-45b0-9762-b1a395621828",
+      "migrations_dir": "./migrations"
+    }
+  ],
   "ai": {
     "binding": "AI",
     "remote": true

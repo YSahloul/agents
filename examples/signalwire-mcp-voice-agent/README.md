@@ -4,7 +4,7 @@ A separate SignalWire phone agent that discovers and calls tools from both its t
 
 ## How it works
 
-The Worker exposes a stateless test MCP server at `/mcp`. `MyVoiceAgent.onStart()` connects to that endpoint and `https://wpros-mcp.agenticflows.workers.dev/retail/mcp` with `addMcpServer()`. `onTurn()` passes every executable tool discovered by `this.mcp.getAITools()` to GLM 4.7 Flash. Reasoning is disabled so tool calls and the final spoken answer stream without a thinking phase.
+Per-business config (system prompt, model, and the two MCP server URLs) lives in a D1 table (`agent_configs`), keyed by the SignalWire number the caller dialed. `SignalWireAdapter`'s `resolveProps` hook queries that table by the `To` number forwarded in the cXML `<Stream>` and delivers the row to the agent DO via `getAgentByName(..., { props })`. `MyVoiceAgent.onStart(props)` reads `this.callProps` and connects to the resolved (or `MCP_SERVER_URL`/`RETAIL_MCP_SERVER_URL` fallback) endpoints with `addMcpServer()`. `onTurn()` reads `this.callProps.systemPrompt`/`.model` (falling back to the module defaults) and passes every tool discovered by `this.mcp.getAITools()` to the model. Reasoning is disabled so tool calls and the final spoken answer stream without a thinking phase.
 
 The local endpoint provides `get_current_time`. The retail server provides product-card, product-image, wheel, tire, and accessory tools. Ask, "What time is it?" or "Find two 20-by-9 wheels" to exercise MCP discovery, execution, and the spoken follow-up response.
 
@@ -16,14 +16,18 @@ From the repository root:
 pnpm install
 pnpm run build
 cd examples/signalwire-mcp-voice-agent
+pnpm exec wrangler d1 migrations apply signalwire-mcp-voice-agent-db --local
+pnpm exec wrangler d1 execute signalwire-mcp-voice-agent-db --local --command \
+  "INSERT INTO agent_configs (phone_number, system_prompt, model, mcp_server_url, retail_mcp_server_url) VALUES ('+15555550100', 'Your business prompt', '@cf/meta/llama-4-scout-17b-16e-instruct', 'https://your-mcp.example.com/mcp', 'https://your-retail-mcp.example.com/retail/mcp')"
 pnpm run dev
 ```
 
-The configured MCP URLs point at the deployed test and retail Workers. Override `MCP_SERVER_URL` or `RETAIL_MCP_SERVER_URL` to use different MCP endpoints.
+Calls to a number with no matching `agent_configs` row fall back to the `MCP_SERVER_URL`/`RETAIL_MCP_SERVER_URL` vars and the module-level default system prompt/model.
 
 ## Deploy
 
 ```bash
+pnpm exec wrangler d1 migrations apply signalwire-mcp-voice-agent-db --remote
 pnpm run deploy
 ```
 
