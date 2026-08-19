@@ -60,7 +60,6 @@ class ControlledTestStreamingTTS
 {
   #getSignal: () => AbortSignal | null;
   #releaseCurrent: (() => void) | null = null;
-  started: string[] = [];
 
   constructor(getSignal: () => AbortSignal | null) {
     super();
@@ -72,7 +71,6 @@ class ControlledTestStreamingTTS
   }
 
   async *synthesizeStream(text: string): AsyncGenerator<ArrayBuffer> {
-    this.started.push(text);
     const mid = Math.max(1, Math.ceil(text.length / 2));
     yield new TextEncoder().encode(text.slice(0, mid)).buffer;
 
@@ -709,14 +707,6 @@ export class TestVoiceAgent extends VoiceBase {
           this.#controlledTTS.release();
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
-          );
-          break;
-        case "_get_tts_started":
-          connection.send(
-            JSON.stringify({
-              type: "_tts_started",
-              texts: this.#controlledTTS.started
-            })
           );
           break;
         case "_get_turn_state":

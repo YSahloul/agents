@@ -115,6 +115,7 @@ export type {
   VoiceAgentFactoryMixinMembers
 } from "./voice-agent-factory";
 
+
 // Re-export Workers AI providers
 export {
   WorkersAITTS,
@@ -1756,7 +1757,7 @@ export function withVoice<TBase extends AgentLike>(
           trace("tts_sentence", { chars: text.length, synthMs, text });
         }
 
-        return generate();
+        return eagerAsyncIterable(generate());
       };
 
       const enqueueSentence = (sentence: string) => {
@@ -1907,4 +1908,57 @@ export function withVoice<TBase extends AgentLike>(
   }
 
   return VoiceAgentMixin as unknown as VoiceAgentMixinReturn<TBase>;
+}
+
+// --- Eager async iterable ---
+
+function eagerAsyncIterable<T>(source: AsyncIterable<T>): AsyncIterable<T> {
+  const buffer: T[] = [];
+  let finished = false;
+  let error: unknown = null;
+  let waitResolve: (() => void) | null = null;
+
+  const notify = () => {
+    if (waitResolve) {
+      const resolve = waitResolve;
+      waitResolve = null;
+      resolve();
+    }
+  };
+
+  (async () => {
+    try {
+      for await (const item of source) {
+        buffer.push(item);
+        notify();
+      }
+    } catch (err) {
+      error = err;
+    } finally {
+      finished = true;
+      notify();
+    }
+  })();
+
+  return {
+    [Symbol.asyncIterator]() {
+      let index = 0;
+      return {
+        async next(): Promise<IteratorResult<T>> {
+          while (index >= buffer.length && !finished) {
+            await new Promise<void>((r) => {
+              waitResolve = r;
+            });
+          }
+          if (error) {
+            throw error;
+          }
+          if (index >= buffer.length) {
+            return { done: true, value: undefined };
+          }
+          return { done: false, value: buffer[index++] };
+        }
+      };
+    }
+  };
 }

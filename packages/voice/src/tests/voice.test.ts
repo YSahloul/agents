@@ -213,22 +213,6 @@ async function setTtsMode(
   await waitForAck(ws, "_set_tts_mode");
 }
 
-async function getTtsStarted(ws: WebSocket): Promise<string[]> {
-  const response = waitForType(ws, "_tts_started");
-  sendJSON(ws, { type: "_get_tts_started" });
-  const message = await response;
-  if (
-    typeof message !== "object" ||
-    message === null ||
-    !("texts" in message) ||
-    !Array.isArray(message.texts) ||
-    !message.texts.every((value) => typeof value === "string")
-  ) {
-    throw new Error("Invalid _tts_started response");
-  }
-  return message.texts;
-}
-
 async function startCall(ws: WebSocket): Promise<void> {
   sendJSON(ws, { type: "start_call" });
   await waitForStatus(ws, "listening");
@@ -1945,31 +1929,6 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     ).toHaveLength(1);
 
     recording.stop();
-    ws.close();
-  });
-});
-
-describe("VoiceAgent — streaming TTS", () => {
-  it("starts each sentence only after the previous audio drains", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    sendJSON(ws, { type: "_set_audio_transport", value: true });
-    await waitForAck(ws, "_set_audio_transport");
-    await setTtsMode(ws, "controlled");
-    await startCall(ws);
-
-    sendJSON(ws, {
-      type: "_emit_end",
-      text: "First sentence contains enough words to be chunked. Second sentence contains enough words too."
-    });
-    await waitForTransportSendCount(ws, 1);
-    expect(await getTtsStarted(ws)).toHaveLength(1);
-
-    sendJSON(ws, { type: "_release_tts" });
-    await waitForAck(ws, "_release_tts");
-    await waitForTransportSendCount(ws, 3);
-    expect(await getTtsStarted(ws)).toHaveLength(2);
-
     ws.close();
   });
 });
