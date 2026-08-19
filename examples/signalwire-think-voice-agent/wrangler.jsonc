@@ -7,6 +7,14 @@
   "vars": {
     "RETAIL_MCP_SERVER_URL": "https://wpros-mcp.agenticflows.workers.dev/retail/mcp"
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "signalwire-think-voice-agent-db",
+      "database_id": "f42e3e4a-30b0-4a01-8f2c-c8cda92431c6",
+      "migrations_dir": "./migrations"
+    }
+  ],
   "ai": {
     "binding": "AI",
     "remote": true
@@ -31,6 +39,10 @@
     {
       "new_sqlite_classes": ["RetailAgent"],
       "tag": "v2"
+    },
+    {
+      "deleted_classes": ["RetailAgent"],
+      "tag": "v3"
     }
   ]
 }
