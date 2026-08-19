@@ -3,6 +3,10 @@
   "name": "signalwire-think-voice-agent-example",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
   "main": "src/index.ts",
   "vars": {
     "RETAIL_MCP_SERVER_URL": "https://wpros-mcp.agenticflows.workers.dev/retail/mcp"

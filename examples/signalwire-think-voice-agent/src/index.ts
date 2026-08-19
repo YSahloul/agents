@@ -17,7 +17,7 @@ import { tool, type ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 
-const MODEL = "@cf/zai-org/glm-4.7-flash";
+const MODEL = "@cf/moonshotai/kimi-k2.7-code";
 const SYSTEM_PROMPT = [
   "You are a phone voice assistant. Respond in 1-2 short sentences.",
   "Use retail_agent for requests that need the retail MCP server.",
@@ -114,7 +114,8 @@ export class MyThinkAgent extends Think<Env> {
 
 const VoiceAgent = withVoice(Agent, {
   filterEchoedTranscripts: true,
-  listenDuringCallStart: false
+  listenDuringCallStart: false,
+  minInterruptWords: 3
 });
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
@@ -125,6 +126,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   tts = new WorkersAIRealtimeTTS(this.env.AI);
 
   async onCallStart(connection: Connection) {
+    console.log(`[call] instance=${this.name} — full conversation at /agents/my-think-agent/${this.name}/get-messages`);
     await this.speak(connection, "Hello! How can I help you today?");
   }
 
