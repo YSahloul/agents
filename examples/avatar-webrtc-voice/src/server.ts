@@ -343,11 +343,7 @@ export class MyThinkAgent extends Think<Env> {
   }
 }
 
-const VoiceAgent = withSFUVoice(Agent, {
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false,
-  minInterruptWords: 3
-});
+const VoiceAgent = withSFUVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   tts = convertTTSProvider({
