@@ -43,7 +43,9 @@ export {
   ThinkOnStartHydrationFailureAgent,
   ThinkWindowedHydrationAgent,
   ThinkMediaEvictionAgent,
-  ThinkMediaEvictionAutoAgent
+  ThinkMediaEvictionAutoAgent,
+  ThinkVoiceTestAgent,
+  ThinkNoticeSurfaceTestAgent
 } from "./agents";
 
 import type {
@@ -82,7 +84,9 @@ import type {
   ThinkOnStartHydrationFailureAgent,
   ThinkWindowedHydrationAgent,
   ThinkMediaEvictionAgent,
-  ThinkMediaEvictionAutoAgent
+  ThinkMediaEvictionAutoAgent,
+  ThinkVoiceTestAgent,
+  ThinkNoticeSurfaceTestAgent
 } from "./agents";
 
 type BrowserRunTestBinding = Fetcher & {
@@ -226,6 +230,8 @@ export type Env = {
   ThinkWindowedHydrationAgent: DurableObjectNamespace<ThinkWindowedHydrationAgent>;
   ThinkMediaEvictionAgent: DurableObjectNamespace<ThinkMediaEvictionAgent>;
   ThinkMediaEvictionAutoAgent: DurableObjectNamespace<ThinkMediaEvictionAutoAgent>;
+  ThinkVoiceTestAgent: DurableObjectNamespace<ThinkVoiceTestAgent>;
+  ThinkNoticeSurfaceTestAgent: DurableObjectNamespace<ThinkNoticeSurfaceTestAgent>;
   BrowserToolsHost: DurableObjectNamespace<BrowserToolsHost>;
   LOADER: WorkerLoader;
 };

@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "signalwire-think-voice-agent-example",
+  "name": "signalwire-think-voice-agent",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/index.ts",
@@ -14,10 +14,6 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "MyVoiceAgent",
-        "name": "MyVoiceAgent"
-      },
-      {
         "class_name": "MyThinkAgent",
         "name": "MyThinkAgent"
       }
@@ -25,12 +21,8 @@
   },
   "migrations": [
     {
-      "new_sqlite_classes": ["MyVoiceAgent", "MyThinkAgent"],
+      "new_sqlite_classes": ["MyThinkAgent", "RetailAgent"],
       "tag": "v1"
-    },
-    {
-      "new_sqlite_classes": ["RetailAgent"],
-      "tag": "v2"
     }
   ]
 }

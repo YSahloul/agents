@@ -156,6 +156,14 @@
         "name": "ThinkMediaEvictionAutoAgent"
       },
       {
+        "class_name": "ThinkVoiceTestAgent",
+        "name": "ThinkVoiceTestAgent"
+      },
+      {
+        "class_name": "ThinkNoticeSurfaceTestAgent",
+        "name": "ThinkNoticeSurfaceTestAgent"
+      },
+      {
         "class_name": "BrowserToolsHost",
         "name": "BrowserToolsHost"
       },
@@ -209,6 +217,8 @@
         "ThinkWindowedHydrationAgent",
         "ThinkMediaEvictionAgent",
         "ThinkMediaEvictionAutoAgent",
+        "ThinkVoiceTestAgent",
+        "ThinkNoticeSurfaceTestAgent",
         "BrowserToolsHost"
       ],
       "tag": "v1"

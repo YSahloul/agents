@@ -2,8 +2,7 @@ import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
-import type { ThinkTestAgent } from "./agents/think-session";
-
+import type { ThinkNoticeSurfaceTestAgent, ThinkTestAgent } from "./agents";
 async function freshAgent(name: string) {
   return getServerByName(
     env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
@@ -11,6 +10,12 @@ async function freshAgent(name: string) {
   );
 }
 
+async function freshCustomAgent(name: string) {
+  return getServerByName(
+    env.ThinkNoticeSurfaceTestAgent as unknown as DurableObjectNamespace<ThinkNoticeSurfaceTestAgent>,
+    name
+  );
+}
 function lastMessage(messages: UIMessage[]): UIMessage | undefined {
   return messages[messages.length - 1];
 }
@@ -78,9 +83,15 @@ describe("deliverNotice", () => {
     expect(messages.every((m) => m.role === "assistant")).toBe(true);
   });
 
-  it("throws when a named channel cannot be resolved (fail fast)", async () => {
-    const agent = await freshAgent("notice-bad-channel");
-    const error = await agent.deliverNoticeErrorForTest("hi", "telegram");
-    expect(error).toMatch(/cannot resolve a delivery surface/);
+  it("uses a non-messenger delivery hook without opening a turn", async () => {
+    const agent = await freshCustomAgent("notice-custom");
+    await agent.deliverCustomNotice("custom notice");
+    expect(await agent.getNotices()).toEqual(["custom notice"]);
+  });
+
+  it("preserves the missing-surface error for a named custom channel", async () => {
+    const agent = await freshCustomAgent("notice-custom-missing");
+    const error = await agent.deliverNoticeErrorForTest("hi", "missing");
+    expect(error).toMatch(/channel "missing" is not registered/);
   });
 });

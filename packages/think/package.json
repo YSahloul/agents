@@ -33,6 +33,7 @@
     "@ai-sdk/react": "^4.0.0",
     "@chat-adapter/telegram": "^4.31.0",
     "@cloudflare/ai-chat": "workspace:*",
+    "@cloudflare/voice": "workspace:*",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -48,6 +49,7 @@
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
     "@chat-adapter/telegram": "^4.29.0",
+    "@cloudflare/voice": ">=0.3.6 <1.0.0",
     "agents": ">=0.20.2 <1.0.0",
     "ai": "^6.0.0 || ^7.0.0",
     "react": "^19.0.0",
@@ -58,6 +60,9 @@
       "optional": true
     },
     "@chat-adapter/telegram": {
+      "optional": true
+    },
+    "@cloudflare/voice": {
       "optional": true
     },
     "react": {
@@ -76,6 +81,10 @@
     "./workflows": {
       "types": "./dist/workflows.d.ts",
       "import": "./dist/workflows.js"
+    },
+    "./voice": {
+      "types": "./dist/voice.d.ts",
+      "import": "./dist/voice.js"
     },
     "./messengers": {
       "types": "./dist/messengers/index.d.ts",

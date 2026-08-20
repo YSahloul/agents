@@ -4,22 +4,12 @@
 > experimental.
 
 A channel is a surface a Think agent talks over: the browser WebSocket, a
-messenger webhook (Telegram, Slack, and so on), voice, or your own custom
-transport. Channels generalize [messengers](./messengers.md) into one vocabulary
-so you can apply per-channel policy (a different system prompt, a narrowed tool
-set, a step cap) and deliver out-of-band notices, regardless of the surface a
-turn arrived on.
-
-Every Think agent always has an implicit `web` channel (the WebSocket chat your
-browser clients use). You declare additional channels — and override the `web`
-policy — with `configureChannels()`. Messengers returned from `getMessengers()`
-are automatically absorbed as `messenger` channels, so existing messenger apps
-keep working unchanged.
+messenger webhook, voice, or a custom transport. Channels apply per-channel
+policy and route notices without starting a model turn. Every Think agent has
+an implicit `web` channel; declare additional channels with
+`configureChannels()`.
 
 ## Configure channels
-
-Override `configureChannels()` to return a map of channel id to
-`ChannelDefinition`. The id is how you select the channel on a turn:
 
 ```typescript
 import { Think, messengerChannel } from "@cloudflare/think";
@@ -28,20 +18,11 @@ import { telegram } from "@chat-adapter/telegram";
 export class Assistant extends Think<Env> {
   configureChannels() {
     return {
-      // Override policy for the built-in web channel.
       web: {
         kind: "web",
         ingress: { transport: "websocket" },
-        instructions: "You are chatting in a web app. Use markdown freely."
+        instructions: "Use markdown freely in the browser."
       },
-      // A voice channel with tighter limits.
-      voice: {
-        kind: "voice",
-        ingress: { transport: "voice" },
-        instructions: "Keep replies short and speakable. No markdown.",
-        maxTurns: 3
-      },
-      // A messenger channel (Chat SDK webhook).
       telegram: messengerChannel(
         telegram({
           /* adapter config */
@@ -52,134 +33,123 @@ export class Assistant extends Think<Env> {
 }
 ```
 
-A `ChannelDefinition` has these fields:
+A `ChannelDefinition` contains `kind`, `ingress`, optional `capabilities`,
+`instructions`, `tools`, `maxTurns`, `conversation`, and `delivery` policy.
+`messengerChannel()` wraps a Chat SDK adapter as a messenger channel.
 
-| Field          | Type                                                                | Description                                                                         |
-| -------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `kind`         | `"web" \| "messenger" \| "voice" \| "custom"`                       | The surface category.                                                               |
-| `ingress`      | `{ transport: "websocket" \| "voice" }` or a webhook messenger spec | How turns arrive. `messengerChannel()` builds the webhook form for you.             |
-| `instructions` | `string \| (ctx: ChannelContext) => string \| Promise<string>`      | Prepended to the system prompt for turns on this channel.                           |
-| `tools`        | `(all: ToolSet) => ToolSet`                                         | Narrow the assembled tool set for this channel (filter only — it cannot add tools). |
-| `maxTurns`     | `number`                                                            | Per-channel cap on model steps for a turn.                                          |
-| `capabilities` | `ChannelCapabilities`                                               | Surface capabilities (streaming, message editing). Defaulted for `web`.             |
-| `conversation` | messenger conversation mode or resolver                             | Messenger thread routing (see [Messengers](./messengers.md)).                       |
-| `delivery`     | channel delivery policy                                             | Messenger delivery policy.                                                          |
+## Voice channel
 
-Use `messengerChannel()` to wrap a Chat SDK adapter definition as a `kind: "messenger"` channel. Add a `ThinkChannels` return type or `satisfies ThinkChannels` when you want compile-time checks for inline channel maps.
+Use the published `@cloudflare/think/voice` adapter when one Durable Object
+should own Voice ingress, model turns, TTS, interruption handling, and Think
+Session persistence. Install the optional peer:
 
-### Channel kinds
+```bash
+pnpm add @cloudflare/think @cloudflare/voice
+```
 
-| Kind        | Ingress                           | Notes                                                                                         |
-| ----------- | --------------------------------- | --------------------------------------------------------------------------------------------- |
-| `web`       | `{ transport: "websocket" }`      | Always present. Declare it in `configureChannels()` only to set policy; you cannot remove it. |
-| `messenger` | webhook (`messengerChannel(...)`) | Fed into the messenger runtime. Equivalent to a `getMessengers()` entry.                      |
-| `voice`     | `{ transport: "voice" }`          | Applies policy and turn context; out-of-band delivery is not yet wired.                       |
-| `custom`    | app-defined                       | For your own transport. Same delivery limitations as `voice` today.                           |
+```typescript
+import { createVoiceThink, voiceChannel } from "@cloudflare/think/voice";
+import { WorkersAIFluxSTT, WorkersAITTS } from "@cloudflare/voice";
+
+const VoiceThink = createVoiceThink<Env>({
+  filterEchoedTranscripts: true,
+  listenDuringCallStart: false
+});
+
+export class Assistant extends VoiceThink {
+  configureChannels() {
+    return {
+      voice: voiceChannel({
+        transcriber: new WorkersAIFluxSTT(this.env.AI),
+        tts: new WorkersAITTS(this.env.AI),
+        instructions: "Keep replies short and speakable. Do not use markdown."
+      })
+    };
+  }
+}
+```
+
+`@cloudflare/voice` is an optional peer of `@cloudflare/think`; ordinary Think
+imports do not load it. `voiceChannel()` supplies the fixed Voice kind,
+ingress, and streaming capability and requires a transcriber and TTS provider.
+`createVoiceThink()` defaults to channel id `"voice"`; pass `{ channel: "phone" }`
+for another configured id. It always sets `persistMessages: false`, so Think
+Session is the durable source of truth and `cf_voice_messages` is not created.
+The channel id is stamped onto Think's user message and shared by Voice turns
+and `runTurn({ channel: "voice" })`.
+
+## Channel kinds
+
+| Kind        | Ingress                      | Notes                                            |
+| ----------- | ---------------------------- | ------------------------------------------------ |
+| `web`       | `{ transport: "websocket" }` | Always present.                                  |
+| `messenger` | webhook                      | Fed into the existing messenger runtime.         |
+| `voice`     | `{ transport: "voice" }`     | Use `@cloudflare/think/voice` for live delivery. |
+| `custom`    | app-defined                  | Provide a delivery hook in a Think subclass.     |
 
 ## Per-channel policy
 
-Channel policy is applied as an **overridable default** before
-[`beforeTurn`](./lifecycle-hooks.md) runs, so a `beforeTurn` override still wins:
+`instructions` is prepended to the system prompt, `tools` narrows the assembled
+tool set, and `maxTurns` caps model steps. These are overridable defaults before
+`beforeTurn()` runs.
 
-- `instructions` is prepended to the base system prompt for the turn.
-- `tools` filters the assembled tool set (it can only remove tools — the
-  `getTools()` seam adds them).
-- `maxTurns` caps model steps: `beforeTurn`'s `maxSteps` wins, then the channel
-  `maxTurns`, then the instance `maxSteps` default.
-
-## Select a channel on a turn
-
-Pass `channel` to [`runTurn()`](./index.md#runturn) (or `chat()`) to run a turn
-on a specific channel. The channel id is stamped onto the user message, so a
-continued or recovered turn re-resolves the same channel and re-applies its
-policy:
+Pass `channel` to `runTurn()` or `chat()` to select a channel:
 
 ```typescript
 await this.runTurn({ input: "Read this out loud", channel: "voice" });
 ```
 
-Inside a turn, the active channel is available as `this.activeChannel` (a
-`ChannelContext` with `channelId`, `kind`, and messenger details when relevant).
-A turn with no `channel` runs without a channel context and applies no channel
-policy.
+Inside a turn, `this.activeChannel` exposes the resolved `ChannelContext`.
 
 ## Deliver out of band
 
-`deliverNotice()` sends a message to a channel **without** starting a model turn.
-Use it for status updates ("your import finished") or to surface an action's
-[reply attachment](./actions.md#reply-attachments) — it does not run inference,
-does not enter the turn queue, and is therefore safe to call from inside a tool's
-`execute`:
+`deliverNotice()` is safe inside a tool and never opens a model turn:
 
 ```typescript
-await this.deliverNotice("Your export is ready to download.");
-
-await this.deliverNotice("Background research finished.", {
-  informModel: true // also record it in the transcript so the next turn knows
+await this.deliverNotice("Your export is ready.", {
+  channel: "voice",
+  informModel: true
 });
 ```
+
+With the Think Voice adapter, an active-turn notice is inserted as a text
+boundary and spoken once without cancelling the final answer. During an idle
+live call, the notice is spoken through `speakAll()` to all active Voice
+connections. Async iterable notices are collected into one utterance. With no
+live call, delivery throws rather than silently dropping the notice.
+
+For `web`, notices append to the transcript. Messenger notices use their
+provider surface and may require `thread` for out-of-turn delivery. Custom
+adapters can override the protected
+`resolveChannelDeliverySurface(channelId, thread)` hook.
 
 ```typescript
 type DeliverNoticeOptions = {
-  channel?: string; // defaults to the active turn's channel, else "web"
-  informModel?: boolean; // also write to the model-visible transcript (default false)
-  kind?: "final" | "interim" | "notice" | "command"; // wire tag (default "notice")
-  thread?: string; // required for out-of-turn delivery to a multi-thread messenger
+  channel?: string;
+  informModel?: boolean;
+  kind?: "final" | "interim" | "notice" | "command";
+  thread?: string;
 };
 ```
 
-Behavior depends on the target channel:
-
-- **`web`** — the notice is always appended to the transcript (that is its only
-  render path). `informModel` then only controls the phrasing.
-- **`messenger`** — the notice is posted to the provider. Out of turn, pass
-  `thread` to target a conversation. With `informModel: true`, it is also written
-  to the transcript.
-- **`voice` / `custom`** — out-of-turn delivery throws, because these surfaces
-  have no delivery target yet.
-
-Override `renderAttachment(attachment)` to turn an action reply attachment into a
-notice; Think calls it at the end of a turn and delivers the rendered text as a
-trailing `interim` notice. Return `undefined` to skip an attachment type.
-
 ## Relationship to messengers
 
-`configureChannels()` wraps `getMessengers()` — it does not replace it. Each
-`getMessengers()` entry becomes a `kind: "messenger"` channel, and everything in
-the [Messengers](./messengers.md) guide (Telegram setup, webhook routing,
-conversation targets, delivery and recovery) continues to apply. A channel id in
-`configureChannels()` that collides with a `getMessengers()` id is an error. Keep
-using `getMessengers()` for messenger-only apps; reach for `configureChannels()`
-when you also want `web`/`voice`/`custom` policy or out-of-band notices.
-
-## Observability
-
-Channel activity is reported on the `channel` observability channel:
-
-```typescript
-import { subscribe } from "agents/observability";
-
-const unsubscribe = subscribe("channel", (event) => {
-  // event.type is one of:
-  //   "channel:resolved"  — a turn resolved a registered channel
-  //   "channel:delivered" — a turn's final reply was delivered
-  //   "notice:delivered"  — deliverNotice() succeeded
-  //   "notice:failed"     — deliverNotice() threw
-});
-```
+`configureChannels()` does not replace `getMessengers()`. Each messenger entry
+becomes a messenger channel and keeps existing webhook, thread, delivery, and
+recovery behavior.
 
 ## Reference
 
-| Member                          | Description                                                                 |
-| ------------------------------- | --------------------------------------------------------------------------- |
-| `configureChannels()`           | Return the channel map. Defaults to `{}` (the implicit `web` channel only). |
-| `deliverNotice(text, options?)` | Send an out-of-band message to a channel with no model turn.                |
-| `activeChannel`                 | The `ChannelContext` for the in-flight turn, or `undefined`.                |
-| `renderAttachment(attachment)`  | Map a reply attachment to channel notice text (or `undefined` to skip).     |
-| `messengerChannel(definition)`  | Wrap a Chat SDK adapter as a `kind: "messenger"` channel.                   |
+| Member                          | Description                                       |
+| ------------------------------- | ------------------------------------------------- |
+| `configureChannels()`           | Return the channel map.                           |
+| `deliverNotice(text, options?)` | Deliver without opening a model turn.             |
+| `activeChannel`                 | Current turn's channel context.                   |
+| `messengerChannel(definition)`  | Wrap a Chat SDK adapter.                          |
+| `createVoiceThink(options?)`    | Build a Think + Voice Durable Object constructor. |
+| `voiceChannel(options)`         | Supply Voice providers and channel policy.        |
 
 ## Related
 
-- [Messengers](./messengers.md) — Chat SDK webhook setup and delivery in depth.
-- [Actions](./actions.md) — record reply attachments for `renderAttachment()`.
-- [Voice Agents](https://github.com/cloudflare/agents/blob/main/docs/voice/index.md) — real-time speech surfaces.
+- [Messengers](./messengers.md) — Chat SDK webhook setup.
+- [Actions](./actions.md) — reply attachments and notices.

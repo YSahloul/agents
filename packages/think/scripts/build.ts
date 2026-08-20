@@ -13,6 +13,7 @@ async function main() {
       "src/extensions/index.ts",
       "src/react.tsx",
       "src/messengers/index.ts",
+      "src/voice.ts",
       "src/messengers/telegram.ts",
       "src/tools/workspace.ts",
       "src/tools/fetch.ts",

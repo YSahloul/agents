@@ -1,17 +1,7 @@
-import { Think, type StreamCallback } from "@cloudflare/think";
-import {
-  Agent,
-  getAgentByName,
-  routeAgentRequest,
-  type Connection
-} from "agents";
-import {
-  streamRpcVoiceTurn,
-  withVoice,
-  WorkersAIFluxSTT,
-  type TTSProvider,
-  type VoiceTurnContext
-} from "@cloudflare/voice";
+import { createVoiceThink, voiceChannel } from "@cloudflare/think/voice";
+import { Think } from "@cloudflare/think";
+import { routeAgentRequest, type Connection } from "agents";
+import { WorkersAIFluxSTT, type TTSProvider } from "@cloudflare/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
 import { tool, type ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -92,7 +82,12 @@ export class RetailAgent extends Think<Env> {
   }
 }
 
-export class MyThinkAgent extends Think<Env> {
+const VoiceThink = createVoiceThink<Env>({
+  filterEchoedTranscripts: true,
+  listenDuringCallStart: false
+});
+
+export class MyThinkAgent extends VoiceThink {
   override maxConcurrentAgentTools = 4;
   readonly #workersAi = createWorkersAI({ binding: this.env.AI });
 
@@ -106,12 +101,15 @@ export class MyThinkAgent extends Think<Env> {
 
   override configureChannels() {
     return {
-      voice: {
-        kind: "voice" as const,
-        ingress: { transport: "voice" as const },
+      voice: voiceChannel({
+        transcriber: new WorkersAIFluxSTT(this.env.AI, {
+          eagerEotThreshold: 0.5,
+          eotThreshold: 0.7
+        }),
+        tts: new SignalWirePCMTTS(this.env.AI),
         instructions:
           "Answer for live speech. Use one short, direct sentence. No markdown, tables, lists, unsupported actions, or promises of unsolicited follow-up."
-      }
+      })
     };
   }
 
@@ -137,41 +135,8 @@ export class MyThinkAgent extends Think<Env> {
     };
   }
 
-  async runVoiceTurn(
-    transcript: string,
-    callback: StreamCallback
-  ): Promise<void> {
-    await this.chat(transcript, callback, { channel: "voice" });
-  }
-}
-
-const VoiceAgent = withVoice(Agent, {
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false
-});
-
-export class MyVoiceAgent extends VoiceAgent<Env> {
-  transcriber = new WorkersAIFluxSTT(this.env.AI, {
-    eagerEotThreshold: 0.5,
-    eotThreshold: 0.7
-  });
-  tts = new SignalWirePCMTTS(this.env.AI);
-
   async onCallStart(connection: Connection) {
     await this.speak(connection, "Hello! How can I help you today?");
-  }
-
-  async onTurn(
-    transcript: string,
-    context: VoiceTurnContext
-  ): Promise<AsyncIterable<string>> {
-    const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
-
-    return streamRpcVoiceTurn({
-      signal: context.signal,
-      run: (callback) => brain.runVoiceTurn(transcript, callback),
-      cancel: (requestId, reason) => brain.cancelChat(requestId, reason)
-    });
   }
 }
 
@@ -188,7 +153,7 @@ export default {
     }
 
     if (url.pathname === "/signalwire") {
-      return SignalWireAdapter.handleRequest(request, env, "MyVoiceAgent");
+      return SignalWireAdapter.handleRequest(request, env, "MyThinkAgent");
     }
 
     return (

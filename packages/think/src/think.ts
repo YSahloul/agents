@@ -294,6 +294,7 @@ import type {
 import { resolveChannels } from "./channels";
 import type {
   ChannelContext,
+  ChannelDeliverySurface,
   NormalizedChannelDefinition,
   ThinkChannels
 } from "./channels";
@@ -4168,6 +4169,23 @@ export class Think<
       this._activeDeliverySurface = previous;
     };
   }
+  /** Return the startup-resolved channel definition for an adapter. */
+  protected getChannelDefinition(
+    channelId: string
+  ): NormalizedChannelDefinition | undefined {
+    return this._channels?.get(channelId);
+  }
+
+  /**
+   * Resolve a delivery surface for a non-messenger channel.
+   * Messenger channels use the existing runtime by default.
+   */
+  protected async resolveChannelDeliverySurface(
+    channelId: string,
+    thread?: string
+  ): Promise<ChannelDeliverySurface | undefined> {
+    return this._messengerRuntime?.resolveDeliverySurface(channelId, thread);
+  }
 
   /**
    * The channel context for the active turn, if the turn resolved to a channel.
@@ -4345,7 +4363,7 @@ export class Think<
       } else {
         const surface =
           this._activeDeliverySurface ??
-          (await this._messengerRuntime?.resolveDeliverySurface(
+          (await this.resolveChannelDeliverySurface(
             channelId,
             options?.thread
           ));
@@ -15872,6 +15890,10 @@ export class Think<
   }
 
   private _broadcastChat(message: Record<string, unknown>, exclude?: string[]) {
+    // Voice consumes the stream through its own TTS pipeline; exposing the same
+    // chunks as chat responses would make one voice turn appear twice on a
+    // shared WebSocket.
+    if (this._activeChannelContext?.kind === "voice") return;
     const allExclusions = [
       ...(exclude || []),
       ...this._pendingResumeConnections

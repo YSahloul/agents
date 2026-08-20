@@ -4354,6 +4354,9 @@ importers:
       '@cloudflare/ai-chat':
         specifier: workspace:*
         version: link:../ai-chat
+      '@cloudflare/voice':
+        specifier: workspace:*
+        version: link:../voice
       '@testing-library/react':
         specifier: ^16.3.2
         version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
