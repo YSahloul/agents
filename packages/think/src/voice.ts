@@ -10,8 +10,9 @@ import type {
   NormalizedChannelDefinition
 } from "./channels";
 import { Think } from "./think";
-import { withVoice } from "@cloudflare/voice";
+import { withSFUVoiceTransport, withVoice } from "@cloudflare/voice";
 import type {
+  SFUConfig,
   StreamingTTSProvider,
   TextSource,
   Transcriber,
@@ -50,6 +51,13 @@ export type CreateVoiceThinkOptions = Omit<
   "persistMessages"
 > & { channel?: string };
 
+export type CreateSFUVoiceThinkOptions = Omit<
+  CreateVoiceThinkOptions,
+  "audioFormat"
+> & {
+  routePrefix?: string;
+};
+
 export type VoiceThinkConstructor<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -59,6 +67,27 @@ export type VoiceThinkConstructor<
   env: Env
 ) => Think<Env, State, Props> &
   VoiceAgentMixinMembers & {
+    getVoiceTurnMetadata(
+      transcript: string,
+      context: VoiceTurnContext
+    ): Record<string, unknown> | undefined;
+    onTurn(transcript: string, context: VoiceTurnContext): Promise<TextSource>;
+  };
+
+export type SFUVoiceThinkConstructor<
+  Env extends Cloudflare.Env = Cloudflare.Env,
+  State = unknown,
+  Props extends Record<string, unknown> = Record<string, unknown>
+> = new (
+  ctx: DurableObjectState,
+  env: Env
+) => Think<Env, State, Props> &
+  VoiceAgentMixinMembers & {
+    getVoiceTurnMetadata(
+      transcript: string,
+      context: VoiceTurnContext
+    ): Record<string, unknown> | undefined;
+    getSFUConfig(): SFUConfig;
     onTurn(transcript: string, context: VoiceTurnContext): Promise<TextSource>;
   };
 
@@ -244,6 +273,13 @@ export function createVoiceThink<
       this.#voiceConnections.delete(connection.id);
     }
 
+    getVoiceTurnMetadata(
+      _transcript: string,
+      _context: VoiceTurnContext
+    ): Record<string, unknown> | undefined {
+      return undefined;
+    }
+
     async onTurn(
       transcript: string,
       context: VoiceTurnContext
@@ -259,12 +295,14 @@ export function createVoiceThink<
       const previous = this.#activeVoiceStream;
       this.#activeVoiceStream = stream;
       const restore = this.bindActiveDeliverySurface(stream);
+      const metadata = this.getVoiceTurnMetadata(transcript, context);
       void this.runTurn({
         input: transcript,
         channel,
         mode: "stream",
         callback,
-        signal: context.signal
+        signal: context.signal,
+        metadata
       })
         .catch((error: unknown) => callback.fail(error))
         .finally(() => {
@@ -292,4 +330,24 @@ export function createVoiceThink<
   }
 
   return VoiceThink;
+}
+
+export function createSFUVoiceThink<
+  Env extends Cloudflare.Env = Cloudflare.Env,
+  State = unknown,
+  Props extends Record<string, unknown> = Record<string, unknown>
+>(
+  options: CreateSFUVoiceThinkOptions = {}
+): SFUVoiceThinkConstructor<Env, State, Props> {
+  const { routePrefix, sampleRate, ...voiceOptions } = options;
+  const VoiceBase = createVoiceThink<Env, State, Props>({
+    ...voiceOptions,
+    audioFormat: "pcm16",
+    sampleRate: sampleRate ?? 24000
+  });
+  class ConcreteVoiceThink extends VoiceBase {}
+  return withSFUVoiceTransport(ConcreteVoiceThink, {
+    routePrefix,
+    inputSampleRate: sampleRate ?? 24000
+  });
 }

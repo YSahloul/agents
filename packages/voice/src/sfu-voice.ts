@@ -14,33 +14,34 @@ export type SFUVoiceAgentOptions = Omit<VoiceAgentOptions, "audioFormat"> & {
   routePrefix?: string;
 };
 
+export interface SFUVoiceTransportOptions {
+  routePrefix?: string;
+  inputSampleRate?: number;
+}
+
 // Mixin constructors must accept and forward the base constructor's arguments.
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any
 type Constructor<T = object> = new (...args: any[]) => T;
 
-type AgentLike = Constructor<Agent>;
+type VoiceAgentLike = Constructor<Agent> & Constructor<VoiceAgentMixinMembers>;
 
 interface SFUVoiceAgentMixinMembers extends VoiceAgentMixinMembers {
   getSFUConfig(): SFUConfig;
 }
 
-type SFUVoiceAgentMixinReturn<TBase extends AgentLike> = TBase &
+type SFUVoiceAgentMixinReturn<TBase extends Constructor<Agent>> = TBase &
   // oxlint-disable-next-line @typescript-eslint/no-explicit-any
   (new (...args: any[]) => SFUVoiceAgentMixinMembers);
 
-export function withSFUVoice<TBase extends AgentLike>(
+export function withSFUVoiceTransport<TBase extends VoiceAgentLike>(
   Base: TBase,
-  options?: SFUVoiceAgentOptions
+  options?: SFUVoiceTransportOptions
 ): SFUVoiceAgentMixinReturn<TBase> {
-  const { routePrefix, ...voiceOptions } = options ?? {};
-  const normalizedPrefix = routePrefix?.replace(/^\/+|\/+$/g, "") || "voice";
-  const VoiceBase = withVoice(Base, {
-    ...voiceOptions,
-    audioFormat: "pcm16",
-    sampleRate: voiceOptions.sampleRate ?? 24000
-  });
+  const normalizedPrefix =
+    options?.routePrefix?.replace(/^\/+|\/+$/g, "") || "voice";
+  const inputSampleRate = options?.inputSampleRate ?? 24000;
 
-  class SFUVoiceAgentMixin extends VoiceBase {
+  class SFUVoiceAgentMixin extends Base {
     #transport: SFUVoiceTransport | null = null;
 
     // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- mixin constructor must forward base arguments
@@ -99,7 +100,7 @@ export function withSFUVoice<TBase extends AgentLike>(
       this.#transport ??= new SFUVoiceTransport({
         config: this.getSFUConfig(),
         routePrefix: normalizedPrefix,
-        inputSampleRate: voiceOptions.sampleRate ?? 24000,
+        inputSampleRate,
         loadState: async () =>
           (await this.ctx.storage.get<SFUVoiceState>(SFU_STATE_KEY)) ?? null,
         saveState: async (state) => {
@@ -115,4 +116,20 @@ export function withSFUVoice<TBase extends AgentLike>(
   }
 
   return SFUVoiceAgentMixin as SFUVoiceAgentMixinReturn<TBase>;
+}
+
+export function withSFUVoice<TBase extends Constructor<Agent>>(
+  Base: TBase,
+  options?: SFUVoiceAgentOptions
+): SFUVoiceAgentMixinReturn<TBase> {
+  const { routePrefix, sampleRate, ...voiceOptions } = options ?? {};
+  const VoiceBase = withVoice(Base, {
+    ...voiceOptions,
+    audioFormat: "pcm16",
+    sampleRate: sampleRate ?? 24000
+  });
+  return withSFUVoiceTransport(VoiceBase, {
+    routePrefix,
+    inputSampleRate: sampleRate ?? 24000
+  });
 }

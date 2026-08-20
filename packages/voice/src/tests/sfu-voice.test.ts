@@ -1,8 +1,10 @@
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { createExecutionContext, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import worker from "./worker";
 import type {
   TestMissingSFUConfigAgent,
+  TestSFUTransportVoiceAgent,
   TestSFUVoiceAgent
 } from "./agents/sfu-voice";
 
@@ -10,6 +12,15 @@ function sfuStub(name = crypto.randomUUID()) {
   return env.TestSFUVoiceAgent.get(
     env.TestSFUVoiceAgent.idFromName(name)
   ) as DurableObjectStub<TestSFUVoiceAgent>;
+}
+function transportVoiceStub(name = crypto.randomUUID()) {
+  return env.TestSFUTransportVoiceAgent.get(
+    env.TestSFUTransportVoiceAgent.idFromName(name)
+  ) as DurableObjectStub<TestSFUTransportVoiceAgent>;
+}
+
+function transportVoicePath(name = crypto.randomUUID()) {
+  return `/agents/test-s-f-u-transport-voice-agent/${name}/voice`;
 }
 
 function missingConfigStub(name = crypto.randomUUID()) {
@@ -30,6 +41,35 @@ function post(path: string, body?: unknown): Request {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("withSFUVoice", () => {
+  it("composes transport-only SFU after one Voice mixin", async () => {
+    const name = crypto.randomUUID();
+    const stub = transportVoiceStub(name);
+    await expect(
+      runInDurableObject(stub, (instance) =>
+        Promise.resolve(instance.getSFUConfig())
+      )
+    ).resolves.toEqual({ appId: "test-app", apiToken: "test-token" });
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(
+      new Request(`https://example.com${transportVoicePath(name)}`, {
+        headers: { Upgrade: "websocket" }
+      }),
+      env,
+      ctx
+    );
+    expect(response.status).toBe(101);
+    const ws = response.webSocket;
+    expect(ws).toBeDefined();
+    const welcome = new Promise<Record<string, unknown>>((resolve) => {
+      ws!.addEventListener("message", (event) => {
+        resolve(JSON.parse(String(event.data)) as Record<string, unknown>);
+      });
+    });
+    ws!.accept();
+    expect(await welcome).toMatchObject({ type: "welcome" });
+    ws!.close();
+  });
   it("lazily intercepts only the two WebSocket and six HTTP routes", async () => {
     vi.stubGlobal(
       "fetch",

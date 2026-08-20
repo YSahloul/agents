@@ -1,9 +1,11 @@
 import { Agent } from "agents";
-import { withSFUVoice } from "../../sfu-voice";
+import { withSFUVoice, withSFUVoiceTransport } from "../../sfu-voice";
+import { withVoice } from "../../voice";
 import type { SFUVoiceState } from "../../sfu-transport";
 import type { SFUConfig } from "../../sfu-utils";
 
 const SFUBase = withSFUVoice(Agent);
+const SFUTransportBase = withSFUVoiceTransport(withVoice(Agent));
 
 export class TestSFUVoiceAgent extends SFUBase {
   static options = { hibernate: false };
@@ -30,6 +32,13 @@ export class TestSFUVoiceAgent extends SFUBase {
     return (
       (await this.ctx.storage.get<SFUVoiceState>("cf_voice_sfu_state")) ?? null
     );
+  }
+}
+export class TestSFUTransportVoiceAgent extends SFUTransportBase {
+  static options = { hibernate: false };
+
+  getSFUConfig(): SFUConfig {
+    return { appId: "test-app", apiToken: "test-token" };
   }
 }
 

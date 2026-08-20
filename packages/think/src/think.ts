@@ -1283,6 +1283,7 @@ export interface RunTurnStream extends RunTurnBase {
   clientTools?: ClientToolSchema[];
   onClientToolCall?: ClientToolExecutor;
   signal?: AbortSignal;
+  metadata?: Record<string, unknown>;
 }
 
 export type RunTurnOptions = RunTurnWait | RunTurnSubmit | RunTurnStream;
@@ -7738,7 +7739,8 @@ export class Think<
       signal: options.signal,
       clientTools: options.clientTools,
       onClientToolCall: options.onClientToolCall,
-      channel: options.channel
+      channel: options.channel,
+      metadata: options.metadata
     });
   }
 

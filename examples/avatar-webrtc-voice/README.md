@@ -1,18 +1,8 @@
 # Avatar WebRTC Voice Agent
 
-A Think agent that uses a separate `@cloudflare/voice` Durable Object as its
-WebRTC audio gateway. Think owns the transcript, model, tools, memory, and
-workspace; Voice only handles STT, TTS, and Cloudflare Realtime SFU transport.
+A single Think Durable Object that owns Session state, Voice STT/TTS, Cloudflare Realtime SFU/WebRTC, tools, and a persistent workspace.
 
-The demo also dispatches the same retained Researcher sub-agent used by the
-`agents-as-tools` example. Its live status and final summary appear beside the
-voice transcript.
-
-The browser shows a local robot animation inspired by Pipecat's simple chatbot.
-It preloads 25 images, walks them forward and backward at 30 FPS while remote
-TTS audio is audible, and returns to the first frame when playback stops. This
-establishes the event → frame scheduler → renderer pattern; the frames are
-generic animation, not visemes. Only audio travels through the SFU.
+The browser animates a local robot while SFU playback audio is audible. It also shows the retained Researcher sub-agent's live status and final summary beside the shared transcript. Only audio travels through the SFU; the frames are generic animation, not visemes.
 
 ## Run it
 
@@ -22,133 +12,96 @@ cp .env.example .env
 pnpm run start
 ```
 
-Deploying creates the separate `avatar-webrtc-voice-grok` Worker at
-`https://avatar.sahloul.io`.
+The deployed example is available at [`think.sahloul.io`](https://think.sahloul.io).
 
-Set the required Realtime SFU credentials in `.env`:
+Set the required Realtime SFU credentials in `.env` for local development:
 
 ```bash
 REALTIME_SFU_APP_ID=...
 REALTIME_SFU_BEARER_TOKEN=...
 ```
 
-Set both values with `pnpm exec wrangler secret put <NAME>` before deploying
-the separate Worker.
+For deployment, set both values with `pnpm exec wrangler secret put <NAME>`. Never commit them.
 
-Workers AI provides Flux turn detection, selectable LLMs, and Grok TTS through
-the unified model catalog. No direct xAI API key is required; AI Gateway Unified
-Billing must be funded.
+Workers AI provides Flux turn detection, selectable LLMs, and Grok TTS through the unified model catalog. No direct xAI API key is required; AI Gateway Unified Billing must be funded.
 
 ## Key pattern
 
-`MyVoiceAgent` is directly routed so the Voice WebSocket lifecycle stays on one
-Durable Object. Each confirmed transcript is delegated by RPC to the
-same-named `MyThinkAgent`:
+`createSFUVoiceThink()` composes Think, Voice, and SFU transport on one Durable Object. `voiceChannel()` supplies the STT/TTS providers and voice policy:
 
 ```ts
-const VoiceAgent = withSFUVoice(Agent);
+import { createSFUVoiceThink, voiceChannel } from "@cloudflare/think/voice";
+import {
+  convertTTSProvider,
+  mp3ToPcm16,
+  WorkersAIFluxSTT,
+  WorkersAIGrokTTS
+} from "@cloudflare/voice";
 
-export class MyVoiceAgent extends VoiceAgent<Env> {
-  tts = convertTTSProvider({
-    provider: new WorkersAIGrokTTS(this.env.AI, {
-      voice: "ara",
-      audioFormat: "mp3"
-    }),
-    converter: mp3ToPcm16({ sampleRate: 24000 })
-  });
+const VoiceThink = createSFUVoiceThink<Env>({
+  filterEchoedTranscripts: true,
+  listenDuringCallStart: false,
+  minInterruptWords: 3
+});
 
-  async onTurn(transcript: string, context: VoiceTurnContext) {
-    const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
-    return streamRpcVoiceTurn({
-      signal: context.signal,
-      run: (callback) =>
-        brain.runVoiceTurn(crypto.randomUUID(), transcript, callback, {
-          model: "@cf/moonshotai/kimi-k2.7-code"
+export class MyThinkAgent extends VoiceThink {
+  configureChannels() {
+    return {
+      voice: voiceChannel({
+        transcriber: new WorkersAIFluxSTT(this.env.AI, {
+          eotThreshold: 0.7
         }),
-      cancel: (requestId, reason) => brain.cancelChat(requestId, reason)
-    });
+        tts: convertTTSProvider({
+          provider: new WorkersAIGrokTTS(this.env.AI, {
+            voice: "ara",
+            audioFormat: "mp3"
+          }),
+          converter: mp3ToPcm16({ sampleRate: 24000 })
+        }),
+        instructions: "Keep replies concise, natural, and speakable.",
+        maxTurns: 3
+      })
+    };
+  }
+
+  getSFUConfig() {
+    return {
+      appId: this.env.REALTIME_SFU_APP_ID,
+      apiToken: this.env.REALTIME_SFU_BEARER_TOKEN
+    };
   }
 }
 ```
 
-The consumer exposes Grok's raw 24 kHz MP3 stream, then composes reusable
-MP3 → 24 kHz mono PCM16 normalization for the current SFU transport. If a
-transport accepts MP3 directly, assign `WorkersAIGrokTTS` without
-`convertTTSProvider`.
+Each confirmed transcript enters inherited `runTurn({ channel: "voice", mode: "stream" })`. Think text deltas flow directly to SFU TTS. Barge-in aborts the same Think turn through `VoiceTurnContext.signal`; no RPC bridge or second Durable Object is involved. Think Session remains the only durable conversation history.
 
-The browser client keeps the upstream speech-detection defaults
-(`silenceThreshold: 0.04`, `silenceDurationMs: 500`,
-`interruptThreshold: 0.05`, and `interruptChunks: 2`) with continuous
-microphone forwarding -- no client-side gate.
+`getVoiceTurnMetadata()` validates the connection's `llm` and `reasoning` query parameters and stamps them on the user message. `beforeTurn()` reads `activeTurnMetadata`, so model selection survives recovery.
 
-`MyVoiceAgent` sets `minInterruptWords: 3` server-side. Short fragments the
-client-side echo cancellation lets bleed through (a stray word or two of the
-assistant's own TTS) no longer trigger a false barge-in; only transcripts of
-three or more words interrupt active playback.
-
-The Think agent remains the canonical conversation:
-
-```ts
-export class MyThinkAgent extends Think<Env> {
-  getModel() {
-    return "@cf/moonshotai/kimi-k2.7-code";
-  }
-
-  getSystemPrompt() {
-    return SYSTEM_PROMPT;
-  }
-
-  workspaceBash = false;
-}
-```
-
-`runVoiceTurn()` starts `Think.chat()` with the library-provided RPC callback.
-`streamRpcVoiceTurn()` returns its async text stream immediately, so Voice can
-synthesize and send the first complete sentence over WebRTC while Think
-continues the turn. It also forwards barge-in to `cancelChat()` after Think
-exposes the request id.
-
-The Think-provided workspace tools let voice turns create, read, update, search,
-and delete durable files. Shell execution stays disabled.
-
-`MyThinkAgent.getTools()` exposes a detached `runAgentTool(Researcher, ...)`.
-The React client opens a second, same-session connection to `MyThinkAgent` and
-folds its unbound `agent-tool-event` frames with `useAgentToolEvents()`, making
-the helper's background progress visible while Voice continues accepting turns.
-
-The copied `web_search` tool is simulated: it proves background orchestration,
-not grounded internet research.
-
-`[ThinkTrace]` worker logs record turn timing, step usage, and each server-side
-tool call, input, result, and duration. Reasoning text remains hidden.
-
-`[VoiceTrace]` STT events include the client-captured start, peak, and threshold
-RMS levels for each finalized utterance.
-
-The Voice agent does not replay its transient `VoiceTurnContext.messages` into
-Think. This prevents duplicate history. Eager end-of-turn speculation is also
-disabled so provisional transcripts cannot start tool calls.
-
-The React client gives `useVoiceAgent` the library-owned WebRTC audio input:
+The browser uses the same named agent for voice, tool events, and workspace RPC:
 
 ```tsx
-const audioInput = useMemo(
-  () =>
-    new SFUVoiceAudioInput({
-      endpoint: `/agents/my-voice-agent/${sessionId}/voice`
-    }),
-  [sessionId]
-);
+const thinkAgent = useAgent({
+  agent: "my-think-agent",
+  name: sessionId
+});
+
+const audioInput = new SFUVoiceAudioInput({
+  endpoint: `/agents/my-think-agent/${encodeURIComponent(sessionId)}/voice`
+});
 
 const voice = useVoiceAgent({
-  agent: "my-voice-agent",
+  agent: "my-think-agent",
   name: sessionId,
   audioInput
 });
 ```
 
+The Think workspace tools can create, read, update, search, and delete durable files. Shell execution stays disabled. `research_background` dispatches a detached retained `Researcher`; its simulated `web_search` demonstrates orchestration, not grounded internet research.
+
+The browser keeps the upstream speech detection defaults (`silenceThreshold: 0.04`, `silenceDurationMs: 500`, `interruptThreshold: 0.05`, `interruptChunks: 2`). `minInterruptWords: 3` prevents one- or two-word echo fragments from interrupting playback.
+
+`[ThinkTrace]` logs turn timing, step usage, and server-side tool activity. `[VoiceTrace]` logs STT timing and captured RMS data. Reasoning text remains hidden before display and TTS.
+
 There is no PCM-over-WebSocket fallback or example-owned SFU implementation.
 
-The robot frames are adapted from
-[`pipecat-ai/pipecat-examples`](https://github.com/pipecat-ai/pipecat-examples/tree/main/simple-chatbot/server/assets)
-under the BSD 2-Clause License.
+The robot frames are adapted from [`pipecat-ai/pipecat-examples`](https://github.com/pipecat-ai/pipecat-examples/tree/main/simple-chatbot/server/assets) under the BSD 2-Clause License.

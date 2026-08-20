@@ -592,6 +592,22 @@ describe("Think — runTurn", () => {
     expect(messages[0]?.metadata?.channel).toBe("web");
     expect(messages[1]?.metadata?.channel).toBe("web");
   });
+  it("stream mode stamps turn metadata and exposes it during the turn", async () => {
+    const agent = await freshProgrammaticAgent("runturn-stream-metadata");
+    const metadata = { model: "@cf/test-model", reasoningEffort: "low" };
+    await agent.setProgrammaticResponseForTest("Metadata streamed");
+
+    await agent.testRunTurnStream("Metadata input", { metadata });
+
+    const messages = (await agent.getStoredMessages()) as Array<
+      UIMessage & { metadata?: Record<string, unknown> }
+    >;
+    const userMessage = messages.find((message) => message.role === "user");
+    expect(userMessage?.metadata?.turnMetadata).toEqual(metadata);
+    await expect(
+      agent.getCapturedTurnMetadataForTest()
+    ).resolves.toContainEqual(metadata);
+  });
 
   it("validates input vs continuation for wait mode", async () => {
     const agent = await freshProgrammaticAgent("runturn-validate-wait");

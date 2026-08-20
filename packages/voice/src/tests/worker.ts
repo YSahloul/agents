@@ -19,6 +19,7 @@ export {
 
 export {
   TestSFUVoiceAgent,
+  TestSFUTransportVoiceAgent,
   TestMissingSFUConfigAgent
 } from "./agents/sfu-voice";
 
@@ -33,8 +34,8 @@ export type Env = {
   TestStreamingTtsVoiceAgent: DurableObjectNamespace;
   TestMinInterruptVoiceAgent: DurableObjectNamespace;
   TestVoiceInputAgent: DurableObjectNamespace;
-  TestRejectCallVoiceInputAgent: DurableObjectNamespace;
   TestSFUVoiceAgent: DurableObjectNamespace;
+  TestSFUTransportVoiceAgent: DurableObjectNamespace;
   TestMissingSFUConfigAgent: DurableObjectNamespace;
 };
 

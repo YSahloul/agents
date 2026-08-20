@@ -1,10 +1,12 @@
 import type {
+  SFUConfig,
   StreamingTTSProvider,
   Transcriber,
   TTSProvider,
   VoiceTurnContext
 } from "@cloudflare/voice";
 import {
+  createSFUVoiceThink,
   createVoiceThink,
   voiceChannel,
   type CreateVoiceThinkOptions
@@ -58,3 +60,37 @@ voiceChannel({ tts });
 
 // @ts-expect-error voiceChannel requires tts.
 voiceChannel({ transcriber });
+
+const SFUVoiceThink = createSFUVoiceThink<TestEnv>();
+
+class SFUAgent extends SFUVoiceThink {
+  configureChannels() {
+    return {
+      voice: voiceChannel({ transcriber, tts })
+    };
+  }
+
+  getSFUConfig(): SFUConfig {
+    return { appId: "test-app", apiToken: "test-token" };
+  }
+
+  getModel() {
+    return "@cf/meta/llama-3.1-8b-instruct";
+  }
+
+  async onTurn(_transcript: string, _context: VoiceTurnContext) {
+    return "hello";
+  }
+}
+
+const sfuAgent = null! as InstanceType<typeof SFUAgent>;
+const sfuThink: Think<TestEnv> = sfuAgent;
+const sfuConfig: SFUConfig = sfuAgent.getSFUConfig();
+const sfuVoiceMetadata: Record<string, unknown> | undefined =
+  sfuAgent.getVoiceTurnMetadata("hello", null!);
+void sfuThink;
+void sfuConfig;
+void sfuVoiceMetadata;
+
+// @ts-expect-error SFU Voice always uses pcm16.
+createSFUVoiceThink<TestEnv>({ audioFormat: "mp3" });

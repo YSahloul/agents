@@ -5,5 +5,6 @@ import agents from "agents/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  plugins: [agents(), react(), cloudflare(), tailwindcss()]
+  plugins: [agents(), react(), cloudflare(), tailwindcss()],
+  resolve: { dedupe: ["react", "react-dom"] }
 });

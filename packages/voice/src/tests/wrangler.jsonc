@@ -60,6 +60,10 @@
         "name": "TestSFUVoiceAgent"
       },
       {
+        "class_name": "TestSFUTransportVoiceAgent",
+        "name": "TestSFUTransportVoiceAgent"
+      },
+      {
         "class_name": "TestMissingSFUConfigAgent",
         "name": "TestMissingSFUConfigAgent"
       }
@@ -81,6 +85,7 @@
         "TestVoiceInputAgent",
         "TestRejectCallVoiceInputAgent",
         "TestSFUVoiceAgent",
+        "TestSFUTransportVoiceAgent",
         "TestMissingSFUConfigAgent"
       ],
       "tag": "v1"

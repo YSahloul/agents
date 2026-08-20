@@ -1,25 +1,17 @@
 import {
   Think,
   Session,
-  type StreamCallback,
   type StepContext,
   type ThinkChannels,
   type ToolCallContext,
   type ToolCallResultContext,
   type TurnConfig
 } from "@cloudflare/think";
-import {
-  Agent,
-  callable,
-  getAgentByName,
-  routeAgentRequest,
-  type Connection
-} from "agents";
+import { createSFUVoiceThink, voiceChannel } from "@cloudflare/think/voice";
+import { callable, routeAgentRequest, type Connection } from "agents";
 import {
   convertTTSProvider,
   mp3ToPcm16,
-  streamRpcVoiceTurn,
-  withSFUVoice,
   WorkersAIFluxSTT,
   WorkersAIGrokTTS,
   type SFUConfig,
@@ -44,39 +36,50 @@ function isReasoningModel(m: {
   );
 }
 
-/**
- * Some reasoning models (Kimi K2, DeepSeek-R1/QwQ-style templates) prime the
- * prompt with an implicit `<think>` and only emit the closing `</think>` in
- * the completion -- even with `chat_template_kwargs: { enable_thinking: false }`
- * set, Workers AI does not honor it for every reasoning model. Buffer text
- * until the first `</think>` and drop everything up to it so reasoning is
- * never spoken or shown. If no closing tag ever appears, flush the buffered
- * text unchanged at stream end -- normal answers are never lost, only
- * unbuffered late.
- * ponytail: buffers the whole turn when a model never emits `</think>`,
- * losing early TTS start for that turn. Upgrade: key this off the model's
- * `reasoning` catalog flag once `onTurn` can see it.
- */
-async function* stripThinkTags(
-  source: AsyncIterable<string>
-): AsyncGenerator<string> {
-  const CLOSE_TAG = "</think>";
+type TextDelta = { type: "text-delta"; delta: string };
+
+function isTextDelta(chunk: unknown): chunk is TextDelta {
+  return (
+    typeof chunk === "object" &&
+    chunk !== null &&
+    (chunk as { type?: unknown }).type === "text-delta" &&
+    typeof (chunk as { delta?: unknown }).delta === "string"
+  );
+}
+
+async function* stripThinkTextDeltas(
+  source: AsyncIterable<unknown>
+): AsyncGenerator<unknown> {
+  const closeTag = "</think>";
   let buffering = true;
   let buffer = "";
+  const pending: unknown[] = [];
+
   for await (const chunk of source) {
     if (!buffering) {
       yield chunk;
       continue;
     }
-    buffer += chunk;
-    const closeIndex = buffer.indexOf(CLOSE_TAG);
+    if (!isTextDelta(chunk)) {
+      pending.push(chunk);
+      continue;
+    }
+
+    buffer += chunk.delta;
+    const closeIndex = buffer.indexOf(closeTag);
     if (closeIndex === -1) continue;
+
     buffering = false;
-    const after = buffer.slice(closeIndex + CLOSE_TAG.length);
+    for (const event of pending) yield event;
+    const after = buffer.slice(closeIndex + closeTag.length);
     buffer = "";
-    if (after) yield after;
+    if (after) yield { ...chunk, delta: after };
   }
-  if (buffering && buffer) yield buffer;
+
+  if (buffering) {
+    for (const event of pending) yield event;
+    if (buffer) yield { type: "text-delta", delta: buffer };
+  }
 }
 
 const DEFAULT_MODEL = "@cf/moonshotai/kimi-k2.7-code";
@@ -85,11 +88,6 @@ const SYSTEM_PROMPT = `You are a helpful assistant with access to a persistent w
 Use the workspace tools to create, read, update, find, list, and delete files when requested. Confirm completed actions briefly.`;
 
 type ReasoningEffort = "low" | "medium" | "high" | null;
-
-interface VoiceTurnOptions extends Record<string, unknown> {
-  model: string;
-  reasoningEffort?: ReasoningEffort;
-}
 
 function reasoningEffort(value: unknown): ReasoningEffort | undefined {
   if (value === null) return null;
@@ -171,12 +169,14 @@ export class Researcher extends Think<Env> {
   }
 }
 
-/**
- * Canonical conversation agent. It owns the transcript, model, tools, memory,
- * and workspace. The voice agent below only translates audio to and from this
- * agent over RPC.
- */
-export class MyThinkAgent extends Think<Env> {
+const VoiceThink = createSFUVoiceThink<Env>({
+  filterEchoedTranscripts: true,
+  listenDuringCallStart: false,
+  minInterruptWords: 3
+});
+
+/** One Durable Object owns Think Session, Voice, SFU, tools, and workspace. */
+export class MyThinkAgent extends VoiceThink {
   override workspaceBash = false;
   readonly #workersAi = createWorkersAI({ binding: this.env.AI });
 
@@ -190,14 +190,94 @@ export class MyThinkAgent extends Think<Env> {
 
   override configureChannels(): ThinkChannels {
     return {
-      voice: {
-        kind: "voice",
-        ingress: { transport: "voice" },
+      voice: voiceChannel({
+        transcriber: new WorkersAIFluxSTT(this.env.AI, {
+          eotThreshold: 0.7
+        }),
+        tts: convertTTSProvider({
+          provider: new WorkersAIGrokTTS(this.env.AI, {
+            voice: "ara",
+            audioFormat: "mp3"
+          }),
+          converter: mp3ToPcm16({ sampleRate: 24000 })
+        }),
         instructions:
           "You are speaking in a live WebRTC voice chat, so keep responses concise and natural for text-to-speech. Always return speakable text except when dispatching research_background: call it silently. Do not mention its start, progress, or completion unless the user asks.",
         maxTurns: 3
-      }
+      })
     };
+  }
+
+  getSFUConfig(): SFUConfig {
+    const env = this.env as Env & {
+      REALTIME_SFU_APP_ID: string;
+      REALTIME_SFU_BEARER_TOKEN: string;
+      SFU_API_BASE?: string;
+    };
+    return {
+      appId: env.REALTIME_SFU_APP_ID,
+      apiToken: env.REALTIME_SFU_BEARER_TOKEN,
+      apiBase: env.SFU_API_BASE
+    };
+  }
+
+  override getVoiceTurnMetadata(
+    _transcript: string,
+    context: VoiceTurnContext
+  ): Record<string, unknown> {
+    const url = new URL(context.connection.uri ?? "http://localhost");
+    const modelParam = url.searchParams.get("llm");
+    const model =
+      modelParam?.startsWith("@cf/") === true ? modelParam : DEFAULT_MODEL;
+    const requestedReasoning = url.searchParams.get("reasoning");
+    const effort =
+      requestedReasoning === "off" ? null : reasoningEffort(requestedReasoning);
+    return {
+      model,
+      ...(effort !== undefined && { reasoningEffort: effort })
+    };
+  }
+
+  override async onTurn(
+    transcript: string,
+    context: VoiceTurnContext
+  ): Promise<AsyncIterable<unknown>> {
+    const turnId = crypto.randomUUID();
+    const startedAt = Date.now();
+    console.log("[ThinkTrace]", { event: "turn_start", turnId });
+    const source = await super.onTurn(transcript, context);
+    if (
+      typeof source !== "object" ||
+      source === null ||
+      !(Symbol.asyncIterator in source)
+    ) {
+      throw new TypeError("Think Voice onTurn must return an async stream");
+    }
+    return (async function* () {
+      try {
+        yield* stripThinkTextDeltas(source);
+        console.log("[ThinkTrace]", {
+          event: "turn_end",
+          turnId,
+          durationMs: Date.now() - startedAt
+        });
+      } catch (error) {
+        console.error("[ThinkTrace]", {
+          event: "turn_error",
+          turnId,
+          durationMs: Date.now() - startedAt,
+          error
+        });
+        throw error;
+      }
+    })();
+  }
+
+  override async onCallStart(
+    connection: Connection,
+    { resumed }: VoiceCallStartContext
+  ): Promise<void> {
+    if (!resumed) await this.speak(connection, "Hi, how are you doing?");
   }
 
   override configureSession(session: Session): Session {
@@ -305,118 +385,6 @@ export class MyThinkAgent extends Think<Env> {
       finishReason: ctx.finishReason,
       usage: ctx.usage
     });
-  }
-
-  async runVoiceTurn(
-    turnId: string,
-    transcript: string,
-    callback: StreamCallback,
-    options: VoiceTurnOptions
-  ): Promise<void> {
-    const startedAt = Date.now();
-    console.log("[ThinkTrace]", {
-      event: "turn_start",
-      turnId,
-      model: options.model,
-      reasoningEffort: options.reasoningEffort
-    });
-
-    try {
-      await this.chat(transcript, callback, {
-        metadata: options,
-        channel: "voice"
-      });
-      console.log("[ThinkTrace]", {
-        event: "turn_end",
-        turnId,
-        durationMs: Date.now() - startedAt
-      });
-    } catch (error) {
-      console.error("[ThinkTrace]", {
-        event: "turn_error",
-        turnId,
-        durationMs: Date.now() - startedAt,
-        error
-      });
-      throw error;
-    }
-  }
-}
-
-const VoiceAgent = withSFUVoice(Agent, {
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false,
-  minInterruptWords: 3
-});
-
-export class MyVoiceAgent extends VoiceAgent<Env> {
-  tts = convertTTSProvider({
-    provider: new WorkersAIGrokTTS(this.env.AI, {
-      voice: "ara",
-      audioFormat: "mp3"
-    }),
-    converter: mp3ToPcm16({ sampleRate: 24000 })
-  });
-  transcriber = new WorkersAIFluxSTT(this.env.AI, {
-    eotThreshold: 0.7
-  });
-
-  readonly #greeting = "Hi, how are you doing?";
-
-  getSFUConfig(): SFUConfig {
-    const env = this.env as Env & {
-      REALTIME_SFU_APP_ID: string;
-      REALTIME_SFU_BEARER_TOKEN: string;
-      SFU_API_BASE?: string;
-    };
-    return {
-      appId: env.REALTIME_SFU_APP_ID,
-      apiToken: env.REALTIME_SFU_BEARER_TOKEN,
-      apiBase: env.SFU_API_BASE
-    };
-  }
-
-  // --- Voice agent logic ---
-
-  async onTurn(
-    transcript: string,
-    context: VoiceTurnContext
-  ): Promise<AsyncIterable<string>> {
-    const url = new URL(context.connection.uri ?? "http://localhost");
-    const modelParam = url.searchParams.get("llm");
-    const model =
-      modelParam?.startsWith("@cf/") === true ? modelParam : DEFAULT_MODEL;
-    const requestedReasoning = url.searchParams.get("reasoning");
-    const effort =
-      requestedReasoning === "off" ? null : reasoningEffort(requestedReasoning);
-
-    const brain = await getAgentByName(this.env.MyThinkAgent, this.name);
-    const turnId = crypto.randomUUID();
-    return stripThinkTags(
-      streamRpcVoiceTurn({
-        signal: context.signal,
-        run: (callback) =>
-          brain.runVoiceTurn(turnId, transcript, callback, {
-            model,
-            ...(effort !== undefined && { reasoningEffort: effort })
-          }),
-        cancel: (requestId, reason) => brain.cancelChat(requestId, reason),
-        onRequestId: (requestId) => {
-          console.log("[ThinkTrace]", {
-            event: "request_start",
-            turnId,
-            requestId
-          });
-        }
-      })
-    );
-  }
-
-  async onCallStart(
-    connection: Connection,
-    { resumed }: VoiceCallStartContext
-  ) {
-    if (!resumed) await this.speak(connection, this.#greeting);
   }
 }
 

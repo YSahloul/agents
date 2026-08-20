@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "avatar-webrtc-voice-grok",
+  "name": "avatar-think-sfu-webrtc",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
@@ -10,16 +10,12 @@
   },
   "routes": [
     {
-      "pattern": "avatar.sahloul.io",
+      "pattern": "think.sahloul.io",
       "custom_domain": true
     }
   ],
   "durable_objects": {
     "bindings": [
-      {
-        "class_name": "MyVoiceAgent",
-        "name": "MyVoiceAgent"
-      },
       {
         "class_name": "MyThinkAgent",
         "name": "MyThinkAgent"
@@ -28,12 +24,8 @@
   },
   "migrations": [
     {
-      "new_sqlite_classes": ["MyVoiceAgent"],
-      "tag": "v1"
-    },
-    {
       "new_sqlite_classes": ["MyThinkAgent"],
-      "tag": "v2"
+      "tag": "v1"
     }
   ],
   "assets": {

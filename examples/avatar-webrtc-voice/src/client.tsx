@@ -235,7 +235,7 @@ function App() {
   const audioInput = useMemo(
     () =>
       new SFUVoiceAudioInput({
-        endpoint: `/agents/my-voice-agent/${encodeURIComponent(sessionId)}/voice`,
+        endpoint: `/agents/my-think-agent/${encodeURIComponent(sessionId)}/voice`,
         onPlaybackAudioLevel: (rms) => {
           if (rms > 0.01) {
             if (playbackSilenceTimer.current !== undefined) {
@@ -277,7 +277,7 @@ function App() {
     toggleMute,
     sendText
   } = useVoiceAgent({
-    agent: "my-voice-agent",
+    agent: "my-think-agent",
     name: sessionId,
     query: { llm: llmModel, reasoning },
     audioInput,

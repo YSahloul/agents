@@ -4892,6 +4892,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     continuation?: boolean;
     body?: RpcJsonObject;
   }> = [];
+  private _capturedTurnMetadata: (Record<string, unknown> | undefined)[] = [];
   private _delayedChunks: { chunks: string[]; delayMs: number } | null = null;
   private _throwBeforeTurnError: string | null = null;
   private _submissionStatusDelayMs = 0;
@@ -4986,6 +4987,11 @@ export class ThinkProgrammaticTestAgent extends Think {
   async getMessagesForTest(): Promise<UIMessage[]> {
     return this.getMessages();
   }
+  async getCapturedTurnMetadataForTest(): Promise<
+    (Record<string, unknown> | undefined)[]
+  > {
+    return this._capturedTurnMetadata;
+  }
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
@@ -5022,6 +5028,7 @@ export class ThinkProgrammaticTestAgent extends Think {
       continuation: ctx.continuation,
       body: ctx.body as RpcJsonObject | undefined
     });
+    this._capturedTurnMetadata.push(this.activeTurnMetadata);
     if (this._nestedAdmissionMode && !this._nestedAdmissionAttempted) {
       this._nestedAdmissionAttempted = true;
       try {
@@ -5378,9 +5385,20 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.runTurn({ mode: "submit", input: text, ...options });
   }
 
-  async testRunTurnStream(text: string): Promise<TestChatResult> {
+  async testRunTurnStream(
+    text: string,
+    options?: {
+      channel?: string;
+      metadata?: Record<string, unknown>;
+    }
+  ): Promise<TestChatResult> {
     const callback = new TestCollectingCallback();
-    await this.runTurn({ mode: "stream", input: text, callback });
+    await this.runTurn({
+      mode: "stream",
+      input: text,
+      callback,
+      ...options
+    });
     return {
       events: callback.events,
       done: callback.doneCalled,

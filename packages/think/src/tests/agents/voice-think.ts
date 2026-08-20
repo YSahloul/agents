@@ -1,10 +1,12 @@
 import type { LanguageModel, UIMessage } from "ai";
 import { createVoiceThink, voiceChannel } from "../../voice";
+import type { Connection } from "agents";
 import type {
   Transcriber,
   TranscriberSession,
   TranscriberSessionOptions,
-  TTSProvider
+  TTSProvider,
+  VoiceTurnContext
 } from "@cloudflare/voice";
 import { Think } from "../../think";
 
@@ -86,6 +88,8 @@ function modelResponse(response: string): LanguageModel {
 const VoiceThink = createVoiceThink({ channel: "voice" });
 
 export class ThinkVoiceTestAgent extends VoiceThink {
+  private _voiceMetadataCalls = 0;
+
   readonly #transcriber = new TestTranscriber();
   readonly #tts = new TestTTS();
 
@@ -101,6 +105,36 @@ export class ThinkVoiceTestAgent extends VoiceThink {
 
   override getModel(): LanguageModel {
     return modelResponse("voice answer");
+  }
+
+  override getVoiceTurnMetadata(
+    transcript: string,
+    context: VoiceTurnContext
+  ): Record<string, unknown> {
+    this._voiceMetadataCalls++;
+    return { transcript, uri: context.connection.uri };
+  }
+
+  async runVoiceOnTurnForTest(input: string, uri: string): Promise<void> {
+    const stream = await this.onTurn(input, {
+      connection: { id: "voice-test", uri } as Connection,
+      messages: [],
+      signal: new AbortController().signal
+    });
+    if (
+      typeof stream !== "object" ||
+      stream === null ||
+      !(Symbol.asyncIterator in stream)
+    ) {
+      throw new TypeError("Expected an async Voice Think stream");
+    }
+    for await (const _chunk of stream) {
+      // Consume the stream so the Think turn and metadata stamp complete.
+    }
+  }
+
+  async getVoiceMetadataCallsForTest(): Promise<number> {
+    return this._voiceMetadataCalls;
   }
 
   async runVoiceTurnForTest(input: string): Promise<void> {

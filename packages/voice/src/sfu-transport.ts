@@ -32,7 +32,7 @@ export interface SFUVoiceState {
   };
 }
 
-export interface SFUVoiceTransportOptions {
+export interface SFUVoiceTransportConfig {
   config: SFUConfig;
   routePrefix?: string;
   inputSampleRate?: number;
@@ -98,7 +98,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
   #suspendTimer: ReturnType<typeof setTimeout> | null = null;
   #keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(options: SFUVoiceTransportOptions) {
+  constructor(options: SFUVoiceTransportConfig) {
     this.#config = options.config;
     this.#routePrefix =
       options.routePrefix?.replace(/^\/+|\/+$/g, "") || "voice";

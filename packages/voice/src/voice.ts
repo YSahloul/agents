@@ -141,9 +141,12 @@ export {
 } from "./sfu-utils";
 export type { SFUConfig } from "./sfu-utils";
 export { SFUVoiceTransport } from "./sfu-transport";
-export type { SFUVoiceState, SFUVoiceTransportOptions } from "./sfu-transport";
-export { withSFUVoice } from "./sfu-voice";
-export type { SFUVoiceAgentOptions } from "./sfu-voice";
+export type { SFUVoiceState, SFUVoiceTransportConfig } from "./sfu-transport";
+export { withSFUVoice, withSFUVoiceTransport } from "./sfu-voice";
+export type {
+  SFUVoiceAgentOptions,
+  SFUVoiceTransportOptions
+} from "./sfu-voice";
 
 // Re-export Workers AI providers
 export {

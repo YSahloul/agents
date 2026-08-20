@@ -38,6 +38,24 @@ describe("Think voice adapter", () => {
     expect(await agent.getVoiceSqlTables()).toEqual([]);
   });
 
+  it("stamps connection metadata once for an inherited voice turn", async () => {
+    const agent = await freshAgent(`voice-metadata-${crypto.randomUUID()}`);
+    const uri = "https://example.com/voice?llm=%40cf%2Ftest";
+
+    await agent.runVoiceOnTurnForTest("metadata input", uri);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const user = messages.find((message) => message.role === "user");
+    const metadata = user?.metadata as
+      | { turnMetadata?: Record<string, unknown> }
+      | undefined;
+    expect(metadata?.turnMetadata).toEqual({
+      transcript: "metadata input",
+      uri
+    });
+    expect(await agent.getVoiceMetadataCallsForTest()).toBe(1);
+  });
+
   it("uses Think Session as the sole persisted voice transcript", async () => {
     const agent = await freshAgent(`voice-persistence-${crypto.randomUUID()}`);
     await agent.runVoiceTurnForTest("first");

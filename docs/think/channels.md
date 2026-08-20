@@ -78,6 +78,49 @@ Session is the durable source of truth and `cf_voice_messages` is not created.
 The channel id is stamped onto Think's user message and shared by Voice turns
 and `runTurn({ channel: "voice" })`.
 
+### SFU WebRTC voice
+
+For browser WebRTC audio through Cloudflare Realtime SFU, use
+`createSFUVoiceThink()`. It fixes Voice audio to 24 kHz PCM16 and adds the
+SFU routes to the same Durable Object as Think Session state:
+
+```typescript
+import { createSFUVoiceThink, voiceChannel } from "@cloudflare/think/voice";
+import {
+  WorkersAIFluxSTT,
+  WorkersAITTS,
+  type SFUConfig
+} from "@cloudflare/voice";
+
+const VoiceThink = createSFUVoiceThink<Env>();
+
+export class Assistant extends VoiceThink {
+  getSFUConfig(): SFUConfig {
+    return {
+      appId: this.env.REALTIME_SFU_APP_ID,
+      apiToken: this.env.REALTIME_SFU_BEARER_TOKEN
+    };
+  }
+
+  configureChannels() {
+    return {
+      voice: voiceChannel({
+        transcriber: new WorkersAIFluxSTT(this.env.AI),
+        tts: new WorkersAITTS(this.env.AI),
+        instructions: "Keep replies short and speakable."
+      })
+    };
+  }
+}
+```
+
+The inherited Voice pipeline admits each transcript with
+`runTurn({ channel: "voice", mode: "stream" })`, streams TTS through SFU, and
+passes the Voice abort signal directly to Think. The browser, SFU routes,
+Voice pipeline, Think turn, and Session therefore use one Durable Object. Use
+`getVoiceTurnMetadata()` to stamp connection-specific model settings onto the
+durable user message before `beforeTurn()` resolves the model.
+
 ## Channel kinds
 
 | Kind        | Ingress                      | Notes                                            |
