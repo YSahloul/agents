@@ -1,37 +1,67 @@
-/** SignalWire PCMU/8 kHz ↔ VoiceAgent PCM16/16 kHz conversion. */
+/**
+ * Audio utilities for the SignalWire telephony bridge.
+ *
+ * SignalWire streams 8kHz G.711 mulaw; the VoiceAgent pipeline speaks 16kHz
+ * 16-bit PCM. These helpers convert between the two and handle the base64
+ * framing SignalWire wraps each audio chunk in.
+ */
 
-function base64ToUint8Array(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
+export function base64ToUint8Array(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const view = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    view[i] = binary.charCodeAt(i);
+  }
+  return view;
+}
+
+export function base64ToArrayBuffer(b64: string): ArrayBuffer {
+  const view = base64ToUint8Array(b64);
+  return view.buffer.slice(
+    view.byteOffset,
+    view.byteOffset + view.byteLength
+  ) as ArrayBuffer;
 }
 
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
+  const view = new Uint8Array(buffer);
   let binary = "";
-  for (let i = 0; i < bytes.length; i++)
-    binary += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < view.length; i++) {
+    binary += String.fromCharCode(view[i]);
+  }
   return btoa(binary);
 }
 
+// mulaw decode table — maps each mulaw byte to a 16-bit linear PCM sample.
 const MULAW_DECODE_TABLE = new Int16Array(256);
-for (let i = 0; i < 256; i++) {
-  const mu = ~i & 0xff;
-  const sign = mu & 0x80;
-  const exponent = (mu >> 4) & 0x07;
-  const mantissa = mu & 0x0f;
-  let sample = ((mantissa << 3) + 0x84) << exponent;
-  sample -= 0x84;
-  MULAW_DECODE_TABLE[i] = sign ? -sample : sample;
+{
+  for (let i = 0; i < 256; i++) {
+    const mu = ~i & 0xff;
+    const sign = mu & 0x80;
+    const exponent = (mu >> 4) & 0x07;
+    const mantissa = mu & 0x0f;
+    let sample = ((mantissa << 3) + 0x84) << exponent;
+    sample -= 0x84;
+    MULAW_DECODE_TABLE[i] = sign ? -sample : sample;
+  }
 }
 
 const MULAW_BIAS = 0x84;
 const MULAW_CLIP = 32635;
 
-function encodeMulaw(value: number): number {
-  const sign = value < 0 ? 0x80 : 0;
-  let sample = Math.min(Math.abs(value), MULAW_CLIP) + MULAW_BIAS;
+export function decodeMulaw(data: Uint8Array): Int16Array {
+  const out = new Int16Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    out[i] = MULAW_DECODE_TABLE[data[i]];
+  }
+  return out;
+}
+
+export function encodeMulaw(sample: number): number {
+  const sign = sample < 0 ? 0x80 : 0;
+  if (sample < 0) sample = -sample;
+  if (sample > MULAW_CLIP) sample = MULAW_CLIP;
+  sample += MULAW_BIAS;
   let exponent = 7;
   for (; exponent > 0; exponent--) {
     if (sample & 0x4000) break;
@@ -41,49 +71,53 @@ function encodeMulaw(value: number): number {
   return ~(sign | (exponent << 4) | mantissa) & 0xff;
 }
 
-function resample(
+/** Linear-interpolating resampler between two sample rates. */
+export function resamplePCM(
   input: Int16Array,
   fromRate: number,
   toRate: number
 ): Int16Array {
   if (fromRate === toRate) return input;
   const ratio = fromRate / toRate;
-  const output = new Int16Array(Math.floor(input.length / ratio));
-  for (let i = 0; i < output.length; i++) {
-    const source = i * ratio;
-    const index = Math.floor(source);
-    const fraction = source - index;
-    const first = input[index] ?? 0;
-    const second = input[Math.min(index + 1, input.length - 1)] ?? 0;
-    output[i] = Math.round(first + fraction * (second - first));
+  const outputLength = Math.floor(input.length / ratio);
+  const output = new Int16Array(outputLength);
+  for (let i = 0; i < outputLength; i++) {
+    const srcIndex = i * ratio;
+    const idx = Math.floor(srcIndex);
+    const frac = srcIndex - idx;
+    const a = input[idx] ?? 0;
+    const b = input[Math.min(idx + 1, input.length - 1)] ?? 0;
+    output[i] = Math.round(a + frac * (b - a));
   }
   return output;
 }
 
-export function signalWireMulawToPcm16(
-  payload: string,
-  sampleRate = 16000
-): Int16Array {
+// SignalWire streams 8kHz mulaw; the agent pipeline runs at 16kHz PCM.
+const SIGNALWIRE_RATE = 8000;
+const AGENT_RATE = 16000;
+
+/** Decode an inbound SignalWire media payload (base64 mulaw 8kHz) to 16kHz PCM. */
+export function mulawBase64ToPcm16(payload: string): Int16Array {
   const mulaw = base64ToUint8Array(payload);
-  const pcm8k = new Int16Array(mulaw.length);
-  for (let i = 0; i < mulaw.length; i++)
-    pcm8k[i] = MULAW_DECODE_TABLE[mulaw[i]];
-  return resample(pcm8k, 8000, sampleRate);
+  return resamplePCM(decodeMulaw(mulaw), SIGNALWIRE_RATE, AGENT_RATE);
 }
 
-export function pcm16ToSignalWireMulaw(
-  pcm: Int16Array,
-  sampleRate = 16000
-): string {
-  const pcm8k = resample(pcm, sampleRate, 8000);
+/** Encode 16kHz agent PCM to a base64 mulaw 8kHz payload for SignalWire. */
+export function pcm16ToMulawBase64(pcm: Int16Array): string {
+  const pcm8k = resamplePCM(pcm, AGENT_RATE, SIGNALWIRE_RATE);
   const mulaw = new Uint8Array(pcm8k.length);
-  for (let i = 0; i < pcm8k.length; i++) mulaw[i] = encodeMulaw(pcm8k[i]);
+  for (let i = 0; i < pcm8k.length; i++) {
+    mulaw[i] = encodeMulaw(pcm8k[i]);
+  }
   return arrayBufferToBase64(mulaw.buffer as ArrayBuffer);
 }
 
+/** Mean squared amplitude of a PCM frame — used to detect caller speech. */
 export function meanSquaredEnergy(pcm: Int16Array): number {
   if (pcm.length === 0) return 0;
-  let sum = 0;
-  for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
-  return sum / pcm.length;
+  let sumSq = 0;
+  for (let i = 0; i < pcm.length; i++) {
+    sumSq += pcm[i] * pcm[i];
+  }
+  return sumSq / pcm.length;
 }

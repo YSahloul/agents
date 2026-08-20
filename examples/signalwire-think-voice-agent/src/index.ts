@@ -9,13 +9,46 @@ import {
   streamRpcVoiceTurn,
   withVoice,
   WorkersAIFluxSTT,
-  WorkersAIRealtimeTTS,
+  type TTSProvider,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
 import { tool, type ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
+
+/**
+ * Workers AI TTS with raw linear16 PCM output — required for the mulaw
+ * encoder in the SignalWire adapter. WorkersAITTS defaults to MP3; we call
+ * @cf/deepgram/aura-2-en directly with encoding + container params.
+ */
+class SignalWirePCMTTS implements TTSProvider {
+  constructor(private ai: Ai) {}
+
+  async synthesize(
+    text: string,
+    signal?: AbortSignal
+  ): Promise<ArrayBuffer | null> {
+    const response = (await this.ai.run(
+      "@cf/deepgram/aura-2-en",
+      {
+        text,
+        speaker: "asteria",
+        encoding: "linear16",
+        sample_rate: 16000,
+        container: "none"
+      },
+      { returnRawResponse: true, ...(signal ? { signal } : {}) }
+    )) as Response;
+    if (!response.ok) {
+      // Returning the error body would ship JSON down the audio pipeline
+      // and play as silence — fail loud and skip the audio instead.
+      console.error("[SignalWirePCMTTS] TTS failed:", await response.text());
+      return null;
+    }
+    return response.arrayBuffer();
+  }
+}
 
 const MODEL = "@cf/zai-org/glm-4.7-flash";
 const SYSTEM_PROMPT = [
@@ -122,7 +155,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     eagerEotThreshold: 0.5,
     eotThreshold: 0.7
   });
-  tts = new WorkersAIRealtimeTTS(this.env.AI);
+  tts = new SignalWirePCMTTS(this.env.AI);
 
   async onCallStart(connection: Connection) {
     await this.speak(connection, "Hello! How can I help you today?");
@@ -155,12 +188,7 @@ export default {
     }
 
     if (url.pathname === "/signalwire") {
-      return SignalWireAdapter.handleRequest(
-        request,
-        env as unknown as Record<string, unknown>,
-        "MyVoiceAgent",
-        { agentAudioFormat: "mulaw" }
-      );
+      return SignalWireAdapter.handleRequest(request, env, "MyVoiceAgent");
     }
 
     return (

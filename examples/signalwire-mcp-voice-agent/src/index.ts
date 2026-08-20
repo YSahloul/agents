@@ -3,7 +3,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import {
   withVoice,
   WorkersAIFluxSTT,
-  WorkersAIRealtimeTTS,
+  type TTSProvider,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
@@ -11,6 +11,39 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { isStepCount, streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
+
+/**
+ * Workers AI TTS with raw linear16 PCM output — required for the mulaw
+ * encoder in the SignalWire adapter. WorkersAITTS defaults to MP3; we call
+ * @cf/deepgram/aura-2-en directly with encoding + container params.
+ */
+class SignalWirePCMTTS implements TTSProvider {
+  constructor(private ai: Ai) {}
+
+  async synthesize(
+    text: string,
+    signal?: AbortSignal
+  ): Promise<ArrayBuffer | null> {
+    const response = (await this.ai.run(
+      "@cf/deepgram/aura-2-en",
+      {
+        text,
+        speaker: "asteria",
+        encoding: "linear16",
+        sample_rate: 16000,
+        container: "none"
+      },
+      { returnRawResponse: true, ...(signal ? { signal } : {}) }
+    )) as Response;
+    if (!response.ok) {
+      // Returning the error body would ship JSON down the audio pipeline
+      // and play as silence — fail loud and skip the audio instead.
+      console.error("[SignalWirePCMTTS] TTS failed:", await response.text());
+      return null;
+    }
+    return response.arrayBuffer();
+  }
+}
 
 const SYSTEM_PROMPT = `You are a phone voice assistant testing MCP tools. Respond in 1-2 short sentences. Be direct and natural. Never exceed 30 words unless asked for detail. Use the current-time tool whenever the caller asks for the date or time. Use the retail tools for product, wheel, tire, accessory, price, fitment, image, and stock questions.`;
 
@@ -55,7 +88,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     eagerEotThreshold: 0.5,
     eotThreshold: 0.7
   });
-  tts = new WorkersAIRealtimeTTS(this.env.AI);
+  tts = new SignalWirePCMTTS(this.env.AI);
 
   async onStart() {
     await this.addMcpServer("voice-test-tools", this.env.MCP_SERVER_URL, {
@@ -130,12 +163,7 @@ export default {
     }
 
     if (url.pathname === "/signalwire") {
-      return SignalWireAdapter.handleRequest(
-        request,
-        env as unknown as Record<string, unknown>,
-        "MyVoiceAgent",
-        { agentAudioFormat: "mulaw" }
-      );
+      return SignalWireAdapter.handleRequest(request, env, "MyVoiceAgent");
     }
 
     return (

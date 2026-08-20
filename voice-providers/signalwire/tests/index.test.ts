@@ -1,7 +1,59 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { SignalWireAdapter } from "../src/index.js";
+import type { SignalWireAdapterOptions } from "../src/index.js";
+import {
+  arrayBufferToBase64,
+  base64ToArrayBuffer
+} from "../src/audio/utils.js";
 
-type Handler = (event: MessageEvent) => void;
+// WebSocketPair and status 101 responses are Cloudflare Workers runtime APIs
+// not available in Node/vitest. Stubs below let SignalWireAdapter be
+// unit-tested.
+
+type Handler = (event: { data?: unknown }) => void;
+
+class FakeWebSocket {
+  readyState = 1; // OPEN
+  sent: unknown[] = [];
+  closed = false;
+  private handlers = new Map<string, Handler[]>();
+
+  accept() {}
+
+  send(data: unknown) {
+    this.sent.push(data);
+  }
+
+  close() {
+    this.closed = true;
+    this.readyState = 3; // CLOSED
+  }
+
+  addEventListener(event: string, handler: Handler) {
+    const list = this.handlers.get(event) ?? [];
+    list.push(handler);
+    this.handlers.set(event, list);
+  }
+
+  emit(event: string, payload?: { data?: unknown }) {
+    for (const handler of this.handlers.get(event) ?? []) {
+      handler(payload ?? {});
+    }
+  }
+
+  get jsonSent(): Record<string, unknown>[] {
+    return this.sent
+      .filter((d): d is string => typeof d === "string")
+      .map((d) => JSON.parse(d) as Record<string, unknown>);
+  }
+
+  get binarySent(): ArrayBuffer[] {
+    return this.sent.filter((d): d is ArrayBuffer => d instanceof ArrayBuffer);
+  }
+}
+
+let lastPair: { signalWire: FakeWebSocket; server: FakeWebSocket } | null =
+  null;
 
 /** Independent G.711 μ-law encoder, written from the spec rather than reused
  * from the adapter, so the round-trip test cannot pass by sharing a bug. */
@@ -22,79 +74,72 @@ function encodeMulawReference(sample: number): number {
   return ~(sign | (exponent << 4) | mantissa) & 0xff;
 }
 
-class FakeWebSocket {
-  readyState: number = WebSocket.OPEN;
-  sent: unknown[] = [];
-  closed = false;
-  private handlers = new Map<string, Handler[]>();
-
-  accept() {}
-  send(data: unknown) {
-    this.sent.push(data);
-  }
-  close() {
-    this.closed = true;
-    this.readyState = WebSocket.CLOSED;
-  }
-  addEventListener(type: string, handler: Handler) {
-    this.handlers.set(type, [...(this.handlers.get(type) ?? []), handler]);
-  }
-  emit(type: string, data?: unknown) {
-    for (const handler of this.handlers.get(type) ?? []) {
-      handler({ data } as MessageEvent);
-    }
-  }
-  get json() {
-    return this.sent
-      .filter((value): value is string => typeof value === "string")
-      .map((value) => JSON.parse(value) as Record<string, unknown>);
-  }
+function decodeMulawReference(byte: number): number {
+  const mu = ~byte & 0xff;
+  const sign = mu & 0x80;
+  const exponent = (mu >> 4) & 0x07;
+  const mantissa = mu & 0x0f;
+  let sample = ((mantissa << 3) + 0x84) << exponent;
+  sample -= 0x84;
+  return sign ? -sample : sample;
 }
 
-let carrierSocket: FakeWebSocket;
-let agentSocket: FakeWebSocket;
-let instanceNames: string[];
-let fetchedRequests: Request[];
+function pcmToMulawBase64(samples: Int16Array): string {
+  const bytes = new Uint8Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    bytes[i] = encodeMulawReference(samples[i]);
+  }
+  return arrayBufferToBase64(bytes.buffer as ArrayBuffer);
+}
 
 beforeAll(() => {
-  Object.defineProperty(globalThis, "WebSocketPair", {
-    configurable: true,
-    value: function (this: Record<number, FakeWebSocket>) {
+  (globalThis as unknown as Record<string, unknown>)["WebSocketPair"] =
+    function (this: Record<number, FakeWebSocket>) {
       this[0] = new FakeWebSocket();
       this[1] = new FakeWebSocket();
-      carrierSocket = this[1];
-    }
-  });
+      lastPair = { signalWire: this[0], server: this[1] };
+    };
 
-  const OriginalResponse = Response;
-  Object.defineProperty(globalThis, "Response", {
-    configurable: true,
-    value: class extends OriginalResponse {
-      constructor(
-        body?: BodyInit | null,
-        init?: ResponseInit & { webSocket?: FakeWebSocket }
-      ) {
-        super(body, init?.status === 101 ? { ...init, status: 200 } : init);
-        Object.defineProperty(this, "webSocket", {
-          value: init?.webSocket ?? null
-        });
+  // Node's Response rejects status 101 (Workers-only). Patch it to accept
+  // any status — what matters in tests is the WebSocket wiring, not the
+  // status line.
+  const OriginalResponse = globalThis.Response;
+  (globalThis as unknown as Record<string, unknown>)["Response"] =
+    class extends OriginalResponse {
+      constructor(body?: BodyInit | null, init?: ResponseInit) {
+        if (init?.status === 101) {
+          super(body, { ...init, status: 200 });
+        } else {
+          super(body, init);
+        }
       }
-    }
-  });
+    };
 });
 
-function createAdapter(options?: {
-  instanceName?: string;
-  agentAudioFormat?: "mulaw" | "pcm16";
-  sttSampleRate?: number;
-}) {
-  agentSocket = new FakeWebSocket();
-  instanceNames = [];
-  fetchedRequests = [];
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+// --- Bridge harness ---
+
+interface Harness {
+  serverSocket: FakeWebSocket;
+  agentSocket: FakeWebSocket;
+  idFromNameCalls: string[];
+  fetchedRequests: Request[];
+  response: Response;
+}
+
+function createHarness(options?: SignalWireAdapterOptions): Harness {
+  const agentSocket = new FakeWebSocket();
+  const idFromNameCalls: string[] = [];
+  const fetchedRequests: Request[] = [];
   const env = {
     MyAgent: {
       idFromName(name: string) {
-        instanceNames.push(name);
+        idFromNameCalls.push(name);
         return name;
       },
       get() {
@@ -107,174 +152,336 @@ function createAdapter(options?: {
       }
     }
   };
-  SignalWireAdapter.handleRequest(
-    new Request("https://example.com/signalwire", {
-      headers: { Upgrade: "websocket" }
-    }),
+  const request = new Request("https://example.com/signalwire", {
+    headers: { Upgrade: "websocket" }
+  });
+  const response = SignalWireAdapter.handleRequest(
+    request,
     env,
     "MyAgent",
     options
   );
+  if (!lastPair) throw new Error("WebSocketPair was not constructed");
+  return {
+    serverSocket: lastPair.server,
+    agentSocket,
+    idFromNameCalls,
+    fetchedRequests,
+    response
+  };
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-async function start(
-  format = {
-    encoding: "audio/x-mulaw",
-    sampleRate: 8000,
-    channels: 1
-  }
+async function startCall(
+  harness: Harness,
+  callSid = "call-1",
+  streamSid = "stream-1",
+  format = { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 }
 ) {
-  carrierSocket.emit(
-    "message",
-    JSON.stringify({
+  harness.serverSocket.emit("message", {
+    data: JSON.stringify({
       event: "start",
-      start: {
-        streamSid: "stream-1",
-        callSid: "call-1",
-        mediaFormat: format
-      }
+      start: { streamSid, callSid, tracks: ["inbound"], mediaFormat: format }
     })
-  );
+  });
   await tick();
 }
 
-describe("SignalWireAdapter", () => {
-  it("uses the Call SID and starts the agent call", async () => {
-    createAdapter();
-    await start();
-    expect(instanceNames).toEqual(["call-1"]);
-    expect(agentSocket.json).toEqual([{ type: "start_call" }]);
-  });
-
-  it("forwards inbound PCMU as 16 kHz PCM", async () => {
-    createAdapter();
-    await start();
-    carrierSocket.emit(
-      "message",
-      JSON.stringify({
-        event: "media",
-        media: { track: "inbound", payload: btoa("\xff".repeat(160)) }
-      })
-    );
-    const audio = agentSocket.sent.find(
-      (value): value is ArrayBuffer => value instanceof ArrayBuffer
-    );
-    expect(audio?.byteLength).toBe(640);
-  });
-
-  it("returns agent PCM as SignalWire media", async () => {
-    createAdapter();
-    await start();
-    agentSocket.emit("message", new Int16Array(320).buffer);
-    expect(carrierSocket.json).toContainEqual({
+function sendMedia(harness: Harness, samples: Int16Array, track = "inbound") {
+  harness.serverSocket.emit("message", {
+    data: JSON.stringify({
       event: "media",
       streamSid: "stream-1",
-      media: { payload: expect.any(String) }
-    });
+      media: { track, payload: pcmToMulawBase64(samples) }
+    })
+  });
+}
+
+describe("SignalWireAdapter.handleRequest", () => {
+  it("returns 426 when request is not a WebSocket upgrade", () => {
+    const request = new Request("https://example.com/signalwire");
+    const response = SignalWireAdapter.handleRequest(request, {}, "MyAgent");
+    expect(response.status).toBe(426);
+  });
+
+  it("accepts a WebSocket upgrade request", () => {
+    const { response } = createHarness();
+    // In Workers the status would be 101; the Response patch substitutes 200.
+    expect(response.status).not.toBe(426);
+    expect(response.status).not.toBeGreaterThanOrEqual(400);
+  });
+
+  it("connects to the agent and sends start_call on start", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    expect(harness.agentSocket.jsonSent).toEqual([{ type: "start_call" }]);
+  });
+
+  it("uses the SignalWire callSid as the agent instance name by default", async () => {
+    const harness = createHarness();
+    await startCall(harness, "call-abc");
+    expect(harness.idFromNameCalls).toEqual(["call-abc"]);
+  });
+
+  it("uses options.instanceName for the agent instance when given", async () => {
+    const harness = createHarness({ instanceName: "shared" });
+    await startCall(harness, "call-abc");
+    expect(harness.idFromNameCalls).toEqual(["shared"]);
   });
 
   it("routes to the kebab-cased agent path for multi-word class names", async () => {
-    createAdapter();
-    await start();
-    expect(new URL(fetchedRequests[0].url).pathname).toBe(
+    const harness = createHarness();
+    await startCall(harness);
+    expect(new URL(harness.fetchedRequests[0].url).pathname).toBe(
       "/agents/my-agent/call-1"
     );
   });
 
-  it("forwards agent audio unchanged when agentAudioFormat is mulaw", async () => {
-    createAdapter({ agentAudioFormat: "mulaw" });
-    await start();
-    const bytes = new Uint8Array([0xff, 0x00, 0x7e, 0x81]);
-    agentSocket.emit("message", bytes.buffer);
-    const sent = carrierSocket.json.find((m) => m.event === "media") as {
-      media: { payload: string };
-    };
-    expect(sent.media.payload).toBe(btoa(String.fromCharCode(...bytes)));
+  it("rejects a stream whose codec violates the adapter contract", async () => {
+    const harness = createHarness();
+    await startCall(harness, "call-1", "stream-1", {
+      encoding: "audio/x-L16",
+      sampleRate: 16000,
+      channels: 1
+    });
+    expect(harness.serverSocket.closed).toBe(true);
+    expect(harness.idFromNameCalls).toEqual([]);
   });
 
-  it("takes the outbound rate from the agent's audio_config, not a guess", async () => {
-    createAdapter();
-    await start();
-    // The agent announces its TTS provider's real rate. 24 kHz in must come
-    // back out as 8 kHz μ-law — a 3:1 reduction. If the adapter ignored
-    // audio_config it would assume 16000 and emit 12 bytes instead of 8.
-    agentSocket.emit(
-      "message",
-      JSON.stringify({
-        type: "audio_config",
-        format: "pcm16",
-        sampleRate: 24000
+  it("logs and survives a missing DO namespace", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request = new Request("https://example.com/signalwire", {
+      headers: { Upgrade: "websocket" }
+    });
+    SignalWireAdapter.handleRequest(request, {}, "MyAgent");
+    if (!lastPair) throw new Error("WebSocketPair was not constructed");
+    lastPair.server.emit("message", {
+      data: JSON.stringify({
+        event: "start",
+        start: {
+          streamSid: "s",
+          callSid: "c",
+          tracks: [],
+          mediaFormat: {
+            encoding: "audio/x-mulaw",
+            sampleRate: 8000,
+            channels: 1
+          }
+        }
       })
+    });
+    await tick();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("not found in env")
     );
-    agentSocket.emit("message", new Int16Array(24).buffer);
-    const sent = carrierSocket.json.find((m) => m.event === "media") as {
-      media: { payload: string };
+  });
+
+  it("ignores binary frames and invalid JSON from SignalWire", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.serverSocket.emit("message", { data: new ArrayBuffer(4) });
+    harness.serverSocket.emit("message", { data: "not json" });
+    // Only start_call so far; nothing crashed, nothing extra sent.
+    expect(harness.agentSocket.sent).toHaveLength(1);
+  });
+
+  it("drops media that arrives before start", () => {
+    const harness = createHarness();
+    sendMedia(harness, new Int16Array(160));
+    expect(harness.agentSocket.sent).toHaveLength(0);
+  });
+
+  it("ignores media on non-inbound tracks", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    sendMedia(harness, new Int16Array(160), "outbound");
+    expect(harness.agentSocket.binarySent).toHaveLength(0);
+  });
+
+  it("forwards dtmf events to the agent verbatim", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    const dtmf = {
+      event: "dtmf",
+      streamSid: "stream-1",
+      dtmf: { digit: "5", duration: 100 }
     };
-    expect(atob(sent.media.payload).length).toBe(8);
+    harness.serverSocket.emit("message", { data: JSON.stringify(dtmf) });
+    expect(harness.agentSocket.jsonSent).toContainEqual(dtmf);
+  });
+
+  it("sends end_call and closes the agent socket on SignalWire stop", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({ event: "stop" })
+    });
+    expect(harness.agentSocket.jsonSent).toContainEqual({ type: "end_call" });
+    expect(harness.agentSocket.closed).toBe(true);
+  });
+
+  it("sends end_call and closes the agent socket when SignalWire disconnects", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.serverSocket.emit("close");
+    expect(harness.agentSocket.jsonSent).toContainEqual({ type: "end_call" });
+    expect(harness.agentSocket.closed).toBe(true);
+  });
+
+  it("closes the SignalWire socket when the agent disconnects", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("close");
+    expect(harness.serverSocket.closed).toBe(true);
+  });
+});
+
+describe("inbound audio path (mulaw 8kHz → PCM 16kHz)", () => {
+  it("decodes, upsamples, and forwards inbound audio to the agent", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    sendMedia(harness, new Int16Array(160)); // 20ms of silence at 8kHz
+    expect(harness.agentSocket.binarySent).toHaveLength(1);
+    const pcm = new Int16Array(harness.agentSocket.binarySent[0]);
+    expect(pcm).toHaveLength(320); // doubled by 8→16kHz resample
+    expect(pcm.every((s) => s === 0)).toBe(true);
+  });
+
+  it("round-trips a constant tone within mulaw quantization error", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    const amplitude = 10_000;
+    sendMedia(harness, new Int16Array(160).fill(amplitude));
+    const pcm = new Int16Array(harness.agentSocket.binarySent[0]);
+    expect(pcm).toHaveLength(320);
+    for (const sample of pcm) {
+      expect(Math.abs(sample - amplitude)).toBeLessThan(300);
+    }
   });
 
   it("preserves the waveform through the μ-law round trip", async () => {
-    createAdapter({ sttSampleRate: 8000 });
-    await start();
-    // A byte-count assertion cannot tell a correct conversion from a broken
-    // one, so decode the audio the agent receives and compare it to the
-    // amplitudes actually encoded. μ-law is lossy, hence the tolerance.
+    const harness = createHarness();
+    await startCall(harness);
     const source = [0, 8000, -8000, 24000, -24000, 1000, -1000, 32000];
     const mulaw = Uint8Array.from(source, encodeMulawReference);
-    carrierSocket.emit(
-      "message",
-      JSON.stringify({
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({
         event: "media",
+        streamSid: "stream-1",
         media: {
           track: "inbound",
           payload: btoa(String.fromCharCode(...mulaw))
         }
       })
+    });
+    const decoded = Array.from(
+      new Int16Array(harness.agentSocket.binarySent[0])
     );
-    const audio = agentSocket.sent.find(
-      (value): value is ArrayBuffer => value instanceof ArrayBuffer
-    );
-    const decoded = Array.from(new Int16Array(audio as ArrayBuffer));
-    expect(decoded.length).toBe(source.length);
+    expect(decoded.length).toBe(source.length * 2); // 8→16kHz resample
     for (let i = 0; i < source.length; i++) {
-      expect(Math.abs(decoded[i] - source[i])).toBeLessThan(
+      expect(Math.abs(decoded[i * 2] - source[i])).toBeLessThan(
         Math.abs(source[i]) * 0.08 + 64
+      );
+    }
+    void decodeMulawReference;
+  });
+});
+
+describe("outbound audio path (PCM 16kHz → mulaw 8kHz media)", () => {
+  it("downsamples, encodes, and wraps agent audio in a media event", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    const amplitude = 10_000;
+    const pcm = new Int16Array(320).fill(amplitude);
+    harness.agentSocket.emit("message", { data: pcm.buffer });
+
+    const media = harness.serverSocket.jsonSent.find(
+      (m) => m.event === "media"
+    );
+    expect(media).toBeDefined();
+    expect(media?.streamSid).toBe("stream-1");
+    const payload = (media!.media as { payload: string }).payload;
+
+    const mulawBytes = new Uint8Array(base64ToArrayBuffer(payload));
+    expect(mulawBytes).toHaveLength(160); // halved by 16→8kHz resample
+    for (const byte of mulawBytes) {
+      expect(Math.abs(decodeMulawReference(byte) - amplitude)).toBeLessThan(
+        300
       );
     }
   });
 
-  it("resamples inbound audio to the configured STT rate", async () => {
-    createAdapter();
-    await start();
-    const payload = btoa(String.fromCharCode(0xff, 0x00, 0x7e, 0x81));
-    carrierSocket.emit(
-      "message",
-      JSON.stringify({
-        event: "media",
-        media: { track: "inbound", payload }
-      })
+  it("ignores agent audio that arrives before start", () => {
+    const harness = createHarness();
+    // Emit on a socket that was never connected — nothing should reach
+    // SignalWire.
+    harness.agentSocket.emit("message", { data: new ArrayBuffer(8) });
+    expect(harness.serverSocket.jsonSent).toHaveLength(0);
+  });
+});
+
+describe("agent JSON messages → SignalWire marks", () => {
+  it("forwards transcript and status messages as mark events", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    const transcript = { type: "transcript", text: "hello" };
+    harness.agentSocket.emit("message", { data: JSON.stringify(transcript) });
+
+    const mark = harness.serverSocket.jsonSent.find((m) => m.event === "mark");
+    expect(mark).toBeDefined();
+    expect(mark?.streamSid).toBe("stream-1");
+    expect(JSON.parse((mark!.mark as { name: string }).name)).toEqual(
+      transcript
     );
-    const audio = agentSocket.sent.find(
-      (value): value is ArrayBuffer => value instanceof ArrayBuffer
-    );
-    // 4 μ-law samples at 8 kHz upsampled to Flux's 16 kHz = 8 samples.
-    expect(new Int16Array(audio as ArrayBuffer).length).toBe(8);
   });
 
-  it("ends the agent call on SignalWire stop", async () => {
-    createAdapter();
-    await start();
-    carrierSocket.emit("message", JSON.stringify({ event: "stop" }));
-    expect(agentSocket.json.at(-1)).toEqual({ type: "end_call" });
-    expect(agentSocket.closed).toBe(true);
+  it("ignores non-JSON agent messages", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", { data: "not json" });
+    expect(harness.serverSocket.jsonSent).toHaveLength(0);
+  });
+});
+
+describe("barge-in", () => {
+  const loud = new Int16Array(160).fill(1000);
+  const clears = (h: Harness) =>
+    h.serverSocket.jsonSent.filter((m) => m.event === "clear");
+
+  it("does not clear playback from raw inbound energy", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", {
+      data: new Int16Array(320).fill(5000).buffer
+    });
+
+    for (let i = 0; i < 6; i++) sendMedia(harness, loud);
+
+    expect(clears(harness)).toHaveLength(0);
   });
 
-  it("rejects a stream whose codec violates the adapter contract", async () => {
-    createAdapter();
-    await start({ encoding: "audio/x-L16", sampleRate: 16000, channels: 1 });
-    expect(carrierSocket.closed).toBe(true);
-    expect(instanceNames).toEqual([]);
+  it("forwards inbound audio while the agent is speaking", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", {
+      data: new Int16Array(320).fill(5000).buffer
+    });
+    sendMedia(harness, loud);
+    sendMedia(harness, loud);
+
+    expect(harness.agentSocket.binarySent).toHaveLength(2);
+  });
+
+  it("clears SignalWire when VoiceAgent detects an interrupt", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "playback_interrupt" })
+    });
+
+    expect(clears(harness)).toEqual([
+      { event: "clear", streamSid: "stream-1" }
+    ]);
   });
 });

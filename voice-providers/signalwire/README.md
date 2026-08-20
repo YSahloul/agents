@@ -3,20 +3,44 @@
 SignalWire bidirectional cXML Stream adapter for the Cloudflare Agents voice pipeline.
 
 ```text
-Caller → SignalWire PCMU/8 kHz → SignalWireAdapter → PCM16/agentSampleRate → VoiceAgent
-Caller ← SignalWire PCMU/8 kHz ← SignalWireAdapter ← PCM16/agentSampleRate → VoiceAgent
+Caller → SignalWire PCMU/8 kHz → SignalWireAdapter → PCM16/16 kHz → VoiceAgent
+Caller ← SignalWire PCMU/8 kHz ← SignalWireAdapter ← PCM16/16 kHz ← VoiceAgent
 ```
 
 ## Usage
 
 ```ts
 import { Agent, routeAgentRequest } from "agents";
-import { withVoice } from "@cloudflare/voice";
+import { withVoice, type TTSProvider } from "@cloudflare/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
 
-const VoiceAgent = withVoice(Agent, { audioFormat: "pcm16" });
+// WorkersAITTS defaults to MP3, which the adapter's mulaw encoder can't
+// consume. Call @cf/deepgram/aura-2-en directly for raw linear16 PCM.
+class SignalWirePCMTTS implements TTSProvider {
+  constructor(private ai: Ai) {}
+
+  async synthesize(text: string, signal?: AbortSignal) {
+    const response = (await this.ai.run(
+      "@cf/deepgram/aura-2-en",
+      {
+        text,
+        speaker: "asteria",
+        encoding: "linear16",
+        sample_rate: 16000,
+        container: "none"
+      },
+      { returnRawResponse: true, ...(signal ? { signal } : {}) }
+    )) as Response;
+    if (!response.ok) return null;
+    return response.arrayBuffer();
+  }
+}
+
+const VoiceAgent = withVoice(Agent);
 
 export class MyAgent extends VoiceAgent<Env> {
+  tts = new SignalWirePCMTTS(this.env.AI);
+
   async onTurn() {
     return "Hello. How can I help?";
   }
@@ -51,50 +75,31 @@ Point the SignalWire phone number's **WHEN A CALL COMES IN** webhook at
 
 ## Audio contract
 
-The stream must use mono `PCMU@8000h`. The adapter converts inbound audio to
-raw mono PCM16 at `sttSampleRate` for VoiceAgent, and converts outbound
-VoiceAgent PCM16 back to SignalWire PCMU.
+The stream must use mono `PCMU@8000h`. The adapter decodes inbound audio and
+resamples 8→16 kHz PCM16 for VoiceAgent, and resamples outbound VoiceAgent
+PCM16 (16 kHz) back to 8 kHz mulaw for SignalWire. Both rates are fixed —
+there is no dynamic format negotiation.
 
-The default `WorkersAITTS` emits MP3 and is not compatible. Configure a TTS
-provider that returns raw signed 16-bit little-endian PCM at the same rate.
-
-`WorkersAIRealtimeTTS` defaults to 8 kHz μ-law — its `sampleRate` reaches the
-bridge through the agent's `audio_config`, and `agentAudioFormat: "mulaw"` (see
-Options) forwards those bytes verbatim. Running STT at 8 kHz too removes
-resampling from both directions:
-
-```ts
-const VoiceAgent = withVoice(Agent);
-
-class MyAgent extends VoiceAgent<Env> {
-  transcriber = new WorkersAIFluxSTT(this.env.AI, { sampleRate: 8000 });
-  tts = new WorkersAIRealtimeTTS(this.env.AI);
-}
-```
+Configure a TTS provider that returns raw signed 16-bit little-endian PCM at
+16 kHz, as shown above.
 
 ## Barge-in and echo suppression
 
-The adapter uses an energy-based gate to prevent the agent from hearing its
-own TTS looped back through the phone trunk. When the agent is playing audio
-and the inbound energy exceeds the speech threshold for three consecutive
-frames, the adapter sends SignalWire's `clear` event and gates outbound agent
-audio until the next turn boundary. This also handles caller barge-in — the
-gate cannot distinguish echo from real caller speech, and doesn't need to.
-
-Agent-side STT/VAD drives `playback_interrupt` as a secondary path for speech
-that falls below the local energy threshold.
+SignalWire can loop carrier playback into inbound audio, so the adapter does
+not use raw inbound energy to clear playback: that would cut off the agent on
+its own voice. Inbound audio always reaches VoiceAgent, whose STT/VAD sends a
+`playback_interrupt` when it detects caller speech. The adapter translates
+that ordered event to SignalWire's `clear` event.
 
 SignalWire stream URLs do not support query parameters. Use the `<Stream
- authBearerToken="...">` attribute when creating cXML and validate its
+authBearerToken="...">` attribute when creating cXML and validate its
 `Authorization` header before calling `SignalWireAdapter.handleRequest`.
 
 ## Options
 
 ```ts
 SignalWireAdapter.handleRequest(request, env, "MyAgent", {
-  instanceName: "shared-agent",
-  agentAudioFormat: "pcm16",
-  sttSampleRate: 8000
+  instanceName: "shared-agent"
 });
 ```
 

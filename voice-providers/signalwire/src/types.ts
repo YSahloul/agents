@@ -1,4 +1,10 @@
-/** SignalWire bidirectional cXML Stream messages consumed by the adapter. */
+/**
+ * SignalWire bidirectional cXML Stream WebSocket message types.
+ *
+ * See https://docs.signalwire.com/reference/compatibility-api/cxml/connect/stream
+ * for the full protocol. Only the messages the adapter consumes are typed
+ * here.
+ */
 
 export interface SignalWireStartMessage {
   event: "start";
