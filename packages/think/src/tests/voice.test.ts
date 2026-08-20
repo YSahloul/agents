@@ -56,6 +56,18 @@ describe("Think voice adapter", () => {
     expect(await agent.getVoiceMetadataCallsForTest()).toBe(1);
   });
 
+  it("keeps successful textless voice turns silent", async () => {
+    const agent = await freshAgent(`voice-textless-${crypto.randomUUID()}`);
+    await agent.setVoiceResponseForTest("");
+
+    await expect(
+      agent.runVoiceOnTurnForTest(
+        "dispatch a tool",
+        "https://example.com/voice"
+      )
+    ).resolves.toBe("");
+  });
+
   it("uses Think Session as the sole persisted voice transcript", async () => {
     const agent = await freshAgent(`voice-persistence-${crypto.randomUUID()}`);
     await agent.runVoiceTurnForTest("first");

@@ -89,6 +89,7 @@ const VoiceThink = createVoiceThink({ channel: "voice" });
 
 export class ThinkVoiceTestAgent extends VoiceThink {
   private _voiceMetadataCalls = 0;
+  private _response = "voice answer";
 
   readonly #transcriber = new TestTranscriber();
   readonly #tts = new TestTTS();
@@ -104,7 +105,11 @@ export class ThinkVoiceTestAgent extends VoiceThink {
   }
 
   override getModel(): LanguageModel {
-    return modelResponse("voice answer");
+    return modelResponse(this._response);
+  }
+
+  async setVoiceResponseForTest(response: string): Promise<void> {
+    this._response = response;
   }
 
   override getVoiceTurnMetadata(
@@ -115,7 +120,7 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     return { transcript, uri: context.connection.uri };
   }
 
-  async runVoiceOnTurnForTest(input: string, uri: string): Promise<void> {
+  async runVoiceOnTurnForTest(input: string, uri: string): Promise<string> {
     const stream = await this.onTurn(input, {
       connection: { id: "voice-test", uri } as Connection,
       messages: [],
@@ -128,9 +133,20 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     ) {
       throw new TypeError("Expected an async Voice Think stream");
     }
-    for await (const _chunk of stream) {
-      // Consume the stream so the Think turn and metadata stamp complete.
+    let text = "";
+    for await (const chunk of stream) {
+      if (
+        typeof chunk === "object" &&
+        chunk !== null &&
+        "type" in chunk &&
+        chunk.type === "text-delta" &&
+        "delta" in chunk &&
+        typeof chunk.delta === "string"
+      ) {
+        text += chunk.delta;
+      }
     }
+    return text;
   }
 
   async getVoiceMetadataCallsForTest(): Promise<number> {

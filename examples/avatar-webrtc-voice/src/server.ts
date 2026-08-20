@@ -202,12 +202,8 @@ export class MyThinkAgent extends VoiceThink {
           converter: mp3ToPcm16({ sampleRate: 24000 })
         }),
         instructions:
-          "You are speaking in a live WebRTC voice chat, so keep responses concise and natural for text-to-speech. Always return speakable text except when dispatching research_background: call it silently and let the channel acknowledge it. Do not announce background progress.",
-        maxTurns: 3,
-        delivery: {
-          emptyResponseText:
-            "I'm searching now. I'll let you know when it's ready."
-        }
+          "You are speaking in a live WebRTC voice chat, so keep responses concise and natural for text-to-speech. Always return speakable text except when dispatching research_background: call it silently. Do not mention its start, progress, or completion unless the user asks.",
+        maxTurns: 3
       })
     };
   }

@@ -1,5 +1,4 @@
 import {
-  EMPTY_MESSENGER_RESPONSE,
   ERROR_MESSENGER_RESPONSE,
   INTERRUPTED_MESSENGER_RESPONSE,
   TextStreamCallback
@@ -164,7 +163,7 @@ class VoiceChannelTextStream implements AsyncIterable<unknown> {
       : error
         ? (this.#policy?.errorResponseText ?? ERROR_MESSENGER_RESPONSE)
         : !this.#callback.hasText()
-          ? (this.#policy?.emptyResponseText ?? EMPTY_MESSENGER_RESPONSE)
+          ? this.#policy?.emptyResponseText
           : undefined;
     if (fallback) {
       this.#enqueue({ type: "text-delta", delta: fallback });
