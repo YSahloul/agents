@@ -199,24 +199,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     });
   }
 
-  interrupt(connectionId: string): void {
-    this.#requireActiveConnection(connectionId);
-    const droppedAudioMs =
-      this.#queue.filter((item) => item instanceof Uint8Array).length *
-      FRAME_INTERVAL_MS;
-    const socket = this.#requireTtsSocket();
-    this.#clearPacing();
-    this.#rejectQueue(new Error("SFU output interrupted"));
-    this.#partialFrame = new Uint8Array();
-    this.#partialInputByte = null;
-    socket.send(encodePayloadToProtobuf(new Uint8Array()));
-    console.log("[VoiceTrace]", {
-      event: "sfu_interrupt",
-      connectionId,
-      droppedAudioMs
-    });
-  }
-
   async stop(connectionId: string): Promise<void> {
     this.#clearSuspendTimer();
     if (this.#connectionId !== connectionId) return;

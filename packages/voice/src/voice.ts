@@ -51,25 +51,6 @@ import {
   sendVoiceJSON
 } from "./audio-pipeline";
 
-type ClientSpeechEnergy = {
-  startRms: number | null;
-  peakRms: number | null;
-  threshold: number | null;
-};
-
-function readClientRms(
-  message: object,
-  key: "rms" | "peak_rms" | "threshold"
-): number | null {
-  const value = (message as Record<string, unknown>)[key];
-  return typeof value === "number" &&
-    Number.isFinite(value) &&
-    value >= 0 &&
-    value <= 1
-    ? value
-    : null;
-}
-
 // Re-export SentenceChunker for direct use
 export { SentenceChunker } from "./sentence-chunker";
 
@@ -193,67 +174,11 @@ export interface VoiceAgentOptions {
   persistMessages?: boolean;
   /** Max conversation messages to retain. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
-  /**
-   * Drop transcriptions that closely match the previous assistant message.
-   * This suppresses speakerphone echo after STT without disabling barge-in.
-   * @default false
-   */
-  filterEchoedTranscripts?: boolean;
-  /**
-   * Accept inbound audio while `onCallStart()` runs. Disable when the hook
-   * plays an opening greeting and the transport can loop that audio back into
-   * STT. The opening hook is not interruptible while disabled. @default true
-   */
-  listenDuringCallStart?: boolean;
-  /**
-   * Minimum words the transcript must contain before a barge-in is allowed
-   * to interrupt active playback. Suppresses single-word backchannels
-   * ("yeah", "okay") and short echo fragments from cutting off the
-   * assistant mid-sentence. Applies to every transcript-bearing trigger
-   * (`flux_speech_start`, `flux_eager_utterance`, `flux_confirmed_utterance`)
-   * -- client-side `audio_level` interrupts carry no transcript and are
-   * never gated by this option. `0` disables the gate. @default 0
-   */
-  minInterruptWords?: number;
 }
-
-interface SpeculativeTurn {
-  provisionalTranscript: string;
-  startedAt: number;
-  outcome: Promise<boolean>;
-  pipelineStarted: boolean;
-  settle(confirmed: boolean): void;
-}
-interface ActiveAssistantText {
-  signal: AbortSignal;
-  text: string;
-}
-type SpeculativeCancelReason =
-  | "turn_resumed"
-  | "speech_start"
-  | "interrupt"
-  | "end_call"
-  | "connection_closed"
-  | "transcript_mismatch";
-
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
 const DEFAULT_SAMPLE_RATE = 16000;
 const STREAMING_TTS_MAX_CHARS = 48;
-
-function isEchoOf(transcript: string, assistantText: string): boolean {
-  if (!assistantText) return false;
-  const assistant =
-    assistantText
-      .toLowerCase()
-      .match(/[\p{L}\p{N}]+/gu)
-      ?.join(" ") ?? "";
-  const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-  if (heard.length >= 3 && assistant.includes(heard.join(" "))) return true;
-  const assistantWords = new Set(assistant.split(" "));
-  const hits = heard.filter((word) => assistantWords.has(word)).length;
-  return hits >= 4 && hits / heard.length >= 0.6;
-}
 
 // --- Mixin ---
 
@@ -365,14 +290,6 @@ export function withVoice<TBase extends AgentLike>(
     #audioTransports = new Map<string, VoiceServerAudioTransport>();
     // Default history exists only for this Durable Object instance.
     #conversationHistory: Array<{ role: VoiceRole; content: string }> = [];
-    // Speculative Flux responses wait for EndOfTurn before entering history.
-    #speculativeTurns = new Map<string, SpeculativeTurn>();
-    // Text currently being spoken, used to reject live speakerphone echo.
-    #activeAssistantText = new Map<string, ActiveAssistantText>();
-    // Connections whose opening hook should not feed inbound audio to STT.
-    #callStartInputSuppressed = new Set<string>();
-    // Client-captured microphone energy for the current STT turn.
-    #clientSpeechEnergy = new Map<string, ClientSpeechEnergy>();
 
     // Current async start_call identity per connection, used to ignore stale readiness.
     #startupTokens = new Map<string, symbol>();
@@ -431,8 +348,6 @@ export function withVoice<TBase extends AgentLike>(
       // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- overwriting lifecycle
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
         this.#startupTokens.delete(connection.id);
-        this.#callStartInputSuppressed.delete(connection.id);
-        this.#clientSpeechEnergy.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
         this.#cm.cleanup(connection.id);
         const transport = this.#audioTransports.get(connection.id);
@@ -446,7 +361,6 @@ export function withVoice<TBase extends AgentLike>(
             );
           }
         }
-        this.#cancelSpeculativeTurn(connection.id, "connection_closed");
         return _onClose?.(connection, ...rest);
       };
 
@@ -501,35 +415,11 @@ export function withVoice<TBase extends AgentLike>(
             case "end_call":
               runBackground("end_call", () => this.#handleEndCall(connection));
               break;
-            case "start_of_speech":
-              this.#clientSpeechEnergy.set(connection.id, {
-                startRms: readClientRms(parsed, "rms"),
-                peakRms: null,
-                threshold: readClientRms(parsed, "threshold")
-              });
-              break;
-            case "end_of_speech": {
-              const energy = this.#clientSpeechEnergy.get(connection.id);
-              this.#clientSpeechEnergy.set(connection.id, {
-                startRms: energy?.startRms ?? null,
-                peakRms: readClientRms(parsed, "peak_rms"),
-                threshold:
-                  readClientRms(parsed, "threshold") ??
-                  energy?.threshold ??
-                  null
-              });
-              break;
-            }
-            case "interrupt": {
-              const source =
-                "source" in parsed && parsed.source === "audio_level"
-                  ? "client_audio_level"
-                  : "client_interrupt";
+            case "interrupt":
               runBackground("interrupt", () =>
-                this.#handleInterrupt(connection, source)
+                this.#handleInterrupt(connection)
               );
               break;
-            }
             case "text_message": {
               const text = "text" in parsed ? parsed.text : undefined;
               if (typeof text === "string") {
@@ -577,7 +467,6 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     receiveAudio(connectionId: string, audio: ArrayBuffer): void {
-      if (this.#callStartInputSuppressed.has(connectionId)) return;
       this.#cm.bufferAudio(connectionId, audio);
     }
 
@@ -594,25 +483,12 @@ export function withVoice<TBase extends AgentLike>(
 
     afterTranscribe(
       transcript: string,
-      connection: Connection
+      _connection: Connection
     ): string | null | Promise<string | null> {
-      return opt("filterEchoedTranscripts", false) &&
-        this.#isEchoTranscript(connection.id, transcript)
-        ? null
-        : transcript;
+      return transcript;
     }
 
-    #isEchoTranscript(connectionId: string, transcript: string): boolean {
-      const active = this.#activeAssistantText.get(connectionId);
-      if (active && isEchoOf(transcript, active.text)) return true;
-      const history = this.getConversationHistory();
-      for (let i = history.length - 1; i >= 0; i--) {
-        if (history[i].role === "assistant") {
-          return isEchoOf(transcript, history[i].content);
-        }
-      }
-      return false;
-    }
+    // --- User-overridable hooks ---
 
     beforeSynthesize(
       text: string,
@@ -703,44 +579,6 @@ export function withVoice<TBase extends AgentLike>(
 
     // --- Convenience methods ---
 
-    #cancelSpeculativeTurn(
-      connectionId: string,
-      reason: SpeculativeCancelReason
-    ): SpeculativeTurn | null {
-      const turn = this.#speculativeTurns.get(connectionId);
-      if (!turn) return null;
-      this.#speculativeTurns.delete(connectionId);
-      console.log("[VoiceTrace]", {
-        event: "speculative_turn_cancelled",
-        connectionId,
-        elapsedMs: Date.now() - turn.startedAt,
-        reason
-      });
-      turn.settle(false);
-      return turn;
-    }
-
-    #startSpeculativeTurn(connection: Connection, transcript: string): void {
-      if (this.#speculativeTurns.has(connection.id)) return;
-      let settle: (confirmed: boolean) => void = () => {};
-      const outcome = new Promise<boolean>((resolve) => {
-        settle = resolve;
-      });
-      const turn: SpeculativeTurn = {
-        provisionalTranscript: transcript.trim(),
-        startedAt: Date.now(),
-        outcome,
-        settle,
-        pipelineStarted: false
-      };
-      this.#speculativeTurns.set(connection.id, turn);
-      console.log("[VoiceTrace]", {
-        event: "speculative_turn_started",
-        connectionId: connection.id,
-        elapsedMs: Date.now() - turn.startedAt
-      });
-      this.#runPipeline(connection, transcript, turn);
-    }
     forceEndCall(connection: Connection): void {
       if (!this.#cm.isInCall(connection.id)) return;
       runBackground("force_end_call", () => this.#handleEndCall(connection));
@@ -855,7 +693,6 @@ export function withVoice<TBase extends AgentLike>(
       resumed = false
     ) {
       if (this.#cm.isInCall(connection.id)) return;
-      this.#clientSpeechEnergy.delete(connection.id);
 
       const startupToken = Symbol(connection.id);
       this.#startupTokens.set(connection.id, startupToken);
@@ -945,102 +782,12 @@ export function withVoice<TBase extends AgentLike>(
               text
             });
           },
-          onSpeechStart: (transcript?: string) => {
-            const echoed =
-              opt("filterEchoedTranscripts", false) &&
-              Boolean(
-                transcript && this.#isEchoTranscript(connection.id, transcript)
-              );
-            const energy = this.#clientSpeechEnergy.get(connection.id);
-            console.log("[VoiceTrace]", {
-              event: "stt_speech_start",
-              connectionId: connection.id,
-              transcript: transcript ?? null,
-              echoed,
-              clientStartRms: energy?.startRms ?? null,
-              clientThreshold: energy?.threshold ?? null
-            });
-            if (echoed) return;
-            this.#handleBargeIn(connection, "flux_speech_start", transcript);
-          },
-          onEagerUtterance: (transcript: string) => {
-            const echoed =
-              opt("filterEchoedTranscripts", false) &&
-              this.#isEchoTranscript(connection.id, transcript);
-            const energy = this.#clientSpeechEnergy.get(connection.id);
-            console.log("[VoiceTrace]", {
-              event: "stt_eager_utterance",
-              connectionId: connection.id,
-              transcript,
-              echoed,
-              clientStartRms: energy?.startRms ?? null,
-              clientThreshold: energy?.threshold ?? null
-            });
-            if (echoed) return;
-            if (opt("filterEchoedTranscripts", false)) {
-              this.#handleBargeIn(
-                connection,
-                "flux_eager_utterance",
-                transcript
-              );
-            }
-            this.#startSpeculativeTurn(connection, transcript);
-          },
-          onTurnResumed: () => {
-            const turn = this.#cancelSpeculativeTurn(
-              connection.id,
-              "turn_resumed"
-            );
-            if (turn?.pipelineStarted) this.#cm.abortPipeline(connection.id);
-          },
+          onSpeechStart: () => this.#handleBargeIn(connection),
           onUtterance: (transcript: string) => {
-            const energy = this.#clientSpeechEnergy.get(connection.id);
-            console.log("[VoiceTrace]", {
-              event: "stt_utterance",
-              connectionId: connection.id,
-              text: transcript,
-              clientStartRms: energy?.startRms ?? null,
-              clientPeakRms: energy?.peakRms ?? null,
-              clientThreshold: energy?.threshold ?? null
-            });
-            this.#clientSpeechEnergy.delete(connection.id);
             this.#sendJSON(connection, {
               type: "transcript_interim",
               text: ""
             });
-            const speculative = this.#speculativeTurns.get(connection.id);
-            if (speculative) {
-              const finalText = transcript.trim();
-              if (finalText === speculative.provisionalTranscript) {
-                this.#speculativeTurns.delete(connection.id);
-                console.log("[VoiceTrace]", {
-                  event: "speculative_turn_confirmed",
-                  connectionId: connection.id,
-                  elapsedMs: Date.now() - speculative.startedAt
-                });
-                speculative.settle(true);
-                return;
-              }
-
-              const eagerText = speculative.provisionalTranscript;
-              const startedAt = speculative.startedAt;
-              const cancelled = this.#cancelSpeculativeTurn(
-                connection.id,
-                "transcript_mismatch"
-              );
-              if (cancelled?.pipelineStarted) {
-                this.#cm.abortPipeline(connection.id);
-              }
-              console.log("[VoiceTrace]", {
-                event: "speculative_turn_restarted",
-                connectionId: connection.id,
-                elapsedMs: Date.now() - startedAt,
-                eagerText,
-                finalText
-              });
-              this.#runPipeline(connection, transcript);
-              return;
-            }
             this.#runPipeline(connection, transcript);
           }
         });
@@ -1059,14 +806,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#startupTokens.delete(connection.id);
 
       this.#sendJSON(connection, { type: "status", status: "listening" });
-      if (!opt("listenDuringCallStart", true)) {
-        this.#callStartInputSuppressed.add(connection.id);
-      }
-      try {
-        await this.onCallStart(connection, { resumed });
-      } finally {
-        this.#callStartInputSuppressed.delete(connection.id);
-      }
+      await this.onCallStart(connection, { resumed });
     }
 
     #isCurrentStartup(connectionId: string, startupToken: symbol): boolean {
@@ -1099,15 +839,9 @@ export function withVoice<TBase extends AgentLike>(
       logPrefix: string | null = "[VoiceAgent] Call startup failed:"
     ): Promise<void> {
       if (!this.#isCurrentStartup(connection.id, startupToken)) return;
-
-      // The client starts local audio optimistically on start_call. Every
-      // terminal startup path must send error + idle so it tears that down.
       if (logPrefix && error !== undefined) console.error(logPrefix, error);
       this.#startupTokens.delete(connection.id);
-      this.#sendJSON(connection, {
-        type: "error",
-        message: clientMessage
-      });
+      this.#sendJSON(connection, { type: "error", message: clientMessage });
       try {
         await this.#stopAudioTransport(connection.id);
       } finally {
@@ -1128,8 +862,6 @@ export function withVoice<TBase extends AgentLike>(
 
     async #handleEndCall(connection: Connection): Promise<void> {
       this.#startupTokens.delete(connection.id);
-      this.#clientSpeechEnergy.delete(connection.id);
-      this.#cancelSpeculativeTurn(connection.id, "end_call");
       this.#cm.cleanup(connection.id);
       try {
         await this.#stopAudioTransport(connection.id);
@@ -1140,74 +872,18 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
-    async #handleInterrupt(
-      connection: Connection,
-      trigger: string
-    ): Promise<void> {
-      console.log("[VoiceTrace]", {
-        event: "interrupt_trigger",
-        connectionId: connection.id,
-        trigger,
-        transcript: null,
-        activePipeline: this.#cm.hasActivePipeline(connection.id),
-        action: "interrupt"
-      });
+    async #handleInterrupt(connection: Connection): Promise<void> {
       this.#cm.abortPipeline(connection.id);
-      this.#cancelSpeculativeTurn(connection.id, "interrupt");
       this.#cm.clearAudioBuffer(connection.id);
       this.#sendJSON(connection, { type: "status", status: "listening" });
-      try {
-        await this.#audioTransports
-          .get(connection.id)
-          ?.interrupt(connection.id);
-      } finally {
-        await this.onInterrupt(connection);
-      }
+      return this.onInterrupt(connection);
     }
 
-    #handleBargeIn(
-      connection: Connection,
-      trigger: string,
-      transcript?: string
-    ): void {
-      const minWords = opt("minInterruptWords", 0);
-      const wordCount = transcript?.trim()
-        ? transcript.trim().split(/\s+/).length
-        : 0;
-      if (minWords > 0 && wordCount < minWords) {
-        console.log("[VoiceTrace]", {
-          event: "interrupt_trigger",
-          connectionId: connection.id,
-          trigger,
-          transcript: transcript ?? null,
-          activePipeline: this.#cm.hasActivePipeline(connection.id),
-          action: "below_min_words"
-        });
-        return;
-      }
-      this.#cancelSpeculativeTurn(connection.id, "speech_start");
-      const activePipeline = this.#cm.hasActivePipeline(connection.id);
-      const interrupted = this.#cm.abortPipeline(connection.id);
-      console.log("[VoiceTrace]", {
-        event: "interrupt_trigger",
-        connectionId: connection.id,
-        trigger,
-        transcript: transcript ?? null,
-        activePipeline,
-        action: interrupted ? "interrupt" : "no_active_pipeline"
-      });
-      if (!interrupted) return;
+    #handleBargeIn(connection: Connection): void {
+      if (!this.#cm.abortPipeline(connection.id)) return;
       this.#sendJSON(connection, { type: "playback_interrupt" });
       this.#sendJSON(connection, { type: "status", status: "listening" });
-      runBackground("barge_in", async () => {
-        try {
-          await this.#audioTransports
-            .get(connection.id)
-            ?.interrupt(connection.id);
-        } finally {
-          await this.onInterrupt(connection);
-        }
-      });
+      void this.onInterrupt(connection);
     }
 
     // --- Internal: text message handling ---
@@ -1329,90 +1005,33 @@ export function withVoice<TBase extends AgentLike>(
 
     // --- Internal: voice pipeline ---
 
-    async #runPipeline(
-      connection: Connection,
-      transcript: string,
-      speculative?: SpeculativeTurn
-    ) {
-      let signal: AbortSignal | undefined;
+    async #runPipeline(connection: Connection, transcript: string) {
+      const signal = this.#cm.createPipelineAbort(connection.id);
       const pipelineStart = Date.now();
 
       try {
-        let userText: string | null;
-        try {
-          userText = await this.afterTranscribe(transcript, connection);
-        } catch (error) {
-          if (!speculative) throw error;
-          const confirmed = await speculative.outcome;
-          if (!confirmed) return;
-          throw error;
-        }
-
+        const userText = await this.afterTranscribe(transcript, connection);
         if (!userText) {
-          if (speculative) {
-            const confirmed = await speculative.outcome;
-            if (!confirmed) return;
-          }
-          if (!this.#cm.hasActivePipeline(connection.id)) {
-            this.#sendJSON(connection, { type: "status", status: "listening" });
-          }
+          this.#sendJSON(connection, { type: "status", status: "listening" });
           return;
         }
-        if (
-          !speculative &&
-          opt("filterEchoedTranscripts", false) &&
-          this.#cm.hasActivePipeline(connection.id)
-        ) {
-          this.#handleBargeIn(connection, "flux_confirmed_utterance", userText);
-        }
-
-        signal = this.#cm.createPipelineAbort(connection.id);
-        if (speculative) speculative.pipelineStarted = true;
 
         const priorMessages = this.getConversationHistory();
-        if (!speculative) {
-          this.saveMessage("user", userText);
-          this.#sendJSON(connection, {
-            type: "transcript",
-            role: "user",
-            text: userText
-          });
-          this.#sendJSON(connection, { type: "status", status: "thinking" });
-        }
+        this.saveMessage("user", userText);
+        this.#sendJSON(connection, {
+          type: "transcript",
+          role: "user",
+          text: userText
+        });
+        this.#sendJSON(connection, { type: "status", status: "thinking" });
 
         const context: VoiceTurnContext = {
           connection,
           messages: priorMessages,
           signal
         };
-
         const llmStart = Date.now();
-        const pendingTurnResult = Promise.resolve()
-          .then(() => this.onTurn(userText, context))
-          .then(
-            (value) => ({ ok: true as const, value }),
-            (error: unknown) => ({ ok: false as const, error })
-          );
-
-        if (speculative) {
-          const confirmed = await speculative.outcome;
-          if (!confirmed) return;
-          this.saveMessage("user", userText);
-          this.#sendJSON(connection, {
-            type: "transcript",
-            role: "user",
-            text: userText
-          });
-          if (signal.aborted) return;
-          this.#sendJSON(connection, { type: "status", status: "thinking" });
-        }
-
-        const settledTurnResult = await pendingTurnResult;
-        if (!settledTurnResult.ok) {
-          if (signal.aborted) return;
-          throw settledTurnResult.error;
-        }
-        const turnResult = settledTurnResult.value;
+        const turnResult = await this.onTurn(userText, context);
 
         console.log("[VoiceTrace]", {
           event: "onTurn_call",
@@ -1422,7 +1041,6 @@ export function withVoice<TBase extends AgentLike>(
         });
 
         if (signal.aborted) return;
-
         this.#sendJSON(connection, { type: "status", status: "speaking" });
 
         const {
@@ -1441,16 +1059,7 @@ export function withVoice<TBase extends AgentLike>(
         );
 
         if (signal.aborted) return;
-
         if (!fullText || fullText.trim().length === 0) {
-          console.log("[VoiceTrace]", {
-            event: "turn_empty",
-            connectionId: connection.id,
-            llmMs,
-            firstModelDeltaMs,
-            totalMs: Date.now() - pipelineStart,
-            reason: "model produced no text"
-          });
           this.#sendJSON(connection, {
             type: "error",
             message: "No response generated"
@@ -1460,7 +1069,6 @@ export function withVoice<TBase extends AgentLike>(
         }
 
         const totalMs = Date.now() - pipelineStart;
-
         this.#sendJSON(connection, {
           type: "metrics",
           llm_ms: llmMs,
@@ -1470,10 +1078,6 @@ export function withVoice<TBase extends AgentLike>(
           first_audio_ms: firstAudioMs,
           total_ms: totalMs
         });
-
-        // The metrics above only reach the client socket. Log them too —
-        // this single line is what answers "why was the reply slow?" for
-        // every transport and both TTS paths.
         console.log("[VoiceTrace]", {
           event: "turn_complete",
           connectionId: connection.id,
@@ -1486,14 +1090,11 @@ export function withVoice<TBase extends AgentLike>(
           chars: fullText.length,
           text: fullText
         });
-
-        // Feed the agent's spoken reply back to the transcriber as context for
-        // the user's next turn (no-op for providers without context carryover).
         this.#cm.updateAgentContext(connection.id, fullText);
         this.saveMessage("assistant", fullText);
         this.#sendJSON(connection, { type: "status", status: "listening" });
       } catch (error) {
-        if (signal?.aborted) return;
+        if (signal.aborted) return;
         console.error("[VoiceAgent] Pipeline error:", error);
         this.#sendJSON(connection, {
           type: "error",
@@ -1502,13 +1103,7 @@ export function withVoice<TBase extends AgentLike>(
         });
         this.#sendJSON(connection, { type: "status", status: "listening" });
       } finally {
-        if (
-          signal &&
-          this.#activeAssistantText.get(connection.id)?.signal === signal
-        ) {
-          this.#activeAssistantText.delete(connection.id);
-        }
-        if (signal) this.#cm.clearPipelineAbort(connection.id, signal);
+        this.#cm.clearPipelineAbort(connection.id, signal);
       }
     }
 
@@ -1529,10 +1124,6 @@ export function withVoice<TBase extends AgentLike>(
       firstAudioMs: number;
     }> {
       if (typeof response === "string") {
-        this.#activeAssistantText.set(connection.id, {
-          signal,
-          text: response
-        });
         const llmMs = Date.now() - llmStart;
 
         if (response.trim().length === 0) {
@@ -1670,10 +1261,6 @@ export function withVoice<TBase extends AgentLike>(
             trace("model_first_delta");
           }
           fullText += token;
-          this.#activeAssistantText.set(connection.id, {
-            signal,
-            text: fullText
-          });
           sendAssistantDelta(token);
           await writer.write(token);
         }
@@ -1930,10 +1517,6 @@ export function withVoice<TBase extends AgentLike>(
         }
 
         fullText += token;
-        this.#activeAssistantText.set(connection.id, {
-          signal,
-          text: fullText
-        });
         sendAssistantDelta(token);
 
         const sentences = chunker.add(token);

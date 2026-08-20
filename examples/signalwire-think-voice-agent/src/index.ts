@@ -112,21 +112,16 @@ export class MyThinkAgent extends Think<Env> {
   }
 }
 
-const VoiceAgent = withVoice(Agent, {
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false,
-  minInterruptWords: 3
-});
+const VoiceAgent = withVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  transcriber = new WorkersAIFluxSTT(this.env.AI, {
-    eagerEotThreshold: 0.5,
-    eotThreshold: 0.7
-  });
+  transcriber = new WorkersAIFluxSTT(this.env.AI);
   tts = new WorkersAIRealtimeTTS(this.env.AI);
 
   async onCallStart(connection: Connection) {
-    console.log(`[call] instance=${this.name} — full conversation at /agents/my-think-agent/${this.name}/get-messages`);
+    console.log(
+      `[call] instance=${this.name} — full conversation at /agents/my-think-agent/${this.name}/get-messages`
+    );
     await this.speak(connection, "Hello! How can I help you today?");
   }
 

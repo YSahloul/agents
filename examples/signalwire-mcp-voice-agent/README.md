@@ -30,10 +30,10 @@ pnpm run deploy
 Point a SignalWire number's incoming-call webhook at:
 
 ```text
-https://signalwire-mcp-voice-agent-example.<your-subdomain>.workers.dev/answer
+https://signalwire-mcp-voice-agent-consolidation-test.<your-subdomain>.workers.dev/answer
 ```
 
-The original `signalwire-voice-agent-example` Worker and its number do not need to change.
+The original `signalwire-voice-agent-example` Worker and its number do not need to change; this uses a separate test Worker and SignalWire number.
 
 ## Related examples
 

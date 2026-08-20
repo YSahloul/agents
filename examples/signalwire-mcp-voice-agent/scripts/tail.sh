@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -o pipefail
 cd "$(dirname "$0")/.." || exit 1
-WORKER="${WORKER:-signalwire-mcp-voice-agent-example}"
+WORKER="${WORKER:-signalwire-mcp-voice-agent-consolidation-test}"
 RAW="${RAW:-/tmp/signalwire-mcp-calls.json}"
 CLEAN="${CLEAN:-/tmp/signalwire-mcp-calls.jsonl}"
 PRETTY="${PRETTY:-/tmp/signalwire-mcp-calls.pretty.json}"

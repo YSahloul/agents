@@ -72,10 +72,6 @@ function uniqueStreamingTTSPath() {
   return `/agents/test-streaming-tts-voice-agent/voice-test-${++instanceCounter}`;
 }
 
-function uniqueMinInterruptPath() {
-  return `/agents/test-min-interrupt-voice-agent/voice-test-${++instanceCounter}`;
-}
-
 function waitForStatus(ws: WebSocket, status: string) {
   return waitForMessageMatching(
     ws,
@@ -146,43 +142,6 @@ async function waitForMicrotasks(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
 }
-type TurnState = { transcripts: string[]; abortCount: number };
-
-async function getTurnState(ws: WebSocket): Promise<TurnState> {
-  const response = waitForType(ws, "_turn_state");
-  sendJSON(ws, { type: "_get_turn_state" });
-  const message = await response;
-  if (
-    typeof message !== "object" ||
-    message === null ||
-    !("transcripts" in message) ||
-    !Array.isArray(message.transcripts) ||
-    !message.transcripts.every((value) => typeof value === "string") ||
-    !("abortCount" in message) ||
-    typeof message.abortCount !== "number"
-  ) {
-    throw new Error("Invalid _turn_state response");
-  }
-  return {
-    transcripts: message.transcripts,
-    abortCount: message.abortCount
-  };
-}
-
-async function getMessageCount(ws: WebSocket): Promise<number> {
-  const response = waitForType(ws, "_message_count");
-  sendJSON(ws, { type: "_get_message_count" });
-  const message = await response;
-  if (
-    typeof message !== "object" ||
-    message === null ||
-    !("count" in message) ||
-    typeof message.count !== "number"
-  ) {
-    throw new Error("Invalid _message_count response");
-  }
-  return message.count;
-}
 
 async function getCounts(
   ws: WebSocket
@@ -209,67 +168,9 @@ async function setTurnMode(
   await waitForAck(ws, "_set_turn_mode");
 }
 
-async function setTtsMode(
-  ws: WebSocket,
-  value: "normal" | "controlled"
-): Promise<void> {
-  sendJSON(ws, { type: "_set_tts_mode", value });
-  await waitForAck(ws, "_set_tts_mode");
-}
-
 async function startCall(ws: WebSocket): Promise<void> {
   sendJSON(ws, { type: "start_call" });
   await waitForStatus(ws, "listening");
-}
-
-function recordSocket(ws: WebSocket) {
-  const messages: Record<string, unknown>[] = [];
-  let binaryCount = 0;
-  const handler = (event: MessageEvent) => {
-    if (typeof event.data === "string") {
-      messages.push(JSON.parse(event.data) as Record<string, unknown>);
-    } else {
-      binaryCount++;
-    }
-  };
-  ws.addEventListener("message", handler);
-  return {
-    messages,
-    get binaryCount() {
-      return binaryCount;
-    },
-    stop() {
-      ws.removeEventListener("message", handler);
-    }
-  };
-}
-
-async function waitForTransportEventCount(
-  ws: WebSocket,
-  event: string,
-  expectedCount: number
-): Promise<string[]> {
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const events = await getTransportEvents(ws);
-    if (events.filter((value) => value === event).length >= expectedCount) {
-      return events;
-    }
-    await waitForMicrotasks();
-  }
-  throw new Error(
-    `Timed out waiting for ${expectedCount} "${event}" transport events`
-  );
-}
-async function waitUntilTurnState(
-  ws: WebSocket,
-  predicate: (state: TurnState) => boolean
-): Promise<TurnState> {
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const state = await getTurnState(ws);
-    if (predicate(state)) return state;
-    await waitForMicrotasks();
-  }
-  throw new Error("Timed out waiting for turn state");
 }
 
 async function waitForInterruptCount(
@@ -282,19 +183,6 @@ async function waitForInterruptCount(
     await waitForMicrotasks();
   }
   throw new Error(`Timed out waiting for ${expectedCount} interrupts`);
-}
-
-async function waitForTransportSendCount(
-  ws: WebSocket,
-  expectedCount: number
-): Promise<string[]> {
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const events = await getTransportEvents(ws);
-    const sends = events.filter((event) => event.startsWith("send:"));
-    if (sends.length >= expectedCount) return events;
-    await waitForMicrotasks();
-  }
-  throw new Error(`Timed out waiting for ${expectedCount} transport sends`);
 }
 
 function waitForBinary(ws: WebSocket, timeout = 5000): Promise<ArrayBuffer> {
@@ -407,40 +295,6 @@ describe("VoiceAgent — protocol", () => {
     expect(await getCounts(ws)).toMatchObject({
       callStart: 2,
       callStartResumed: [false, true]
-    });
-    ws.close();
-  });
-  it("drops inbound audio while the opening hook runs when configured", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-
-    sendJSON(ws, { type: "_hold_call_start" });
-    await waitForAck(ws, "_hold_call_start");
-    await startCall(ws);
-
-    for (let i = 0; i < 4; i++) {
-      ws.send(new ArrayBuffer(5000));
-    }
-    await waitForMicrotasks();
-    expect((await getTurnState(ws)).transcripts).toEqual([]);
-
-    sendJSON(ws, { type: "_release_call_start" });
-    await waitForAck(ws, "_release_call_start");
-    await waitForMicrotasks();
-
-    const transcript = waitForMessageMatching(
-      ws,
-      (message) =>
-        typeof message === "object" &&
-        message !== null &&
-        (message as Record<string, unknown>).type === "transcript" &&
-        (message as Record<string, unknown>).role === "user"
-    );
-    for (let i = 0; i < 4; i++) {
-      ws.send(new ArrayBuffer(5000));
-    }
-    expect((await transcript) as Record<string, unknown>).toMatchObject({
-      text: "utterance 1 (20000 bytes)"
     });
     ws.close();
   });
@@ -1463,34 +1317,6 @@ describe("VoiceAgent — multi-turn", () => {
     ws.close();
   });
 
-  it("filters transcript echo without blocking later caller speech", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    await startCall(ws);
-
-    let responseDone = waitForType(ws, "transcript_end");
-    let listening = waitForStatus(ws, "listening");
-    sendJSON(ws, { type: "_emit_end", text: "weather in Paris" });
-    await responseDone;
-    await listening;
-
-    sendJSON(ws, { type: "_emit_end", text: "weather in Paris" });
-
-    responseDone = waitForType(ws, "transcript_end");
-    listening = waitForStatus(ws, "listening");
-    sendJSON(ws, { type: "_emit_end", text: "book a table tonight" });
-    await responseDone;
-    await listening;
-
-    expect(await getTurnState(ws)).toEqual({
-      transcripts: ["weather in Paris", "book a table tonight"],
-      abortCount: 0
-    });
-    expect(await getMessageCount(ws)).toBe(4);
-
-    ws.close();
-  });
-
   it("retains conversation messages across turns in memory", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
@@ -1521,436 +1347,6 @@ describe("VoiceAgent — multi-turn", () => {
     >;
     expect(count.count).toBe(2); // user + assistant
 
-    ws.close();
-  });
-});
-describe("VoiceAgent — speculative turn lifecycle", () => {
-  it("starts eager work without releasing draft output", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    await startCall(ws);
-    const recording = recordSocket(ws);
-
-    sendJSON(ws, { type: "_emit_eager", text: "draft question" });
-    const state = await waitUntilTurnState(
-      ws,
-      (value) => value.transcripts.length === 1
-    );
-    await waitForMicrotasks();
-
-    expect(state).toEqual({
-      transcripts: ["draft question"],
-      abortCount: 0
-    });
-    expect(await getMessageCount(ws)).toBe(0);
-    const releasedTypes = new Set([
-      "status",
-      "transcript",
-      "transcript_start",
-      "transcript_delta",
-      "transcript_end",
-      "metrics",
-      "error",
-      "playback_interrupt"
-    ]);
-    expect(
-      recording.messages.filter((message) =>
-        releasedTypes.has(String(message.type))
-      )
-    ).toEqual([]);
-    expect(recording.binaryCount).toBe(0);
-
-    recording.stop();
-    ws.close();
-  });
-
-  it("reuses a matching eager turn and keeps one exchange", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    await startCall(ws);
-    const recording = recordSocket(ws);
-
-    sendJSON(ws, { type: "_emit_eager", text: "matching question" });
-    await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
-
-    const responseDone = waitForType(ws, "transcript_end");
-    const listening = waitForStatus(ws, "listening");
-    sendJSON(ws, { type: "_emit_end", text: "matching question" });
-    await responseDone;
-    await listening;
-
-    expect(await getTurnState(ws)).toEqual({
-      transcripts: ["matching question"],
-      abortCount: 0
-    });
-    expect(await getMessageCount(ws)).toBe(2);
-    expect(
-      recording.messages.filter(
-        (message) => message.type === "transcript" && message.role === "user"
-      )
-    ).toHaveLength(1);
-    expect(
-      recording.messages.filter((message) => message.type === "transcript_end")
-    ).toHaveLength(1);
-    expect(recording.binaryCount).toBe(1);
-
-    recording.stop();
-    ws.close();
-  });
-
-  it("persists a confirmed eager transcript before the turn settles", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    await setTurnMode(ws, "until_abort");
-    await startCall(ws);
-
-    sendJSON(ws, { type: "_emit_eager", text: "confirmed question" });
-    await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
-
-    const transcript = waitForMessageMatching(
-      ws,
-      (message) =>
-        typeof message === "object" &&
-        message !== null &&
-        (message as Record<string, unknown>).type === "transcript" &&
-        (message as Record<string, unknown>).role === "user"
-    );
-    sendJSON(ws, { type: "_emit_end", text: "confirmed question" });
-
-    await expect(transcript).resolves.toMatchObject({
-      text: "confirmed question"
-    });
-    expect(await getMessageCount(ws)).toBe(1);
-
-    ws.close();
-  });
-
-  it("silently cancels an eager turn when speech resumes", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    await startCall(ws);
-    const recording = recordSocket(ws);
-
-    sendJSON(ws, { type: "_emit_eager", text: "unfinished question" });
-    await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
-    sendJSON(ws, { type: "_emit_turn_resumed", text: "unfinished question" });
-    const state = await waitUntilTurnState(
-      ws,
-      (value) => value.abortCount === 1
-    );
-    await waitForMicrotasks();
-
-    expect(state.transcripts).toEqual(["unfinished question"]);
-    expect(await getMessageCount(ws)).toBe(0);
-    expect((await getCounts(ws)).interrupt).toBe(0);
-    expect(
-      recording.messages.filter((message) =>
-        [
-          "playback_interrupt",
-          "error",
-          "transcript",
-          "transcript_start",
-          "transcript_delta",
-          "transcript_end"
-        ].includes(String(message.type))
-      )
-    ).toEqual([]);
-    expect(recording.binaryCount).toBe(0);
-
-    recording.stop();
-    ws.close();
-  });
-
-  it("restarts from mismatched final text without releasing the draft", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    await startCall(ws);
-    const recording = recordSocket(ws);
-
-    sendJSON(ws, { type: "_emit_eager", text: "draft text" });
-    await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
-
-    const responseDone = waitForType(ws, "transcript_end");
-    const listening = waitForStatus(ws, "listening");
-    sendJSON(ws, { type: "_emit_end", text: "final text" });
-    await responseDone;
-    await listening;
-
-    expect(await getTurnState(ws)).toEqual({
-      transcripts: ["draft text", "final text"],
-      abortCount: 1
-    });
-    expect(await getMessageCount(ws)).toBe(2);
-    const userMessages = recording.messages.filter(
-      (message) => message.type === "transcript" && message.role === "user"
-    );
-    expect(userMessages.map((message) => message.text)).toEqual(["final text"]);
-    const assistantMessages = recording.messages.filter(
-      (message) => message.type === "transcript_end"
-    );
-    expect(assistantMessages.map((message) => message.text)).toEqual([
-      "Echo: final text"
-    ]);
-
-    recording.stop();
-    ws.close();
-  });
-
-  it("suppresses rejected cancelled drafts and surfaces confirmed failures", async () => {
-    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
-    const first = await connectWS(uniquePath());
-    let secondWs: WebSocket | null = null;
-    try {
-      await waitForStatus(first.ws, "idle");
-      await setTurnMode(first.ws, "reject");
-      await startCall(first.ws);
-      const cancelledRecording = recordSocket(first.ws);
-
-      sendJSON(first.ws, { type: "_emit_eager", text: "cancelled failure" });
-      await waitUntilTurnState(
-        first.ws,
-        (state) => state.transcripts.length === 1
-      );
-      sendJSON(first.ws, { type: "_emit_turn_resumed" });
-      await waitUntilTurnState(first.ws, (state) => state.abortCount === 1);
-      await waitForMicrotasks();
-
-      expect(await getMessageCount(first.ws)).toBe(0);
-      expect(
-        cancelledRecording.messages.filter(
-          (message) => message.type === "error"
-        )
-      ).toEqual([]);
-      expect(errorLog).not.toHaveBeenCalled();
-
-      first.ws.close();
-      const second = await connectWS(uniquePath());
-      secondWs = second.ws;
-      await waitForStatus(second.ws, "idle");
-      await setTurnMode(second.ws, "reject");
-      await startCall(second.ws);
-      const confirmedRecording = recordSocket(second.ws);
-
-      sendJSON(second.ws, { type: "_emit_eager", text: "confirmed failure" });
-      await waitUntilTurnState(
-        second.ws,
-        (state) => state.transcripts.length === 1
-      );
-      const error = waitForType(second.ws, "error");
-      const listening = waitForStatus(second.ws, "listening");
-      sendJSON(second.ws, {
-        type: "_emit_end",
-        text: "confirmed failure"
-      });
-      await error;
-      await listening;
-
-      expect(await getMessageCount(second.ws)).toBe(1);
-      expect(
-        confirmedRecording.messages.filter(
-          (message) => message.type === "error"
-        )
-      ).toHaveLength(1);
-      expect(
-        confirmedRecording.messages.filter((message) =>
-          ["transcript_start", "transcript_delta", "transcript_end"].includes(
-            String(message.type)
-          )
-        )
-      ).toEqual([]);
-      expect(errorLog).toHaveBeenCalledTimes(1);
-    } finally {
-      first.ws.close();
-      secondWs?.close();
-      errorLog.mockRestore();
-    }
-  });
-
-  it("aborts pending eager work on end call and WebSocket close", async () => {
-    const ended = await connectWS(uniquePath());
-    await waitForStatus(ended.ws, "idle");
-    await setTurnMode(ended.ws, "until_abort");
-    await startCall(ended.ws);
-    const endedRecording = recordSocket(ended.ws);
-
-    sendJSON(ended.ws, { type: "_emit_eager", text: "pending end call" });
-    await waitUntilTurnState(
-      ended.ws,
-      (state) => state.transcripts.length === 1
-    );
-    const idle = waitForStatus(ended.ws, "idle");
-    sendJSON(ended.ws, { type: "end_call" });
-    await idle;
-    expect(
-      await waitUntilTurnState(ended.ws, (state) => state.abortCount === 1)
-    ).toEqual({
-      transcripts: ["pending end call"],
-      abortCount: 1
-    });
-    expect(await getMessageCount(ended.ws)).toBe(0);
-    expect(
-      endedRecording.messages.filter((message) =>
-        [
-          "transcript",
-          "transcript_start",
-          "transcript_delta",
-          "transcript_end",
-          "error",
-          "playback_interrupt"
-        ].includes(String(message.type))
-      )
-    ).toEqual([]);
-    ended.ws.close();
-
-    const instanceName = `voice-test-${crypto.randomUUID()}`;
-    const closed = await connectWS(`/agents/test-voice-agent/${instanceName}`);
-    await waitForStatus(closed.ws, "idle");
-    await setTurnMode(closed.ws, "until_abort");
-    await startCall(closed.ws);
-    const closedRecording = recordSocket(closed.ws);
-    sendJSON(closed.ws, {
-      type: "_emit_eager",
-      text: "pending connection close"
-    });
-    await waitUntilTurnState(
-      closed.ws,
-      (state) => state.transcripts.length === 1
-    );
-    closed.ws.close();
-
-    const stub = env.TestVoiceAgent.get(
-      env.TestVoiceAgent.idFromName(instanceName)
-    ) as DurableObjectStub<TestVoiceAgent>;
-    const closedState = await runInDurableObject(stub, (instance) => ({
-      turn: instance.getTurnStateForTest(),
-      messageCount: instance.getMessageCount()
-    }));
-    expect(closedState).toEqual({
-      turn: {
-        transcripts: ["pending connection close"],
-        abortCount: 1
-      },
-      messageCount: 0
-    });
-    expect(
-      closedRecording.messages.filter((message) =>
-        [
-          "transcript",
-          "transcript_start",
-          "transcript_delta",
-          "transcript_end",
-          "error",
-          "playback_interrupt"
-        ].includes(String(message.type))
-      )
-    ).toEqual([]);
-  });
-
-  it("supports eager resume eager confirm without stale state", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    await startCall(ws);
-    const recording = recordSocket(ws);
-
-    sendJSON(ws, { type: "_emit_eager", text: "first draft" });
-    await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
-    sendJSON(ws, { type: "_emit_turn_resumed" });
-    await waitUntilTurnState(ws, (state) => state.abortCount === 1);
-
-    sendJSON(ws, { type: "_emit_eager", text: "second draft" });
-    await waitUntilTurnState(ws, (state) => state.transcripts.length === 2);
-    const responseDone = waitForType(ws, "transcript_end");
-    const listening = waitForStatus(ws, "listening");
-    sendJSON(ws, { type: "_emit_end", text: "second draft" });
-    await responseDone;
-    await listening;
-
-    expect(await getTurnState(ws)).toEqual({
-      transcripts: ["first draft", "second draft"],
-      abortCount: 1
-    });
-    expect(await getMessageCount(ws)).toBe(2);
-    const users = recording.messages.filter(
-      (message) => message.type === "transcript" && message.role === "user"
-    );
-    expect(users.map((message) => message.text)).toEqual(["second draft"]);
-    expect(
-      recording.messages.filter((message) => message.type === "transcript_end")
-    ).toHaveLength(1);
-
-    recording.stop();
-    ws.close();
-  });
-
-  it("interrupts controlled streaming audio after an eager transcript", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    sendJSON(ws, { type: "_set_audio_transport", value: true });
-    await waitForAck(ws, "_set_audio_transport");
-    await setTtsMode(ws, "controlled");
-    await startCall(ws);
-    const recording = recordSocket(ws);
-
-    sendJSON(ws, { type: "_emit_end", text: "confirmed audio" });
-    await waitForTransportSendCount(ws, 1);
-
-    const playbackInterrupt = waitForType(ws, "playback_interrupt");
-    ws.send(new ArrayBuffer(1));
-    await playbackInterrupt;
-    await waitForMicrotasks();
-    expect(await getMessageCount(ws)).toBe(1);
-
-    sendJSON(ws, { type: "_emit_eager", text: "real interruption" });
-    sendJSON(ws, { type: "_emit_end", text: "real interruption" });
-    const events = await waitForTransportEventCount(ws, "interrupt", 1);
-    const counts = await waitForInterruptCount(ws, 1);
-
-    expect(
-      recording.messages.filter(
-        (message) => message.type === "playback_interrupt"
-      )
-    ).toHaveLength(1);
-    expect(events.filter((event) => event === "interrupt")).toHaveLength(1);
-    expect(counts.interrupt).toBe(1);
-    expect((await getTurnState(ws)).abortCount).toBe(1);
-
-    recording.stop();
-    ws.close();
-  });
-
-  it("ignores live assistant echo before accepting a real barge-in", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    sendJSON(ws, { type: "_set_audio_transport", value: true });
-    await waitForAck(ws, "_set_audio_transport");
-    await setTtsMode(ws, "controlled");
-    await startCall(ws);
-    const recording = recordSocket(ws);
-
-    sendJSON(ws, { type: "_emit_end", text: "confirmed audio" });
-    await waitForTransportSendCount(ws, 1);
-
-    sendJSON(ws, { type: "_emit_eager", text: "Echo confirmed audio" });
-    sendJSON(ws, { type: "_emit_end", text: "Echo confirmed audio" });
-    await waitForMicrotasks();
-
-    expect((await getCounts(ws)).interrupt).toBe(0);
-    expect(await getTurnState(ws)).toEqual({
-      transcripts: ["confirmed audio"],
-      abortCount: 0
-    });
-
-    sendJSON(ws, { type: "_emit_eager", text: "real interruption" });
-    sendJSON(ws, { type: "_emit_end", text: "real interruption" });
-
-    expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
-    expect(
-      recording.messages.filter(
-        (message) => message.type === "playback_interrupt"
-      )
-    ).toHaveLength(1);
-
-    recording.stop();
     ws.close();
   });
 });
@@ -2085,34 +1481,7 @@ describe("VoiceAgent — interrupt", () => {
 
     ws.close();
   });
-
-  it("suppresses barge-in below minInterruptWords but allows longer transcripts", async () => {
-    const { ws } = await connectWS(uniqueMinInterruptPath());
-    await waitForStatus(ws, "idle");
-
-    sendJSON(ws, { type: "start_call" });
-    await waitForStatus(ws, "listening");
-
-    sendJSON(ws, { type: "text_message", text: "long response" });
-    await waitForStatus(ws, "thinking");
-
-    sendJSON(ws, { type: "_emit_speech_start", text: "no way" });
-    const belowCounts = await getCounts(ws);
-    expect(belowCounts.interrupt).toBe(0);
-
-    const playbackInterrupt = waitForType(ws, "playback_interrupt");
-    sendJSON(ws, {
-      type: "_emit_speech_start",
-      text: "actually let's talk now"
-    });
-    await playbackInterrupt;
-    const aboveCounts = await getCounts(ws);
-    expect(aboveCounts.interrupt).toBe(1);
-
-    ws.close();
-  });
 });
-
 describe("VoiceAgent — text messages", () => {
   it("processes text messages through the pipeline", async () => {
     const { ws } = await connectWS(uniquePath());
@@ -2141,56 +1510,6 @@ describe("VoiceAgent — text messages", () => {
     expect(transcriptEnd.text).toBe("Echo: Hello from text");
 
     ws.close();
-  });
-});
-
-describe("VoiceAgent — client speech energy telemetry", () => {
-  it("adds client RMS levels to STT turn traces without changing audio flow", async () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { ws } = await connectWS(uniquePath());
-
-    try {
-      await waitForStatus(ws, "idle");
-      sendJSON(ws, { type: "start_call" });
-      await waitForStatus(ws, "listening");
-
-      sendJSON(ws, {
-        type: "start_of_speech",
-        rms: 0.07,
-        threshold: 0.06
-      });
-      for (let i = 0; i < 3; i++) {
-        ws.send(new ArrayBuffer(5000));
-      }
-      sendJSON(ws, {
-        type: "end_of_speech",
-        peak_rms: 0.21,
-        threshold: 0.06
-      });
-      ws.send(new ArrayBuffer(5000));
-
-      const transcript = (await waitForMessageMatching(
-        ws,
-        (message) =>
-          typeof message === "object" &&
-          message !== null &&
-          (message as Record<string, unknown>).type === "transcript" &&
-          (message as Record<string, unknown>).role === "user"
-      )) as Record<string, unknown>;
-
-      expect((transcript.text as string).includes("utterance 1")).toBe(true);
-      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
-        event: "stt_utterance",
-        connectionId: expect.any(String),
-        text: "utterance 1 (20000 bytes)",
-        clientStartRms: 0.07,
-        clientPeakRms: 0.21,
-        clientThreshold: 0.06
-      });
-    } finally {
-      ws.close();
-      log.mockRestore();
-    }
   });
 });
 
@@ -2515,7 +1834,7 @@ describe("VoiceAgent — empty response handling", () => {
   });
 });
 describe("VoiceAgent — server audio transport", () => {
-  it("routes ingress, TTS, flush, interrupt, and end through the transport", async () => {
+  it("routes ingress, TTS, flush, and end through the transport", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
 
@@ -2540,7 +1859,6 @@ describe("VoiceAgent — server audio transport", () => {
     const interrupted = waitForStatus(ws, "listening");
     sendJSON(ws, { type: "interrupt" });
     await interrupted;
-    expect(await getTransportEvents(ws)).toContain("interrupt");
 
     const ended = waitForStatus(ws, "idle");
     sendJSON(ws, { type: "end_call" });

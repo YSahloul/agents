@@ -45,16 +45,10 @@ function createTestMcpServer() {
 
 const handleMcpRequest = createMcpHandler(createTestMcpServer);
 
-const VoiceAgent = withVoice(Agent, {
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false
-});
+const VoiceAgent = withVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  transcriber = new WorkersAIFluxSTT(this.env.AI, {
-    eagerEotThreshold: 0.5,
-    eotThreshold: 0.7
-  });
+  transcriber = new WorkersAIFluxSTT(this.env.AI);
   tts = new WorkersAIRealtimeTTS(this.env.AI);
 
   async onStart() {

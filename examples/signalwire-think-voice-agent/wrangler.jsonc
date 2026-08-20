@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "signalwire-think-voice-agent-example",
+  "name": "signalwire-think-voice-agent-consolidation-test",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {

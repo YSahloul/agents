@@ -314,7 +314,7 @@ describe("SFUVoiceTransport", () => {
     expect(new Set(new Int16Array(payload!.buffer))).toEqual(new Set([2345]));
   });
 
-  it("orders flush after queued speech and drops queued speech on interrupt", async () => {
+  it("orders flush after queued speech", async () => {
     const { fetchMock } = createSfuFetchMock();
     vi.stubGlobal("fetch", fetchMock);
     const transport = new SFUVoiceTransport({ config: CONFIG });
@@ -335,20 +335,6 @@ describe("SFUVoiceTransport", () => {
     expect(
       ordered.map((packet) => extractPayloadFromProtobuf(packet)?.length)
     ).toEqual([3840, 3840, 0]);
-
-    const interrupted: ArrayBuffer[] = [];
-    socket.addEventListener("message", (event) => {
-      interrupted.push(event.data as ArrayBuffer);
-    });
-    transport.send("call", mono24k);
-    transport.send("call", mono24k);
-    const discarded = transport.flush("call");
-    transport.interrupt("call");
-    await expect(discarded).rejects.toThrow("SFU output interrupted");
-    await vi.waitFor(() => expect(interrupted).toHaveLength(1));
-    expect(extractPayloadFromProtobuf(interrupted[0])?.length).toBe(0);
-    await vi.advanceTimersByTimeAsync(100);
-    expect(interrupted).toHaveLength(1);
   });
 
   it("cleans adapters and persisted state once across idempotent stops", async () => {

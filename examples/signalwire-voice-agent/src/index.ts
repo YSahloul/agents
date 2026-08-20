@@ -11,18 +11,10 @@ import { createWorkersAI } from "workers-ai-provider";
 
 const SYSTEM_PROMPT = `You are a phone voice assistant. Respond in 1-2 short sentences. Be direct and natural. Never exceed 30 words unless asked for detail.`;
 
-const VoiceAgent = withVoice(Agent, {
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false
-});
+const VoiceAgent = withVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  transcriber = new WorkersAIFluxSTT(this.env.AI, {
-    // Eager end-of-turn starts the LLM draft at 0.5, confirmed end-of-turn
-    // releases it at 0.7, and resumed speech cancels it before any output.
-    eagerEotThreshold: 0.5,
-    eotThreshold: 0.7
-  });
+  transcriber = new WorkersAIFluxSTT(this.env.AI);
   // WebSocket μ-law TTS (the rebuilt synthesizeStream path): one socket per
   // sentence, audio streams out as it synthesizes and forwards byte-for-byte
   // (mulaw/8000 straight to the carrier — no resample, no adapter encode).

@@ -310,7 +310,6 @@ export interface VoiceServerAudioTransport {
   ): void | Promise<void>;
   send(connectionId: string, audio: ArrayBuffer): void | Promise<void>;
   flush(connectionId: string): void | Promise<void>;
-  interrupt(connectionId: string): void | Promise<void>;
   stop(connectionId: string): void | Promise<void>;
   /** Suspend the transport, keeping media alive for a brief grace window. */
   suspend?(connectionId: string): void;

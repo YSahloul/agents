@@ -1,11 +1,11 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "signalwire-mcp-voice-agent-example",
+  "name": "signalwire-mcp-voice-agent-consolidation-test",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/index.ts",
   "vars": {
-    "MCP_SERVER_URL": "https://signalwire-mcp-voice-agent-example.agenticflows.workers.dev/mcp",
+    "MCP_SERVER_URL": "https://signalwire-mcp-voice-agent-consolidation-test.agenticflows.workers.dev/mcp",
     "RETAIL_MCP_SERVER_URL": "https://wpros-mcp.agenticflows.workers.dev/retail/mcp"
   },
   "ai": {

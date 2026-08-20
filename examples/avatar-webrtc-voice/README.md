@@ -22,8 +22,7 @@ cp .env.example .env
 pnpm run start
 ```
 
-Deploying creates the separate `avatar-webrtc-voice-grok` Worker at
-`https://avatar.sahloul.io`.
+Deploying creates the separate `avatar-webrtc-voice-consolidation-test` Worker with a `*.workers.dev` URL.
 
 Set the required Realtime SFU credentials in `.env`:
 
