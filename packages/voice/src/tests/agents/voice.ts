@@ -477,19 +477,14 @@ function isJsonValue(value: unknown): boolean {
 
 // --- Test agents ---
 
-const VoiceBase = withVoice(Agent, {
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false
-});
+const VoiceBase = withVoice(Agent);
 const Pcm24kVoiceBase = withVoice(Agent, {
   audioFormat: "pcm16",
   sampleRate: 24000
 });
 const PersistentVoiceBase = withVoice(Agent, { persistMessages: true });
 const MinInterruptVoiceBase = withVoice(Agent, {
-  minInterruptWords: 3,
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false
+  minInterruptWords: 3
 });
 
 /**

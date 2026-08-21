@@ -410,40 +410,6 @@ describe("VoiceAgent — protocol", () => {
     });
     ws.close();
   });
-  it("drops inbound audio while the opening hook runs when configured", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-
-    sendJSON(ws, { type: "_hold_call_start" });
-    await waitForAck(ws, "_hold_call_start");
-    await startCall(ws);
-
-    for (let i = 0; i < 4; i++) {
-      ws.send(new ArrayBuffer(5000));
-    }
-    await waitForMicrotasks();
-    expect((await getTurnState(ws)).transcripts).toEqual([]);
-
-    sendJSON(ws, { type: "_release_call_start" });
-    await waitForAck(ws, "_release_call_start");
-    await waitForMicrotasks();
-
-    const transcript = waitForMessageMatching(
-      ws,
-      (message) =>
-        typeof message === "object" &&
-        message !== null &&
-        (message as Record<string, unknown>).type === "transcript" &&
-        (message as Record<string, unknown>).role === "user"
-    );
-    for (let i = 0; i < 4; i++) {
-      ws.send(new ArrayBuffer(5000));
-    }
-    expect((await transcript) as Record<string, unknown>).toMatchObject({
-      text: "utterance 1 (20000 bytes)"
-    });
-    ws.close();
-  });
 
   it("sends idle status on end_call", async () => {
     const { ws } = await connectWS(uniquePath());
@@ -1463,34 +1429,6 @@ describe("VoiceAgent — multi-turn", () => {
     ws.close();
   });
 
-  it("filters transcript echo without blocking later caller speech", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    await startCall(ws);
-
-    let responseDone = waitForType(ws, "transcript_end");
-    let listening = waitForStatus(ws, "listening");
-    sendJSON(ws, { type: "_emit_end", text: "weather in Paris" });
-    await responseDone;
-    await listening;
-
-    sendJSON(ws, { type: "_emit_end", text: "weather in Paris" });
-
-    responseDone = waitForType(ws, "transcript_end");
-    listening = waitForStatus(ws, "listening");
-    sendJSON(ws, { type: "_emit_end", text: "book a table tonight" });
-    await responseDone;
-    await listening;
-
-    expect(await getTurnState(ws)).toEqual({
-      transcripts: ["weather in Paris", "book a table tonight"],
-      abortCount: 0
-    });
-    expect(await getMessageCount(ws)).toBe(4);
-
-    ws.close();
-  });
-
   it("retains conversation messages across turns in memory", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
@@ -1913,42 +1851,6 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     expect(events.filter((event) => event === "interrupt")).toHaveLength(1);
     expect(counts.interrupt).toBe(1);
     expect((await getTurnState(ws)).abortCount).toBe(1);
-
-    recording.stop();
-    ws.close();
-  });
-
-  it("ignores live assistant echo before accepting a real barge-in", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    sendJSON(ws, { type: "_set_audio_transport", value: true });
-    await waitForAck(ws, "_set_audio_transport");
-    await setTtsMode(ws, "controlled");
-    await startCall(ws);
-    const recording = recordSocket(ws);
-
-    sendJSON(ws, { type: "_emit_end", text: "confirmed audio" });
-    await waitForTransportSendCount(ws, 1);
-
-    sendJSON(ws, { type: "_emit_eager", text: "Echo confirmed audio" });
-    sendJSON(ws, { type: "_emit_end", text: "Echo confirmed audio" });
-    await waitForMicrotasks();
-
-    expect((await getCounts(ws)).interrupt).toBe(0);
-    expect(await getTurnState(ws)).toEqual({
-      transcripts: ["confirmed audio"],
-      abortCount: 0
-    });
-
-    sendJSON(ws, { type: "_emit_eager", text: "real interruption" });
-    sendJSON(ws, { type: "_emit_end", text: "real interruption" });
-
-    expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
-    expect(
-      recording.messages.filter(
-        (message) => message.type === "playback_interrupt"
-      )
-    ).toHaveLength(1);
 
     recording.stop();
     ws.close();

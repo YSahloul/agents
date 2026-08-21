@@ -44,10 +44,7 @@ class SignalWirePCMTTS implements TTSProvider {
 
 const SYSTEM_PROMPT = `You are a phone voice assistant. Respond in 1-2 short sentences. Be direct and natural. Never exceed 30 words unless asked for detail.`;
 
-const VoiceAgent = withVoice(Agent, {
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false
-});
+const VoiceAgent = withVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   transcriber = new WorkersAIFluxSTT(this.env.AI, {

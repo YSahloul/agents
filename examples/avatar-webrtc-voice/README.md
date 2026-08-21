@@ -38,11 +38,7 @@ import {
   WorkersAIGrokTTS
 } from "@cloudflare/voice";
 
-const VoiceThink = createSFUVoiceThink<Env>({
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false,
-  minInterruptWords: 3
-});
+const VoiceThink = createSFUVoiceThink<Env>();
 
 export class MyThinkAgent extends VoiceThink {
   configureChannels() {
@@ -97,8 +93,6 @@ const voice = useVoiceAgent({
 ```
 
 The Think workspace tools can create, read, update, search, and delete durable files. Shell execution stays disabled. `research_background` dispatches a detached retained `Researcher`; its simulated `web_search` demonstrates orchestration, not grounded internet research.
-
-The browser keeps the upstream speech detection defaults (`silenceThreshold: 0.04`, `silenceDurationMs: 500`, `interruptThreshold: 0.05`, `interruptChunks: 2`). `minInterruptWords: 3` prevents one- or two-word echo fragments from interrupting playback.
 
 `[ThinkTrace]` logs turn timing, step usage, and server-side tool activity. `[VoiceTrace]` logs STT timing and captured RMS data. Reasoning text remains hidden before display and TTS.
 

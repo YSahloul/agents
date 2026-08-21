@@ -82,10 +82,7 @@ export class RetailAgent extends Think<Env> {
   }
 }
 
-const VoiceThink = createVoiceThink<Env>({
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false
-});
+const VoiceThink = createVoiceThink<Env>();
 
 export class MyThinkAgent extends VoiceThink {
   override maxConcurrentAgentTools = 4;

@@ -78,10 +78,7 @@ function createTestMcpServer() {
 
 const handleMcpRequest = createMcpHandler(createTestMcpServer);
 
-const VoiceAgent = withVoice(Agent, {
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false
-});
+const VoiceAgent = withVoice(Agent);
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   transcriber = new WorkersAIFluxSTT(this.env.AI, {

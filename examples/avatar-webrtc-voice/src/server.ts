@@ -169,11 +169,7 @@ export class Researcher extends Think<Env> {
   }
 }
 
-const VoiceThink = createSFUVoiceThink<Env>({
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false,
-  minInterruptWords: 3
-});
+const VoiceThink = createSFUVoiceThink<Env>();
 
 /** One Durable Object owns Think Session, Voice, SFU, tools, and workspace. */
 export class MyThinkAgent extends VoiceThink {

@@ -43,10 +43,7 @@ Dial the number. SignalWire fetches `/answer`, opens the `/signalwire` media str
 ## Key adapter
 
 ```ts
-const VoiceThink = createVoiceThink<Env>({
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false
-});
+const VoiceThink = createVoiceThink<Env>();
 
 class MyThinkAgent extends VoiceThink {
   configureChannels() {

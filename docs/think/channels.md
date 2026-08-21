@@ -51,10 +51,7 @@ pnpm add @cloudflare/think @cloudflare/voice
 import { createVoiceThink, voiceChannel } from "@cloudflare/think/voice";
 import { WorkersAIFluxSTT, WorkersAITTS } from "@cloudflare/voice";
 
-const VoiceThink = createVoiceThink<Env>({
-  filterEchoedTranscripts: true,
-  listenDuringCallStart: false
-});
+const VoiceThink = createVoiceThink<Env>();
 
 export class Assistant extends VoiceThink {
   configureChannels() {
