@@ -36,52 +36,6 @@ function isReasoningModel(m: {
   );
 }
 
-type TextDelta = { type: "text-delta"; delta: string };
-
-function isTextDelta(chunk: unknown): chunk is TextDelta {
-  return (
-    typeof chunk === "object" &&
-    chunk !== null &&
-    (chunk as { type?: unknown }).type === "text-delta" &&
-    typeof (chunk as { delta?: unknown }).delta === "string"
-  );
-}
-
-async function* stripThinkTextDeltas(
-  source: AsyncIterable<unknown>
-): AsyncGenerator<unknown> {
-  const closeTag = "</think>";
-  let buffering = true;
-  let buffer = "";
-  const pending: unknown[] = [];
-
-  for await (const chunk of source) {
-    if (!buffering) {
-      yield chunk;
-      continue;
-    }
-    if (!isTextDelta(chunk)) {
-      pending.push(chunk);
-      continue;
-    }
-
-    buffer += chunk.delta;
-    const closeIndex = buffer.indexOf(closeTag);
-    if (closeIndex === -1) continue;
-
-    buffering = false;
-    for (const event of pending) yield event;
-    const after = buffer.slice(closeIndex + closeTag.length);
-    buffer = "";
-    if (after) yield { ...chunk, delta: after };
-  }
-
-  if (buffering) {
-    for (const event of pending) yield event;
-    if (buffer) yield { type: "text-delta", delta: buffer };
-  }
-}
-
 const DEFAULT_MODEL = "@cf/moonshotai/kimi-k2.7-code";
 const SYSTEM_PROMPT = `You are a helpful assistant with access to a persistent workspace filesystem.
 
@@ -232,41 +186,6 @@ export class MyThinkAgent extends VoiceThink {
       model,
       ...(effort !== undefined && { reasoningEffort: effort })
     };
-  }
-
-  override async onTurn(
-    transcript: string,
-    context: VoiceTurnContext
-  ): Promise<AsyncIterable<unknown>> {
-    const turnId = crypto.randomUUID();
-    const startedAt = Date.now();
-    console.log("[ThinkTrace]", { event: "turn_start", turnId });
-    const source = await super.onTurn(transcript, context);
-    if (
-      typeof source !== "object" ||
-      source === null ||
-      !(Symbol.asyncIterator in source)
-    ) {
-      throw new TypeError("Think Voice onTurn must return an async stream");
-    }
-    return (async function* () {
-      try {
-        yield* stripThinkTextDeltas(source);
-        console.log("[ThinkTrace]", {
-          event: "turn_end",
-          turnId,
-          durationMs: Date.now() - startedAt
-        });
-      } catch (error) {
-        console.error("[ThinkTrace]", {
-          event: "turn_error",
-          turnId,
-          durationMs: Date.now() - startedAt,
-          error
-        });
-        throw error;
-      }
-    })();
   }
 
   override async onCallStart(
