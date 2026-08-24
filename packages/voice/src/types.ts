@@ -297,6 +297,8 @@ export interface VoiceAudioInput {
   setOutputDevice?(deviceId: string): void | Promise<void>;
   /** True when the input's media session is still connected. */
   isConnected?(): boolean;
+  /** Handle transport-specific control messages from the agent connection. */
+  handleControlMessage?(message: Record<string, unknown>): boolean;
   /** Called by the input when its media connection is lost. */
   onConnectionLost?: (() => void) | null;
 }

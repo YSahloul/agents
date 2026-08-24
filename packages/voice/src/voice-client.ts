@@ -895,6 +895,7 @@ export class VoiceClient {
         this.#emit("interimtranscript", this.#interimTranscript);
         break;
       case "playback_interrupt":
+        this.#options.audioInput?.handleControlMessage?.(msg);
         this.#stopPlayback();
         break;
       case "transcript":
@@ -953,6 +954,7 @@ export class VoiceClient {
           this.#transcript = updated;
           this.#emit("transcriptchange", this.#transcript);
         }
+        this.#options.audioInput?.handleControlMessage?.(msg);
         break;
       }
       case "metrics":
@@ -969,6 +971,7 @@ export class VoiceClient {
         this.#emit("error", this.#error);
         break;
       default:
+        if (this.#options.audioInput?.handleControlMessage?.(msg)) break;
         // App-level custom message — surface via event
         this.#lastCustomMessage = msg;
         this.#emit("custommessage", msg);

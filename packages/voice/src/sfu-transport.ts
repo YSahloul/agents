@@ -11,6 +11,10 @@ import {
   resampleMonoTo48kStereo,
   type SFUConfig
 } from "./sfu-utils";
+import {
+  acknowledgeSFUPlaybackCheckpoint,
+  type SFUPlaybackCheckpointState
+} from "./sfu-playback-checkpoint";
 
 declare const WebSocketPair: {
   new (): { 0: WebSocket; 1: WebSocket };
@@ -30,6 +34,7 @@ export interface SFUVoiceState {
     callbackUrl: string;
     adapterId?: string;
   };
+  playback?: SFUPlaybackCheckpointState;
 }
 
 export interface SFUVoiceTransportConfig {
@@ -200,16 +205,24 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
   }
 
   interrupt(connectionId: string): void {
-    this.#requireActiveConnection(connectionId);
+    if (this.#connectionId !== connectionId) return;
     const droppedAudioMs =
       this.#queue.filter((item) => item instanceof Uint8Array).length *
       FRAME_INTERVAL_MS;
-    const socket = this.#requireTtsSocket();
+    const socket = this.#ttsSocket;
     this.#clearPacing();
     this.#rejectQueue(new Error("SFU output interrupted"));
     this.#partialFrame = new Uint8Array();
     this.#partialInputByte = null;
-    socket.send(encodePayloadToProtobuf(new Uint8Array()));
+    if (socket?.readyState === WebSocket.OPEN) {
+      try {
+        socket.send(encodePayloadToProtobuf(new Uint8Array()));
+      } catch {
+        this.#clearTtsSocket(socket);
+      }
+    } else {
+      this.#clearTtsSocket(socket);
+    }
     console.log("[VoiceTrace]", {
       event: "sfu_interrupt",
       connectionId,
@@ -283,7 +296,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
       for (const adapterId of [state?.tts?.adapterId, state?.stt?.adapterId]) {
         if (adapterId) adapterIds.push(adapterId);
       }
-      return null;
+      return state?.playback ? { playback: state.playback } : null;
     });
     await Promise.all(
       adapterIds.map((adapterId) => this.#closeAdapter(adapterId))
@@ -368,6 +381,11 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
         this.#stopSttForwarding()
       );
     }
+    if (path.endsWith(this.#route("playback-checkpoint/ack"))) {
+      return this.#respond("Playback checkpoint acknowledgement", () =>
+        this.#acknowledgePlaybackCheckpoint(request)
+      );
+    }
     return null;
   }
 
@@ -389,7 +407,10 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     let previousAdapterId: string | undefined;
     await this.#updateState((state) => {
       previousAdapterId = state?.tts?.adapterId;
-      return state?.stt ? { stt: state.stt } : null;
+      const next: SFUVoiceState = {};
+      if (state?.stt) next.stt = state.stt;
+      if (state?.playback) next.playback = state.playback;
+      return Object.keys(next).length > 0 ? next : null;
     });
     if (previousAdapterId) {
       await this.#closeAdapter(previousAdapterId);
@@ -615,6 +636,29 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     }
     await this.#closeAdapter(adapterId);
     return new Response("Forwarding stopped");
+  }
+  async #acknowledgePlaybackCheckpoint(request: Request): Promise<Response> {
+    const body: unknown = await request.json();
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      !("id" in body) ||
+      typeof body.id !== "string" ||
+      !("text" in body) ||
+      typeof body.text !== "string"
+    ) {
+      return new Response("Invalid playback checkpoint", { status: 400 });
+    }
+    const id = body.id;
+    const text = body.text;
+    await this.#updateState((state) => ({
+      ...(state ?? {}),
+      playback: acknowledgeSFUPlaybackCheckpoint({
+        id,
+        text
+      })
+    }));
+    return new Response("Playback checkpoint acknowledged");
   }
 
   #handleTtsSubscribe(): Response {

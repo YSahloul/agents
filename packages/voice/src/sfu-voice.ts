@@ -75,7 +75,8 @@ export function withSFUVoiceTransport<TBase extends VoiceAgentLike>(
             "rtc/pull",
             "rtc/renegotiate",
             "stt/start-forwarding",
-            "stt/stop-forwarding"
+            "stt/stop-forwarding",
+            "playback-checkpoint/ack"
           ].some((operation) =>
             path.endsWith(`/${normalizedPrefix}/${operation}`)
           )

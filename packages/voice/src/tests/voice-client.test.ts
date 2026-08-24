@@ -169,6 +169,7 @@ class FakeAudioInput implements VoiceAudioInput {
   started = false;
   stopped = false;
   startCount = 0;
+  controlMessages: Record<string, unknown>[] = [];
 
   async start(): Promise<void> {
     this.startCount++;
@@ -177,6 +178,10 @@ class FakeAudioInput implements VoiceAudioInput {
 
   stop(): void {
     this.stopped = true;
+  }
+  handleControlMessage(message: Record<string, unknown>): boolean {
+    this.controlMessages.push(message);
+    return message.type === "transcript_end";
   }
 }
 
@@ -342,6 +347,27 @@ describe("VoiceClient playback interrupt", () => {
     ).not.toThrow();
 
     expect(source.stopped).toBe(true);
+  });
+  it("forwards transcript completion to input-owned playback", () => {
+    const transport = new MockTransport();
+    const audioInput = new FakeAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+
+    client.connect();
+    transport.receive(
+      JSON.stringify({ type: "transcript_start", role: "assistant" })
+    );
+    transport.receive(
+      JSON.stringify({ type: "transcript_end", text: "Played response" })
+    );
+
+    expect(audioInput.controlMessages).toEqual([
+      { type: "transcript_end", text: "Played response" }
+    ]);
   });
 
   it("releases the HTML audio playback output when the call ends", async () => {

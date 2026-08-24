@@ -232,6 +232,10 @@ let requestBodies: unknown[];
 let requestHeaders: Headers[];
 let failOperation: string | null;
 let pullResponse: unknown;
+let stopForwardingGate: {
+  promise: Promise<void>;
+  resolve: () => void;
+} | null;
 let animationFrames: Array<FrameRequestCallback | null>;
 const originalMediaDevices = Object.getOwnPropertyDescriptor(
   navigator,
@@ -284,6 +288,7 @@ beforeEach(() => {
   requestBodies = [];
   requestHeaders = [];
   failOperation = null;
+  stopForwardingGate = null;
   pullResponse = {
     requiresImmediateRenegotiation: true,
     sessionDescription: { type: "offer", sdp: "rtc-pull-offer" },
@@ -323,6 +328,9 @@ beforeEach(() => {
       requestBodies.push(
         typeof init?.body === "string" ? JSON.parse(init.body) : undefined
       );
+      if (name === "stt/stop-forwarding" && stopForwardingGate) {
+        await stopForwardingGate.promise;
+      }
       if (name === failOperation) return mockResponse("failed", 500);
       if (name === "rtc/connect") {
         return mockResponse({
@@ -441,6 +449,110 @@ describe("SFUVoiceAudioInput", () => {
     expect(audio.removed).toBe(true);
     expect(requests.at(-1)).toBe("stt/stop-forwarding");
   });
+  it("acknowledges completed transcript playback after remote audio is silent", async () => {
+    vi.useFakeTimers();
+    const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
+    const start = input.start();
+    const peer = await waitForPeer();
+    peer.connect();
+    await start;
+    peer.emitTrack(stream as unknown as MediaStream);
+    await Promise.resolve();
+
+    expect(
+      input.handleControlMessage({
+        type: "transcript_end",
+        text: "Played response"
+      })
+    ).toBe(true);
+    const analyser = FakeAudioContext.instances[0].analyser;
+    analyser.level = 0.5;
+    animationFrames.at(-1)?.(0);
+    expect(requests).not.toContain("playback-checkpoint/ack");
+
+    analyser.level = 0;
+    animationFrames.at(-1)?.(0);
+    await vi.advanceTimersByTimeAsync(250);
+    animationFrames.at(-1)?.(250);
+    await vi.waitFor(() =>
+      expect(requests).toContain("playback-checkpoint/ack")
+    );
+    const index = requests.indexOf("playback-checkpoint/ack");
+    expect(requestBodies[index]).toMatchObject({
+      id: expect.any(String),
+      text: "Played response"
+    });
+  });
+  it("does not acknowledge an interrupted playback checkpoint", async () => {
+    vi.useFakeTimers();
+    const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
+    const start = input.start();
+    const peer = await waitForPeer();
+    peer.connect();
+    await start;
+    peer.emitTrack(stream as unknown as MediaStream);
+    await Promise.resolve();
+    input.handleControlMessage({
+      type: "transcript_end",
+      text: "Interrupted response"
+    });
+    input.handleControlMessage({ type: "playback_interrupt" });
+
+    FakeAudioContext.instances[0].analyser.level = 0;
+    animationFrames.at(-1)?.(0);
+    await vi.advanceTimersByTimeAsync(250);
+    animationFrames.at(-1)?.(250);
+    expect(requests).not.toContain("playback-checkpoint/ack");
+  });
+
+  it("retries unacknowledged playback checkpoints after media restart", async () => {
+    vi.useFakeTimers();
+    const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
+    const firstStart = input.start();
+    const firstPeer = await waitForPeer();
+    firstPeer.connect();
+    await firstStart;
+    firstPeer.emitTrack(stream as unknown as MediaStream);
+    await Promise.resolve();
+    input.handleControlMessage({
+      type: "transcript_end",
+      text: "Resume checkpoint"
+    });
+
+    failOperation = "playback-checkpoint/ack";
+    FakeAudioContext.instances[0].analyser.level = 0;
+    animationFrames.at(-1)?.(0);
+    await vi.advanceTimersByTimeAsync(250);
+    animationFrames.at(-1)?.(250);
+    await vi.waitFor(() =>
+      expect(
+        requests.filter((name) => name === "playback-checkpoint/ack")
+      ).toHaveLength(1)
+    );
+    const firstAck = requestBodies[requests.indexOf("playback-checkpoint/ack")];
+
+    input.stop();
+    failOperation = null;
+    const secondStart = input.start();
+    await vi.waitFor(() =>
+      expect(FakePeerConnection.instances).toHaveLength(2)
+    );
+    const secondPeer = FakePeerConnection.instances[1];
+    secondPeer.connect();
+    await secondStart;
+    secondPeer.emitTrack(stream as unknown as MediaStream);
+    await Promise.resolve();
+    FakeAudioContext.instances[1].analyser.level = 0;
+    animationFrames.at(-1)?.(0);
+    await vi.advanceTimersByTimeAsync(250);
+    animationFrames.at(-1)?.(250);
+    await vi.waitFor(() =>
+      expect(
+        requests.filter((name) => name === "playback-checkpoint/ack")
+      ).toHaveLength(2)
+    );
+    expect(requestBodies.at(-1)).toEqual(firstAck);
+  });
 
   it("accepts browser capture without reported echo cancellation", async () => {
     if (stream.track) stream.track.settings.echoCancellation = false;
@@ -452,6 +564,40 @@ describe("SFUVoiceAudioInput", () => {
     await start;
 
     expect(FakePeerConnection.instances).toHaveLength(1);
+  });
+
+  it("waits for forwarding teardown before restarting", async () => {
+    const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
+    const firstStart = input.start();
+    const firstPeer = await waitForPeer();
+    firstPeer.connect();
+    await firstStart;
+
+    stopForwardingGate = Promise.withResolvers<void>();
+    input.stop();
+    const restart = input.start();
+
+    await waitFor(
+      () => requests.at(-1) === "stt/stop-forwarding",
+      "Expected forwarding teardown"
+    );
+    expect(
+      requests.filter((request) => request === "tts/publish")
+    ).toHaveLength(1);
+
+    stopForwardingGate.resolve();
+    await waitFor(
+      () => FakePeerConnection.instances.length === 2,
+      "Expected restarted peer connection"
+    );
+    const secondPeer = FakePeerConnection.instances[1];
+    secondPeer.connect();
+    await restart;
+
+    const stopIndex = requests.indexOf("stt/stop-forwarding");
+    const secondPublishIndex = requests.lastIndexOf("tts/publish");
+    expect(stopIndex).toBeLessThan(secondPublishIndex);
+    input.stop();
   });
 
   it("uses and stops a supplied platform microphone", async () => {

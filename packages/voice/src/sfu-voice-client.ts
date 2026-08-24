@@ -29,6 +29,13 @@ class StaleStart extends Error {}
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.cloudflare.com:3478" }
 ];
+const PLAYBACK_SILENCE_THRESHOLD = 0.01;
+const PLAYBACK_SILENCE_MS = 200;
+type PendingPlaybackCheckpoint = {
+  text: string;
+  generation: number;
+  ready: boolean;
+};
 
 export class SFUVoiceAudioInput implements VoiceAudioInput {
   readonly handlesPlayback = true;
@@ -57,7 +64,12 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   #playbackSamples: Float32Array<ArrayBuffer> | null = null;
   #shouldStopForwarding = false;
   #disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  #stopForwarding: Promise<void> = Promise.resolve();
   #connectionLostFired = false;
+  #pendingPlaybackCheckpoints = new Map<string, PendingPlaybackCheckpoint>();
+  #playbackSilentSince: number | null = null;
+  #checkpointAckInFlight = false;
+  #checkpointAckFailed = false;
 
   constructor(options: SFUVoiceAudioInputOptions) {
     this.#endpoint = options.endpoint.replace(/\/$/, "");
@@ -77,12 +89,41 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     );
   }
 
+  handleControlMessage(message: Record<string, unknown>): boolean {
+    if (message.type === "playback_interrupt") {
+      for (const [id, checkpoint] of this.#pendingPlaybackCheckpoints) {
+        if (checkpoint.generation === this.#generation) {
+          this.#pendingPlaybackCheckpoints.delete(id);
+        }
+      }
+      return true;
+    }
+    if (message.type !== "transcript_end" || typeof message.text !== "string") {
+      return false;
+    }
+    this.#pendingPlaybackCheckpoints.set(crypto.randomUUID(), {
+      text: message.text,
+      generation: this.#generation,
+      ready: false
+    });
+    this.#playbackSilentSince = null;
+    return true;
+  }
+
   async start(): Promise<void> {
     const generation = ++this.#generation;
+    this.#checkpointAckFailed = false;
+    for (const [id, checkpoint] of this.#pendingPlaybackCheckpoints) {
+      if (!checkpoint.ready && checkpoint.generation !== generation) {
+        this.#pendingPlaybackCheckpoints.delete(id);
+      }
+    }
     this.#teardown(this.#shouldStopForwarding, false);
-    this.#shouldStopForwarding = true;
 
     try {
+      await this.#stopForwarding;
+      this.#assertCurrent(generation);
+      this.#shouldStopForwarding = true;
       await this.#post("tts/publish");
       this.#assertCurrent(generation);
 
@@ -213,7 +254,10 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   #teardown(stopForwarding: boolean, clearCallbacks: boolean): void {
     this.#shouldStopForwarding = false;
     if (stopForwarding) {
-      void this.#post("stt/stop-forwarding").catch(() => {});
+      this.#stopForwarding = this.#post("stt/stop-forwarding").then(
+        () => undefined,
+        () => undefined
+      );
     }
     if (this.#animationFrame !== null) {
       cancelAnimationFrame(this.#animationFrame);
@@ -224,6 +268,8 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     this.#playbackAnalyser = null;
     this.#playbackSamples = null;
     this.#onPlaybackAudioLevel?.(0);
+    this.#playbackSilentSince = null;
+    this.#checkpointAckInFlight = false;
     this.#clearDisconnectTimer();
     this.#peer?.close();
     this.#peer = null;
@@ -378,9 +424,9 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
         );
       }
       if (this.#playbackAnalyser && this.#playbackSamples) {
-        this.#onPlaybackAudioLevel?.(
-          this.#rms(this.#playbackAnalyser, this.#playbackSamples)
-        );
+        const rms = this.#rms(this.#playbackAnalyser, this.#playbackSamples);
+        this.#onPlaybackAudioLevel?.(rms);
+        this.#trackPlaybackCheckpoints(rms);
       }
       this.#animationFrame = requestAnimationFrame(measure);
     };
@@ -396,6 +442,52 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     source.connect(analyser);
     this.#playbackAnalyser = analyser;
     this.#playbackSamples = new Float32Array(analyser.fftSize);
+  }
+  #trackPlaybackCheckpoints(rms: number): void {
+    if (
+      this.#checkpointAckFailed ||
+      this.#pendingPlaybackCheckpoints.size === 0
+    ) {
+      return;
+    }
+    if (rms > PLAYBACK_SILENCE_THRESHOLD) {
+      this.#playbackSilentSince = null;
+      return;
+    }
+    this.#playbackSilentSince ??= performance.now();
+    if (performance.now() - this.#playbackSilentSince < PLAYBACK_SILENCE_MS) {
+      return;
+    }
+    void this.#acknowledgePlaybackCheckpoints();
+  }
+
+  async #acknowledgePlaybackCheckpoints(): Promise<void> {
+    if (
+      this.#checkpointAckInFlight ||
+      this.#pendingPlaybackCheckpoints.size === 0
+    ) {
+      return;
+    }
+    this.#checkpointAckInFlight = true;
+    try {
+      for (const checkpoint of this.#pendingPlaybackCheckpoints.values()) {
+        if (checkpoint.generation === this.#generation) checkpoint.ready = true;
+      }
+      for (const [id, checkpoint] of this.#pendingPlaybackCheckpoints) {
+        if (!checkpoint.ready) continue;
+        await this.#postJSON("playback-checkpoint/ack", {
+          id,
+          text: checkpoint.text
+        });
+        this.#pendingPlaybackCheckpoints.delete(id);
+      }
+      this.#playbackSilentSince = null;
+    } catch {
+      this.#checkpointAckFailed = true;
+      // Keep ready checkpoints for the next playback/reconnect cycle.
+    } finally {
+      this.#checkpointAckInFlight = false;
+    }
   }
 
   #rms(analyser: AnalyserNode, samples: Float32Array<ArrayBuffer>): number {
