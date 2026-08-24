@@ -196,16 +196,6 @@ export interface VoiceAgentOptions {
   persistMessages?: boolean;
   /** Max conversation messages to retain. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
-  /**
-   * Minimum words the transcript must contain before a barge-in is allowed
-   * to interrupt active playback. Suppresses single-word backchannels
-   * ("yeah", "okay") and short echo fragments from cutting off the
-   * assistant mid-sentence. Applies to every transcript-bearing trigger
-   * (`flux_speech_start`, `flux_eager_utterance`, `flux_confirmed_utterance`)
-   * -- client-side `audio_level` interrupts carry no transcript and are
-   * never gated by this option. `0` disables the gate. @default 0
-   */
-  minInterruptWords?: number;
 }
 
 interface SpeculativeTurn {
@@ -222,8 +212,8 @@ type SpeculativeCancelReason =
   | "end_call"
   | "connection_closed"
   | "transcript_mismatch";
-
 const DEFAULT_HISTORY_LIMIT = 20;
+
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
 const DEFAULT_SAMPLE_RATE = 16000;
 const STREAMING_TTS_MAX_CHARS = 48;
@@ -397,7 +387,6 @@ export function withVoice<TBase extends AgentLike>(
         return _onConnect?.(connection, ...rest);
       };
 
-      // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- overwriting lifecycle
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
         this.#startupTokens.delete(connection.id);
         this.#clientSpeechEnergy.delete(connection.id);
@@ -641,7 +630,6 @@ export function withVoice<TBase extends AgentLike>(
         connection.send(audio);
       }
     }
-
     async #flushAudio(connection: Connection): Promise<void> {
       await this.#audioTransports.get(connection.id)?.flush(connection.id);
     }
@@ -1051,7 +1039,6 @@ export function withVoice<TBase extends AgentLike>(
         this.#keepAliveDispose.delete(connectionId);
       }
     }
-
     async #handleEndCall(connection: Connection): Promise<void> {
       this.#startupTokens.delete(connection.id);
       this.#clientSpeechEnergy.delete(connection.id);
@@ -1096,21 +1083,6 @@ export function withVoice<TBase extends AgentLike>(
       trigger: string,
       transcript?: string
     ): void {
-      const minWords = opt("minInterruptWords", 0);
-      const wordCount = transcript?.trim()
-        ? transcript.trim().split(/\s+/).length
-        : 0;
-      if (minWords > 0 && wordCount < minWords) {
-        console.log("[VoiceTrace]", {
-          event: "interrupt_trigger",
-          connectionId: connection.id,
-          trigger,
-          transcript: transcript ?? null,
-          activePipeline: this.#cm.hasActivePipeline(connection.id),
-          action: "below_min_words"
-        });
-        return;
-      }
       this.#cancelSpeculativeTurn(connection.id, "speech_start");
       const activePipeline = this.#cm.hasActivePipeline(connection.id);
       const interrupted = this.#cm.abortPipeline(connection.id);

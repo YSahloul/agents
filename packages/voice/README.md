@@ -136,19 +136,6 @@ const VoiceAgent = withVoice(Agent, {
 | `beforeCallStart(connection)`      | Return `false` to reject a call.                                                                               |
 | `onMessage(connection, message)`   | Handle non-voice WebSocket messages (voice protocol is intercepted automatically).                             |
 
-### Barge-in word threshold
-
-```typescript
-const VoiceAgent = withVoice(Agent, { minInterruptWords: 3 });
-```
-
-Suppresses barge-in for transcripts under the word count -- single-word
-backchannels ("yeah", "okay") and short echo fragments no longer cut off
-the assistant mid-sentence. Applies to every transcript-bearing trigger
-(`flux_speech_start`, `flux_eager_utterance`, `flux_confirmed_utterance`).
-Client-side `audio_level` interrupts carry no transcript and are never
-gated by this option. `0` (default) disables the gate.
-
 ### Pipeline hooks
 
 | Method                                     | Description                                          |
