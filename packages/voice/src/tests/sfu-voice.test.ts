@@ -70,7 +70,7 @@ describe("withSFUVoice", () => {
     expect(await welcome).toMatchObject({ type: "welcome" });
     ws!.close();
   });
-  it("lazily intercepts only the two WebSocket and seven HTTP routes", async () => {
+  it("lazily intercepts only the two WebSocket and six HTTP routes", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => Promise.reject(new Error("SFU unavailable")))
@@ -142,21 +142,11 @@ describe("withSFUVoice", () => {
       for (const request of requests) {
         result.push((await instance.onRequest(request)).status);
       }
-      result.push(
-        (
-          await instance.onRequest(
-            post("/voice/playback-checkpoint/ack", {
-              id: "checkpoint-1",
-              text: "Played response"
-            })
-          )
-        ).status
-      );
       expect(instance.onRequestCalls).toBe(1);
       expect(instance.configCalls).toBe(1);
       return result;
     });
-    expect(statuses).toEqual([500, 400, 400, 400, 400, 200, 200]);
+    expect(statuses).toEqual([500, 400, 400, 400, 400, 200]);
   });
 
   it("persists and deletes transport state under cf_voice_sfu_state", async () => {

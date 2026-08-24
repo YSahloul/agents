@@ -56,6 +56,28 @@ type ClientSpeechEnergy = {
   peakRms: number | null;
   threshold: number | null;
 };
+type TTSOutputEvent =
+  | { type: "audio"; audio: ArrayBuffer }
+  | { type: "text"; text: string };
+
+type PlaybackTextTransport = VoiceServerAudioTransport & {
+  resetPlaybackText(connectionId: string): void;
+  markPlaybackText(connectionId: string, text: string): void;
+  getPlaybackText(connectionId: string): string;
+};
+
+function playbackTextTransport(
+  transport: VoiceServerAudioTransport | undefined
+): PlaybackTextTransport | null {
+  if (
+    typeof transport?.resetPlaybackText !== "function" ||
+    typeof transport.markPlaybackText !== "function" ||
+    typeof transport.getPlaybackText !== "function"
+  ) {
+    return null;
+  }
+  return transport as PlaybackTextTransport;
+}
 
 function readClientRms(
   message: object,
@@ -237,6 +259,7 @@ export interface VoiceAgentMixinMembers {
     | null
     | Promise<VoiceServerAudioTransport | null>;
   receiveAudio(connectionId: string, audio: ArrayBuffer): void;
+  getPlaybackText(connectionId: string): string | null;
   beforeCallStart(connection: Connection): boolean | Promise<boolean>;
   onCallStart(
     connection: Connection,
@@ -387,6 +410,7 @@ export function withVoice<TBase extends AgentLike>(
         return _onConnect?.(connection, ...rest);
       };
 
+      // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- overwriting lifecycle
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
         this.#startupTokens.delete(connection.id);
         this.#clientSpeechEnergy.delete(connection.id);
@@ -535,6 +559,13 @@ export function withVoice<TBase extends AgentLike>(
 
     receiveAudio(connectionId: string, audio: ArrayBuffer): void {
       this.#cm.bufferAudio(connectionId, audio);
+    }
+    getPlaybackText(connectionId: string): string | null {
+      return (
+        playbackTextTransport(
+          this.#audioTransports.get(connectionId)
+        )?.getPlaybackText(connectionId) ?? null
+      );
     }
 
     beforeCallStart(_connection: Connection): boolean | Promise<boolean> {
@@ -1412,6 +1443,21 @@ export function withVoice<TBase extends AgentLike>(
       firstSentenceMs: number;
       firstAudioMs: number;
     }> {
+      const markedTransport = playbackTextTransport(
+        this.#audioTransports.get(connection.id)
+      );
+      markedTransport?.resetPlaybackText(connection.id);
+      if (markedTransport) {
+        return this.#streamingTTSPipeline(
+          connection,
+          iterateTextEvents(response),
+          llmStart,
+          pipelineStart,
+          signal,
+          markedTransport
+        );
+      }
+
       if (typeof response === "string") {
         const llmMs = Date.now() - llmStart;
 
@@ -1474,7 +1520,8 @@ export function withVoice<TBase extends AgentLike>(
         tokenStream,
         llmStart,
         pipelineStart,
-        signal
+        signal,
+        null
       );
     }
 
@@ -1595,7 +1642,8 @@ export function withVoice<TBase extends AgentLike>(
       tokenStream: AsyncIterable<TextStreamEvent>,
       llmStart: number,
       pipelineStart: number,
-      signal: AbortSignal
+      signal: AbortSignal,
+      markedTransport: PlaybackTextTransport | null
     ): Promise<{
       text: string;
       llmMs: number;
@@ -1610,7 +1658,7 @@ export function withVoice<TBase extends AgentLike>(
           ? STREAMING_TTS_MAX_CHARS
           : Number.POSITIVE_INFINITY
       );
-      const ttsQueue: AsyncIterable<ArrayBuffer>[] = [];
+      const ttsQueue: AsyncIterable<TTSOutputEvent>[] = [];
       let fullText = "";
       let pendingTranscriptText = "";
       let transcriptStarted = false;
@@ -1682,12 +1730,16 @@ export function withVoice<TBase extends AgentLike>(
           if (signal.aborted) return;
 
           try {
-            for await (const chunk of ttsQueue[i]) {
+            for await (const event of ttsQueue[i]) {
               if (signal.aborted) return;
-              await this.#sendAudio(connection, chunk);
+              if (event.type === "text") {
+                markedTransport?.markPlaybackText(connection.id, event.text);
+                continue;
+              }
+              await this.#sendAudio(connection, event.audio);
               if (!firstAudioSentAt) {
                 firstAudioSentAt = Date.now();
-                trace("tts_first_audio", { bytes: chunk.byteLength });
+                trace("tts_first_audio", { bytes: event.audio.byteLength });
               }
             }
           } catch (err) {
@@ -1707,13 +1759,14 @@ export function withVoice<TBase extends AgentLike>(
 
       const makeSentenceTTS = (
         sentence: string
-      ): AsyncIterable<ArrayBuffer> => {
+      ): AsyncIterable<TTSOutputEvent> => {
         const self = this;
-        async function* generate() {
+        async function* generate(): AsyncGenerator<TTSOutputEvent> {
           const ttsStart = Date.now();
           const text = await self.beforeSynthesize(sentence, connection);
           if (!text) return;
 
+          let yieldedAudio = false;
           const hasStreamingTTS = typeof tts.synthesizeStream === "function";
           if (hasStreamingTTS) {
             for await (const chunk of tts.synthesizeStream!(text, signal)) {
@@ -1722,7 +1775,10 @@ export function withVoice<TBase extends AgentLike>(
                 text,
                 connection
               );
-              if (processed) yield processed;
+              if (processed) {
+                yieldedAudio = true;
+                yield { type: "audio", audio: processed };
+              }
             }
           } else {
             const rawAudio = await tts.synthesize(text, signal);
@@ -1731,14 +1787,20 @@ export function withVoice<TBase extends AgentLike>(
               text,
               connection
             );
-            if (processed) yield processed;
+            if (processed) {
+              yieldedAudio = true;
+              yield { type: "audio", audio: processed };
+            }
+          }
+          if (yieldedAudio && !signal.aborted) {
+            yield { type: "text", text };
           }
           const synthMs = Date.now() - ttsStart;
           cumulativeTtsMs += synthMs;
           trace("tts_sentence", { chars: text.length, synthMs, text });
         }
 
-        return eagerAsyncIterable(generate());
+        return markedTransport ? generate() : eagerAsyncIterable(generate());
       };
 
       const enqueueSentence = (sentence: string) => {

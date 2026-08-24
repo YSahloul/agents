@@ -207,7 +207,7 @@ async function setTurnMode(
 
 async function setTtsMode(
   ws: WebSocket,
-  value: "normal" | "controlled"
+  value: "normal" | "controlled" | "marked"
 ): Promise<void> {
   sendJSON(ws, { type: "_set_tts_mode", value });
   await waitForAck(ws, "_set_tts_mode");
@@ -2418,6 +2418,72 @@ describe("VoiceAgent — server audio transport", () => {
     sendJSON(ws, { type: "end_call" });
     await ended;
     expect(await getTransportEvents(ws)).toContain("stop");
+  });
+  it("marks sentence playback only after its audio and drops aborted text", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    sendJSON(ws, { type: "_set_audio_transport", value: "marked" });
+    await waitForAck(ws, "_set_audio_transport");
+    await setTtsMode(ws, "marked");
+    await startCall(ws);
+
+    sendJSON(ws, { type: "text_message", text: "marker pipeline" });
+    await waitForTransportSendCount(ws, 1);
+    const firstStateResponse = waitForType(ws, "_marker_tts_state");
+    sendJSON(ws, { type: "_get_marker_tts_state" });
+    const firstState = (await firstStateResponse) as {
+      synthesizeStreamTexts: string[];
+      synthesizeTextStreamCalls: number;
+    };
+    expect(firstState).toMatchObject({
+      synthesizeStreamTexts: ["First sentence."],
+      synthesizeTextStreamCalls: 0
+    });
+
+    sendJSON(ws, { type: "_release_model_stream" });
+    await waitForAck(ws, "_release_model_stream");
+    await waitForMicrotasks();
+    const serializedStateResponse = waitForType(ws, "_marker_tts_state");
+    sendJSON(ws, { type: "_get_marker_tts_state" });
+    await expect(serializedStateResponse).resolves.toMatchObject({
+      synthesizeStreamTexts: ["First sentence."],
+      synthesizeTextStreamCalls: 0
+    });
+
+    sendJSON(ws, { type: "_release_tts" });
+    await waitForAck(ws, "_release_tts");
+    let events = await waitForTransportEventCount(
+      ws,
+      "mark:First sentence.",
+      1
+    );
+    const firstMark = events.indexOf("mark:First sentence.");
+    expect(events.slice(0, firstMark)).toEqual([
+      expect.stringMatching(/^start:/),
+      "reset-text",
+      expect.stringMatching(/^send:/),
+      expect.stringMatching(/^send:/)
+    ]);
+
+    await waitForTransportSendCount(ws, 3);
+    sendJSON(ws, { type: "interrupt" });
+    events = await waitForTransportEventCount(ws, "interrupt", 1);
+    await waitForMicrotasks();
+    expect(events.filter((event) => event.startsWith("mark:"))).toEqual([
+      "mark:First sentence."
+    ]);
+
+    const finalStateResponse = waitForType(ws, "_marker_tts_state");
+    sendJSON(ws, { type: "_get_marker_tts_state" });
+    const finalState = (await finalStateResponse) as {
+      synthesizeStreamTexts: string[];
+      synthesizeTextStreamCalls: number;
+    };
+    expect(finalState).toMatchObject({
+      synthesizeStreamTexts: ["First sentence.", "Second sentence."],
+      synthesizeTextStreamCalls: 0
+    });
+    ws.close();
   });
 
   it("stops the transport on abrupt connection close", async () => {

@@ -79,4 +79,38 @@ describe("Think voice adapter", () => {
     );
     expect(await agent.getVoiceSqlTables()).toEqual([]);
   });
+  it("persists only marked speech before admitting the continuation", async () => {
+    const agent = await freshAgent(`voice-interrupt-${crypto.randomUUID()}`);
+    await agent.setVoiceResponseForTest("First sentence. Discarded ending.");
+    await agent.runMarkedVoiceTurnForTest("tell me a story");
+    await expect(agent.drainOnePlaybackMarkerForTest()).resolves.toBe(
+      "First sentence."
+    );
+    await agent.interruptMarkedVoiceTurnForTest();
+
+    let messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(textOf(messages[1])).toBe("First sentence.");
+
+    await agent.setVoiceResponseForTest("Continuation answer.");
+    await agent.runMarkedVoiceTurnForTest("continue");
+    messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(textOf(messages[1])).toBe("First sentence.");
+    const nextPrompt = await agent.getLastModelPromptForTest();
+    expect(nextPrompt).toContain("First sentence.");
+    expect(nextPrompt).not.toContain("Discarded ending.");
+  });
+
+  it("deletes an interrupted text-only assistant with no playback mark", async () => {
+    const agent = await freshAgent(`voice-zero-marker-${crypto.randomUUID()}`);
+    await agent.setVoiceResponseForTest("Nothing reached playback.");
+    await agent.runMarkedVoiceTurnForTest("start");
+    await agent.interruptMarkedVoiceTurnForTest();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual(["user"]);
+  });
 });

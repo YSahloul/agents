@@ -314,6 +314,9 @@ export interface VoiceServerAudioTransport {
   flush(connectionId: string): void | Promise<void>;
   interrupt(connectionId: string): void | Promise<void>;
   stop(connectionId: string): void | Promise<void>;
+  resetPlaybackText?(connectionId: string): void;
+  markPlaybackText?(connectionId: string, text: string): void;
+  getPlaybackText?(connectionId: string): string;
   /** Suspend the transport, keeping media alive for a brief grace window. */
   suspend?(connectionId: string): void;
   /** Re-attach after suspension. */

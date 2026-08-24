@@ -20,6 +20,7 @@ import type {
   VoiceTurnContext,
   TTSProvider
 } from "@cloudflare/voice";
+import type { UIMessage } from "ai";
 export type VoiceChannelOptions = Omit<
   ChannelDefinition,
   "kind" | "ingress" | "capabilities"
@@ -243,6 +244,8 @@ export function createVoiceThink<
   class VoiceThink extends VoiceBase {
     #activeVoiceStream?: VoiceChannelTextStream;
     #voiceConnections = new Set<string>();
+    #activeVoiceTurn: Promise<void> | null = null;
+    #voiceInterruption: Promise<void> = Promise.resolve();
 
     override async beforeCallStart(
       connection: Parameters<VoiceAgentMixinMembers["beforeCallStart"]>[0]
@@ -262,6 +265,7 @@ export function createVoiceThink<
     override async onCallEnd(
       connection: Parameters<VoiceAgentMixinMembers["onCallEnd"]>[0]
     ): Promise<void> {
+      this.#voiceInterruption = Promise.resolve();
       this.#voiceConnections.delete(connection.id);
       await super.onCallEnd(connection);
     }
@@ -278,11 +282,30 @@ export function createVoiceThink<
     ): Record<string, unknown> | undefined {
       return undefined;
     }
+    override async onInterrupt(
+      connection: Parameters<VoiceAgentMixinMembers["onInterrupt"]>[0]
+    ): Promise<void> {
+      const markedText = this.getPlaybackText(connection.id);
+      if (markedText === null) {
+        await super.onInterrupt(connection);
+        return;
+      }
+
+      const activeVoiceTurn = this.#activeVoiceTurn;
+      const interruption = this.#voiceInterruption.then(async () => {
+        await activeVoiceTurn;
+        await this.#finalizeInterruptedAssistant(markedText);
+      });
+      this.#voiceInterruption = interruption;
+      await interruption;
+      await super.onInterrupt(connection);
+    }
 
     async onTurn(
       transcript: string,
       context: VoiceTurnContext
     ): Promise<AsyncIterable<unknown>> {
+      await this.#voiceInterruption;
       const definition = voiceDefinition(
         this.getChannelDefinition(channel),
         channel
@@ -295,7 +318,7 @@ export function createVoiceThink<
       this.#activeVoiceStream = stream;
       const restore = this.bindActiveDeliverySurface(stream);
       const metadata = this.getVoiceTurnMetadata(transcript, context);
-      void this.runTurn({
+      const activeVoiceTurn = this.runTurn({
         input: transcript,
         channel,
         mode: "stream",
@@ -308,7 +331,40 @@ export function createVoiceThink<
           restore();
           this.#activeVoiceStream = previous;
         });
+      this.#activeVoiceTurn = activeVoiceTurn;
+      void activeVoiceTurn
+        .finally(() => {
+          if (this.#activeVoiceTurn === activeVoiceTurn) {
+            this.#activeVoiceTurn = null;
+          }
+        })
+        .catch(() => undefined);
       return stream;
+    }
+    async #finalizeInterruptedAssistant(markedText: string): Promise<void> {
+      const leaf = await this.session.getLatestLeaf();
+      if (!leaf || leaf.role !== "assistant") return;
+
+      const text = markedText.trim();
+      let insertedText = false;
+      let parts = leaf.parts.flatMap((part) => {
+        if (part.type !== "text") return [part];
+        if (!text || insertedText) return [];
+        insertedText = true;
+        return [{ type: "text", text }];
+      });
+      if (!insertedText) {
+        parts = parts.filter((part) => part.type !== "step-start");
+      }
+      if (parts.length === 0) {
+        await this.session.deleteMessages([leaf.id]);
+        return;
+      }
+      await this.updateMessageInHistory({
+        ...leaf,
+        role: "assistant",
+        parts
+      } as UIMessage);
     }
 
     protected override async resolveChannelDeliverySurface(

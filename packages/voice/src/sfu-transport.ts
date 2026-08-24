@@ -11,10 +11,6 @@ import {
   resampleMonoTo48kStereo,
   type SFUConfig
 } from "./sfu-utils";
-import {
-  acknowledgeSFUPlaybackCheckpoint,
-  type SFUPlaybackCheckpointState
-} from "./sfu-playback-checkpoint";
 
 declare const WebSocketPair: {
   new (): { 0: WebSocket; 1: WebSocket };
@@ -34,7 +30,6 @@ export interface SFUVoiceState {
     callbackUrl: string;
     adapterId?: string;
   };
-  playback?: SFUPlaybackCheckpointState;
 }
 
 export interface SFUVoiceTransportConfig {
@@ -52,11 +47,13 @@ type SFUResponse = {
   requiresImmediateRenegotiation?: unknown;
   [key: string]: unknown;
 };
+type TextMarker = { type: "text"; text: string };
 type FlushMarker = {
+  type: "flush";
   resolve: () => void;
   reject: (error: Error) => void;
 };
-type QueueItem = Uint8Array | FlushMarker;
+type QueueItem = Uint8Array | TextMarker | FlushMarker;
 type SocketWaiter = {
   resolve: () => void;
   reject: (error: Error) => void;
@@ -97,6 +94,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
   #sttPeak = 0;
 
   #queue: QueueItem[] = [];
+  #playedTextSegments: string[] = [];
   #partialFrame = new Uint8Array();
   #partialInputByte: number | null = null;
   #pacingTimer: ReturnType<typeof setInterval> | null = null;
@@ -128,6 +126,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#sttFrameCount = 0;
     this.#sttPeak = 0;
     this.#partialInputByte = null;
+    this.#playedTextSegments = [];
     this.#startKeepalive();
     try {
       await this.#waitForTtsSocket(10_000);
@@ -181,18 +180,39 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#startPacing();
   }
 
+  resetPlaybackText(connectionId: string): void {
+    this.#requireActiveConnection(connectionId);
+    this.#playedTextSegments = [];
+  }
+
+  markPlaybackText(connectionId: string, text: string): void {
+    this.#requireActiveConnection(connectionId);
+    if (text.length === 0) return;
+    this.#queuePartialFrame();
+    this.#queue.push({ type: "text", text });
+    console.log("[VoiceTrace]", {
+      event: "sfu_text_mark_queued",
+      connectionId,
+      text,
+      queuedAudioMs:
+        this.#queue.filter((item) => item instanceof Uint8Array).length *
+        FRAME_INTERVAL_MS
+    });
+    this.#startPacing();
+  }
+
+  getPlaybackText(connectionId: string): string {
+    this.#requireActiveConnection(connectionId);
+    return this.#playedTextSegments.join(" ");
+  }
+
   flush(connectionId: string): Promise<void> {
     this.#requireActiveConnection(connectionId);
     this.#requireTtsSocket();
     this.#partialInputByte = null;
-    if (this.#partialFrame.byteLength > 0) {
-      const frame = new Uint8Array(FRAME_BYTES);
-      frame.set(this.#partialFrame);
-      this.#queue.push(frame);
-      this.#partialFrame = new Uint8Array();
-    }
+    this.#queuePartialFrame();
     return new Promise((resolve, reject) => {
-      this.#queue.push({ resolve, reject });
+      this.#queue.push({ type: "flush", resolve, reject });
       console.log("[VoiceTrace]", {
         event: "sfu_flush_queued",
         connectionId,
@@ -209,6 +229,9 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     const droppedAudioMs =
       this.#queue.filter((item) => item instanceof Uint8Array).length *
       FRAME_INTERVAL_MS;
+    const droppedTextMarks = this.#queue.filter(
+      (item) => !(item instanceof Uint8Array) && item.type === "text"
+    ).length;
     const socket = this.#ttsSocket;
     this.#clearPacing();
     this.#rejectQueue(new Error("SFU output interrupted"));
@@ -226,13 +249,15 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     console.log("[VoiceTrace]", {
       event: "sfu_interrupt",
       connectionId,
-      droppedAudioMs
+      droppedAudioMs,
+      droppedTextMarks
     });
   }
 
   async stop(connectionId: string): Promise<void> {
     this.#clearSuspendTimer();
     if (this.#connectionId !== connectionId) return;
+    this.#playedTextSegments = [];
 
     this.#connectionId = null;
     this.#onAudio = null;
@@ -289,6 +314,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#rejectQueue(new Error("SFU voice transport stopped"));
     this.#partialFrame = new Uint8Array();
     this.#partialInputByte = null;
+    this.#playedTextSegments = [];
     this.#rejectSocketWaiters(new Error("SFU voice transport stopped"));
 
     const adapterIds: string[] = [];
@@ -296,7 +322,7 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
       for (const adapterId of [state?.tts?.adapterId, state?.stt?.adapterId]) {
         if (adapterId) adapterIds.push(adapterId);
       }
-      return state?.playback ? { playback: state.playback } : null;
+      return null;
     });
     await Promise.all(
       adapterIds.map((adapterId) => this.#closeAdapter(adapterId))
@@ -381,11 +407,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
         this.#stopSttForwarding()
       );
     }
-    if (path.endsWith(this.#route("playback-checkpoint/ack"))) {
-      return this.#respond("Playback checkpoint acknowledgement", () =>
-        this.#acknowledgePlaybackCheckpoint(request)
-      );
-    }
     return null;
   }
 
@@ -409,7 +430,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
       previousAdapterId = state?.tts?.adapterId;
       const next: SFUVoiceState = {};
       if (state?.stt) next.stt = state.stt;
-      if (state?.playback) next.playback = state.playback;
       return Object.keys(next).length > 0 ? next : null;
     });
     if (previousAdapterId) {
@@ -637,29 +657,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     await this.#closeAdapter(adapterId);
     return new Response("Forwarding stopped");
   }
-  async #acknowledgePlaybackCheckpoint(request: Request): Promise<Response> {
-    const body: unknown = await request.json();
-    if (
-      typeof body !== "object" ||
-      body === null ||
-      !("id" in body) ||
-      typeof body.id !== "string" ||
-      !("text" in body) ||
-      typeof body.text !== "string"
-    ) {
-      return new Response("Invalid playback checkpoint", { status: 400 });
-    }
-    const id = body.id;
-    const text = body.text;
-    await this.#updateState((state) => ({
-      ...(state ?? {}),
-      playback: acknowledgeSFUPlaybackCheckpoint({
-        id,
-        text
-      })
-    }));
-    return new Response("Playback checkpoint acknowledged");
-  }
 
   #handleTtsSubscribe(): Response {
     console.log("[VoiceTrace]", {
@@ -753,6 +750,10 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
       }
       if (item instanceof Uint8Array) {
         socket.send(encodePayloadToProtobuf(item));
+        this.#commitQueuedTextMarkers();
+      } else if (item.type === "text") {
+        this.#commitTextMarker(item);
+        this.#commitQueuedTextMarkers();
       } else {
         socket.send(encodePayloadToProtobuf(new Uint8Array()));
         item.resolve();
@@ -768,6 +769,39 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     }, FRAME_INTERVAL_MS);
   }
 
+  #commitQueuedTextMarkers(): void {
+    while (true) {
+      const item = this.#queue[0];
+      if (
+        item instanceof Uint8Array ||
+        item === undefined ||
+        item.type !== "text"
+      ) {
+        return;
+      }
+      this.#queue.shift();
+      this.#commitTextMarker(item);
+    }
+  }
+
+  #commitTextMarker(marker: TextMarker): void {
+    this.#playedTextSegments.push(marker.text);
+    console.log("[VoiceTrace]", {
+      event: "sfu_text_mark_committed",
+      connectionId: this.#connectionId,
+      text: marker.text,
+      committedText: this.#playedTextSegments.join(" ")
+    });
+  }
+
+  #queuePartialFrame(): void {
+    if (this.#partialFrame.byteLength === 0) return;
+    const frame = new Uint8Array(FRAME_BYTES);
+    frame.set(this.#partialFrame);
+    this.#queue.push(frame);
+    this.#partialFrame = new Uint8Array();
+  }
+
   #clearPacing(): void {
     if (!this.#pacingTimer) return;
     clearInterval(this.#pacingTimer);
@@ -777,7 +811,9 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
   #rejectQueue(error: Error): void {
     const queue = this.#queue.splice(0);
     for (const item of queue) {
-      if (!(item instanceof Uint8Array)) item.reject(error);
+      if (!(item instanceof Uint8Array) && item.type === "flush") {
+        item.reject(error);
+      }
     }
   }
 
