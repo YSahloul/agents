@@ -130,6 +130,7 @@
   ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
+    "prepare": "pnpm --filter @cloudflare/voice build && pnpm build",
     "test": "npm run test:workers && npm run test:react",
     "test:react": "vitest --run -c src/react-tests/vitest.config.ts",
     "test:workers": "vitest --run -c src/tests/vitest.config.ts",
