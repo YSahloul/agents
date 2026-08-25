@@ -27,6 +27,7 @@
   ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
+    "prepare": "pnpm build",
     "test": "vitest run"
   },
   "keywords": [
