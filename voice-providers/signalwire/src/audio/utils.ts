@@ -102,9 +102,12 @@ export function mulawBase64ToPcm16(payload: string): Int16Array {
   return resamplePCM(decodeMulaw(mulaw), SIGNALWIRE_RATE, AGENT_RATE);
 }
 
-/** Encode 16kHz agent PCM to a base64 mulaw 8kHz payload for SignalWire. */
-export function pcm16ToMulawBase64(pcm: Int16Array): string {
-  const pcm8k = resamplePCM(pcm, AGENT_RATE, SIGNALWIRE_RATE);
+/** Encode agent PCM to a base64 mulaw 8kHz payload for SignalWire. */
+export function pcm16ToMulawBase64(
+  pcm: Int16Array,
+  sourceRate = AGENT_RATE
+): string {
+  const pcm8k = resamplePCM(pcm, sourceRate, SIGNALWIRE_RATE);
   const mulaw = new Uint8Array(pcm8k.length);
   for (let i = 0; i < pcm8k.length; i++) {
     mulaw[i] = encodeMulaw(pcm8k[i]);

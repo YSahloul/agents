@@ -9,10 +9,11 @@ Phone call → Twilio → Media Streams WebSocket → TwilioAdapter → VoiceAge
                                                                     ↓
                                                               STT → LLM → TTS
                                                                     ↓
-Phone speaker ← Twilio ← mulaw 8kHz audio ← TwilioAdapter ← VoiceAgent
+Phone speaker ← Twilio ← mulaw 8kHz audio ← TwilioAdapter ← negotiated TTS audio
 ```
 
-The adapter bridges Twilio's bidirectional Media Streams protocol (mulaw 8kHz, base64 JSON) to VoiceAgent's binary PCM protocol (16kHz, 16-bit LE). Audio resampling and encoding conversion happen automatically.
+The adapter converts Twilio's μ-law/8 kHz carrier stream to the VoiceAgent
+protocol and negotiates outbound audio from the configured TTS provider.
 
 ## Install
 
@@ -83,9 +84,19 @@ TwilioAdapter.handleRequest(request, env, "MyAgent", {
 
 By default, each phone call creates a new VoiceAgent instance (using the Twilio Call SID as the instance name). Set `instanceName` to route multiple calls to the same agent instance.
 
-## Limitations
+## TTS output format
 
-- **TTS output format**: VoiceAgent's default TTS (Workers AI Deepgram Aura) outputs MP3. Twilio expects mulaw 8kHz. The adapter currently handles inbound audio conversion (mulaw → PCM) but outbound audio conversion (MP3 → mulaw) requires an MP3 decoder. For production use, configure a TTS provider that outputs mulaw or PCM directly, or use the `beforeSynthesize`/`afterSynthesize` hooks to handle format conversion.
+VoiceAgent announces the TTS provider's output contract before sending audio.
+The adapter:
+
+- resamples declared PCM16 from any positive sample rate to 8 kHz and encodes it
+  as μ-law;
+- forwards declared μ-law/8 kHz bytes unchanged;
+- rejects MP3, Opus, WAV, unknown formats, and μ-law at rates other than 8 kHz.
+
+Configure the format on the TTS provider. No adapter audio option is required.
+For example, direct ElevenLabs phone audio uses `outputFormat: "pcm_16000"`;
+`WorkersAIGrokTTS` works with its declared PCM16/24 kHz default.
 
 ## Same agent, every channel
 

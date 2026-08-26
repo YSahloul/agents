@@ -93,12 +93,28 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
   #voiceId: string;
   #modelId: string;
   #outputFormat: string;
+  readonly audioFormat?: "pcm16" | "mulaw" | "mp3" | "opus";
+  readonly sampleRate?: number;
 
   constructor(options: ElevenLabsTTSOptions) {
     this.#apiKey = options.apiKey;
     this.#voiceId = options.voiceId ?? DEFAULT_VOICE_ID;
     this.#modelId = options.modelId ?? DEFAULT_MODEL_ID;
     this.#outputFormat = options.outputFormat ?? DEFAULT_OUTPUT_FORMAT;
+
+    const pcmMatch = /^pcm_(\d+)$/.exec(this.#outputFormat);
+    const pcmSampleRate = pcmMatch ? Number(pcmMatch[1]) : 0;
+    if (pcmSampleRate > 0) {
+      this.audioFormat = "pcm16";
+      this.sampleRate = pcmSampleRate;
+    } else if (this.#outputFormat === "ulaw_8000") {
+      this.audioFormat = "mulaw";
+      this.sampleRate = 8000;
+    } else if (this.#outputFormat.startsWith("mp3_")) {
+      this.audioFormat = "mp3";
+    } else if (this.#outputFormat.startsWith("opus_")) {
+      this.audioFormat = "opus";
+    }
   }
 
   /**

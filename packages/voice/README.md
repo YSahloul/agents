@@ -350,8 +350,20 @@ batch and streaming methods and creates isolated codec state per synthesis.
 | `@cloudflare/voice-assemblyai` | Continuous STT (AssemblyAI Universal 3.5 Pro Realtime) |
 | `@cloudflare/voice-deepgram`   | Continuous STT (Deepgram Nova)                         |
 | `@cloudflare/voice-elevenlabs` | Continuous STT and TTS (ElevenLabs)                    |
+| `@cloudflare/voice-plivo`      | Telephony adapter (Plivo Audio Streaming)              |
+| `@cloudflare/voice-signalwire` | Telephony adapter (SignalWire cXML Stream)             |
 | `@cloudflare/voice-telnyx`     | Continuous STT, TTS, and phone transport (Telnyx)      |
 | `@cloudflare/voice-twilio`     | Telephony adapter (Twilio Media Streams)               |
+
+### Phone adapter audio
+
+SignalWire, Plivo, and Twilio consume the TTS provider's declared
+`audioFormat` and `sampleRate`. They resample PCM16 from any positive rate,
+forward μ-law/8 kHz unchanged, and reject encoded or unsupported formats. Set
+the format on the provider rather than duplicating it in adapter options.
+
+Direct ElevenLabs phone audio can use `outputFormat: "pcm_16000"` while keeping
+any `voiceId`. `WorkersAIGrokTTS` works with its default PCM16/24 kHz output.
 
 ## Related
 

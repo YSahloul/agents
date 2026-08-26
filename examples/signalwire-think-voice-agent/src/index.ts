@@ -13,6 +13,9 @@ import { z } from "zod";
  * @cf/deepgram/aura-2-en directly with encoding + container params.
  */
 class SignalWirePCMTTS implements TTSProvider {
+  readonly audioFormat = "pcm16" as const;
+  readonly sampleRate = 16000;
+
   constructor(private ai: Ai) {}
 
   async synthesize(

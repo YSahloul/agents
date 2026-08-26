@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { ElevenLabsSTT } from "../src/index";
+import { ElevenLabsSTT, ElevenLabsTTS } from "../src/index";
 
 class MockWebSocket extends EventTarget {
   accept = vi.fn();
@@ -20,6 +20,21 @@ function connectWith(ws = new MockWebSocket()) {
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+it.each([
+  [undefined, "mp3", undefined],
+  ["pcm_16000", "pcm16", 16000],
+  ["ulaw_8000", "mulaw", 8000],
+  ["custom", undefined, undefined]
+] as const)(
+  "declares the %s TTS output format",
+  (outputFormat, audioFormat, sampleRate) => {
+    const provider = new ElevenLabsTTS({ apiKey: "test-key", outputFormat });
+
+    expect(provider.audioFormat).toBe(audioFormat);
+    expect(provider.sampleRate).toBe(sampleRate);
+  }
+);
 
 it("rejects readiness when closed while the connection is pending", async () => {
   vi.stubGlobal(

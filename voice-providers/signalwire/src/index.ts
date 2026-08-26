@@ -12,7 +12,11 @@
  * Use codec="PCMU@8000h" in the SignalWire cXML `<Stream>`.
  */
 
-import { mulawBase64ToPcm16, pcm16ToMulawBase64 } from "./audio/utils.js";
+import {
+  arrayBufferToBase64,
+  mulawBase64ToPcm16,
+  pcm16ToMulawBase64
+} from "./audio/utils.js";
 import type {
   SignalWireDtmfMessage,
   SignalWireMediaMessage,
@@ -67,6 +71,19 @@ export class SignalWireAdapter {
 
     let streamSid: string | null = null;
     let agentSocket: WebSocket | null = null;
+    let agentAudio:
+      | { format: "pcm16"; sampleRate: number }
+      | { format: "mulaw"; sampleRate: 8000 }
+      | null = { format: "pcm16", sampleRate: 16000 };
+
+    const rejectAgentAudio = (format: unknown, sampleRate: unknown) => {
+      agentAudio = null;
+      console.error(
+        `Unsupported agent audio config: ${String(format)}/${String(sampleRate)}`
+      );
+      agentSocket?.close(1003, "Unsupported agent audio format");
+      serverSocket.close(1003, "Unsupported agent audio format");
+    };
 
     const sendClearAudio = () => {
       if (serverSocket.readyState === WebSocket.OPEN) {
@@ -127,6 +144,26 @@ export class SignalWireAdapter {
           try {
             const msg = JSON.parse(event.data) as Record<string, unknown>;
 
+            if (msg.type === "audio_config") {
+              const format = msg.format;
+              const sampleRate =
+                msg.sampleRate ??
+                (format === "pcm16" ? 16000 : format === "mulaw" ? 8000 : 0);
+              if (
+                format === "pcm16" &&
+                typeof sampleRate === "number" &&
+                Number.isFinite(sampleRate) &&
+                sampleRate > 0
+              ) {
+                agentAudio = { format, sampleRate };
+              } else if (format === "mulaw" && sampleRate === 8000) {
+                agentAudio = { format, sampleRate };
+              } else {
+                rejectAgentAudio(format, sampleRate);
+              }
+              return;
+            }
+
             if (msg.type === "playback_interrupt") {
               sendClearAudio();
               return;
@@ -158,8 +195,14 @@ export class SignalWireAdapter {
                 : null;
           if (!audio) return;
 
-          if (serverSocket.readyState === WebSocket.OPEN) {
-            const payload = pcm16ToMulawBase64(new Int16Array(audio));
+          if (agentAudio && serverSocket.readyState === WebSocket.OPEN) {
+            const payload =
+              agentAudio.format === "mulaw"
+                ? arrayBufferToBase64(audio)
+                : pcm16ToMulawBase64(
+                    new Int16Array(audio),
+                    agentAudio.sampleRate
+                  );
             serverSocket.send(
               JSON.stringify({
                 event: "media",

@@ -40,7 +40,7 @@ export class MyAgent extends VoiceAgent<Env> {
 
 ## Text to speech
 
-Override `synthesize()` on your voice agent:
+Set `tts` on the voice agent:
 
 ```typescript
 import { Agent } from "agents";
@@ -50,20 +50,9 @@ import { ElevenLabsTTS } from "@cloudflare/voice-elevenlabs";
 const VoiceAgent = withVoice(Agent);
 
 export class MyAgent extends VoiceAgent<Env> {
-  #tts: ElevenLabsTTS | null = null;
-
-  #getTTS() {
-    if (!this.#tts) {
-      this.#tts = new ElevenLabsTTS({
-        apiKey: this.env.ELEVENLABS_API_KEY
-      });
-    }
-    return this.#tts;
-  }
-
-  async synthesize(text: string) {
-    return this.#getTTS().synthesize(text);
-  }
+  tts = new ElevenLabsTTS({
+    apiKey: this.env.ELEVENLABS_API_KEY
+  });
 
   async onTurn(transcript: string, context: VoiceTurnContext) {
     // your LLM logic
@@ -96,6 +85,25 @@ export class MyAgent extends VoiceAgent<Env> {
 | `voiceId`      | `"JBFqnCBsd6RMkjVDRZzb"` (George) | Voice ID. Browse at [elevenlabs.io/app/voice-library](https://elevenlabs.io/app/voice-library) |
 | `modelId`      | `"eleven_flash_v2_5"`             | Model ID. `eleven_flash_v2_5` has the lowest latency.                                          |
 | `outputFormat` | `"mp3_44100_128"`                 | Audio output format.                                                                           |
+
+### Phone adapters
+
+SignalWire, Plivo, and Twilio require raw telephony-compatible audio. Select
+PCM16 while keeping any library, generated, or cloned `voiceId`:
+
+```typescript
+tts = new ElevenLabsTTS({
+  apiKey: this.env.ELEVENLABS_API_KEY,
+  voiceId: "your-cloned-voice-id",
+  outputFormat: "pcm_16000"
+});
+```
+
+`pcm_<rate>` declares PCM16 at that rate and is resampled by the adapter.
+`ulaw_8000` declares μ-law/8 kHz and passes through unchanged. MP3 and Opus are
+declared accurately but phone adapters reject them because they are encoded.
+Wrap encoded output with `convertTTSProvider` and `mp3ToPcm16`, or request raw
+PCM directly.
 
 ## Without the key
 

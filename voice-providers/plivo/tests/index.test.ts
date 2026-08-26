@@ -15,6 +15,8 @@ class FakeWebSocket {
   readyState = 1; // OPEN
   sent: unknown[] = [];
   closed = false;
+  closeCode?: number;
+  closeReason?: string;
   private handlers = new Map<string, Handler[]>();
 
   accept() {}
@@ -23,8 +25,10 @@ class FakeWebSocket {
     this.sent.push(data);
   }
 
-  close() {
+  close(code?: number, reason?: string) {
     this.closed = true;
+    this.closeCode = code;
+    this.closeReason = reason;
     this.readyState = 3; // CLOSED
   }
 
@@ -346,6 +350,78 @@ describe("outbound audio path (PCM 16kHz → mulaw 8kHz playAudio)", () => {
     }
   });
 
+  it.each([
+    [16000, 320, 160],
+    [24000, 480, 160]
+  ])(
+    "converts declared PCM16/%i audio to 8 kHz",
+    async (sampleRate, inputBytes, outputBytes) => {
+      const harness = createHarness();
+      await startCall(harness);
+      harness.agentSocket.emit("message", {
+        data: JSON.stringify({
+          type: "audio_config",
+          format: "pcm16",
+          sampleRate
+        })
+      });
+      harness.agentSocket.emit("message", {
+        data: new Int16Array(inputBytes / 2).buffer
+      });
+
+      const playAudio = harness.serverSocket.jsonSent.find(
+        (message) => message.event === "playAudio"
+      );
+      const media = playAudio?.media as { payload: string };
+      expect(new Uint8Array(base64ToArrayBuffer(media.payload))).toHaveLength(
+        outputBytes / 2
+      );
+    }
+  );
+
+  it("forwards declared mulaw/8 kHz bytes unchanged", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    const mulaw = new Uint8Array([0, 1, 127, 255]);
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "audio_config",
+        format: "mulaw",
+        sampleRate: 8000
+      })
+    });
+    harness.agentSocket.emit("message", { data: mulaw.buffer });
+
+    const playAudio = harness.serverSocket.jsonSent.find(
+      (message) => message.event === "playAudio"
+    );
+    const media = playAudio?.media as { payload: string };
+    expect(new Uint8Array(base64ToArrayBuffer(media.payload))).toEqual(mulaw);
+  });
+
+  it.each([
+    ["mp3", undefined],
+    ["mulaw", 16000]
+  ])("rejects unsupported %s/%s audio", async (format, sampleRate) => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "audio_config", format, sampleRate })
+    });
+    harness.agentSocket.emit("message", { data: new ArrayBuffer(320) });
+
+    expect(
+      harness.serverSocket.jsonSent.some(
+        (message) => message.event === "playAudio"
+      )
+    ).toBe(false);
+    expect(harness.agentSocket.closeCode).toBe(1003);
+    expect(harness.serverSocket.closeCode).toBe(1003);
+    expect(harness.serverSocket.closeReason).toBe(
+      "Unsupported agent audio format"
+    );
+  });
+
   it("ignores agent audio that arrives before start", () => {
     const harness = createHarness();
     // Emit on a socket that was never connected — nothing should reach Plivo.
@@ -516,4 +592,29 @@ describe("barge-in", () => {
 
     expect(clearAudios(harness)).toHaveLength(1);
   });
+
+  it.each([
+    ["pcm16", 16000, 32000],
+    ["pcm16", 24000, 48000],
+    ["mulaw", 8000, 8000]
+  ])(
+    "keeps barge-in armed equally for %s/%i",
+    async (format, sampleRate, byteLength) => {
+      const harness = createHarness();
+      await startCall(harness);
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      harness.agentSocket.emit("message", {
+        data: JSON.stringify({ type: "audio_config", format, sampleRate })
+      });
+      harness.agentSocket.emit("message", {
+        data: new ArrayBuffer(byteLength)
+      });
+
+      vi.setSystemTime(500);
+      for (let i = 0; i < 3; i++) sendMedia(harness, loud);
+
+      expect(clearAudios(harness)).toHaveLength(1);
+    }
+  );
 });

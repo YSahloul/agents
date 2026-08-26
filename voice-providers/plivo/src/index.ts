@@ -33,6 +33,7 @@
  */
 
 import {
+  arrayBufferToBase64,
   meanSquaredEnergy,
   mulawBase64ToPcm16,
   pcm16ToMulawBase64
@@ -64,7 +65,6 @@ const SPEECH_DEBOUNCE_FRAMES = 3;
 // Keep a small allowance after estimated playback ends for network and Plivo
 // queue latency before considering the agent silent.
 const PLAYBACK_GRACE_MS = 1000;
-const AGENT_PCM_BYTES_PER_SECOND = 16_000 * 2;
 
 /**
  * Bridges Plivo audio streaming to a VoiceAgent Durable Object.
@@ -91,6 +91,20 @@ export class PlivoAdapter {
 
     let streamId: string | null = null;
     let agentSocket: WebSocket | null = null;
+    let agentAudio:
+      | { format: "pcm16"; sampleRate: number }
+      | { format: "mulaw"; sampleRate: 8000 }
+      | null = { format: "pcm16", sampleRate: 16000 };
+    let agentAudioBytesPerSecond = 16000 * 2;
+
+    const rejectAgentAudio = (format: unknown, sampleRate: unknown) => {
+      agentAudio = null;
+      console.error(
+        `Unsupported agent audio config: ${String(format)}/${String(sampleRate)}`
+      );
+      agentSocket?.close(1003, "Unsupported agent audio format");
+      serverSocket.close(1003, "Unsupported agent audio format");
+    };
 
     // audioGated suppresses stale agent audio after local speech detection.
     // The gate remains raised until the agent confirms that it interrupted the
@@ -150,6 +164,28 @@ export class PlivoAdapter {
           try {
             const msg = JSON.parse(event.data) as Record<string, unknown>;
 
+            if (msg.type === "audio_config") {
+              const format = msg.format;
+              const sampleRate =
+                msg.sampleRate ??
+                (format === "pcm16" ? 16000 : format === "mulaw" ? 8000 : 0);
+              if (
+                format === "pcm16" &&
+                typeof sampleRate === "number" &&
+                Number.isFinite(sampleRate) &&
+                sampleRate > 0
+              ) {
+                agentAudio = { format, sampleRate };
+                agentAudioBytesPerSecond = sampleRate * 2;
+              } else if (format === "mulaw" && sampleRate === 8000) {
+                agentAudio = { format, sampleRate };
+                agentAudioBytesPerSecond = sampleRate;
+              } else {
+                rejectAgentAudio(format, sampleRate);
+              }
+              return;
+            }
+
             if (msg.type === "playback_interrupt") {
               // The agent's transcriber can detect speech that the local
               // energy heuristic misses. Clear Plivo unless the local path
@@ -195,10 +231,10 @@ export class PlivoAdapter {
             return;
           }
 
-          if (serverSocket.readyState === WebSocket.OPEN) {
+          if (agentAudio && serverSocket.readyState === WebSocket.OPEN) {
             const now = Date.now();
             const durationMs =
-              (event.data.byteLength / AGENT_PCM_BYTES_PER_SECOND) * 1000;
+              (event.data.byteLength / agentAudioBytesPerSecond) * 1000;
             estimatedPlaybackEndAt =
               Math.max(now, estimatedPlaybackEndAt) + durationMs;
             serverSocket.send(
@@ -207,7 +243,13 @@ export class PlivoAdapter {
                 media: {
                   contentType: "audio/x-mulaw",
                   sampleRate: 8000,
-                  payload: pcm16ToMulawBase64(new Int16Array(event.data))
+                  payload:
+                    agentAudio.format === "mulaw"
+                      ? arrayBufferToBase64(event.data)
+                      : pcm16ToMulawBase64(
+                          new Int16Array(event.data),
+                          agentAudio.sampleRate
+                        )
                 }
               })
             );

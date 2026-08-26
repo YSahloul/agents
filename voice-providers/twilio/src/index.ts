@@ -126,6 +126,13 @@ function int16ToArrayBuffer(samples: Int16Array): ArrayBuffer {
   return buffer;
 }
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 // --- Twilio protocol types ---
 
 interface TwilioStartMessage {
@@ -212,6 +219,19 @@ export class TwilioAdapter {
     let streamSid: string | null = null;
     let agentSocket: WebSocket | null = null;
     let callSid: string | null = null;
+    let agentAudio:
+      | { format: "pcm16"; sampleRate: number }
+      | { format: "mulaw"; sampleRate: 8000 }
+      | null = { format: "pcm16", sampleRate: 16000 };
+
+    const rejectAgentAudio = (format: unknown, sampleRate: unknown) => {
+      agentAudio = null;
+      console.error(
+        `Unsupported agent audio config: ${String(format)}/${String(sampleRate)}`
+      );
+      agentSocket?.close(1003, "Unsupported agent audio format");
+      serverSocket.close(1003, "Unsupported agent audio format");
+    };
 
     // Connect to the VoiceAgent DO
     const connectToAgent = async (instanceId: string) => {
@@ -254,7 +274,26 @@ export class TwilioAdapter {
           // JSON messages from agent — we can use Twilio marks to track them.
           // Forward as a mark so the Twilio side can correlate events.
           try {
-            const msg = JSON.parse(event.data);
+            const msg = JSON.parse(event.data) as Record<string, unknown>;
+            if (msg.type === "audio_config") {
+              const format = msg.format;
+              const sampleRate =
+                msg.sampleRate ??
+                (format === "pcm16" ? 16000 : format === "mulaw" ? 8000 : 0);
+              if (
+                format === "pcm16" &&
+                typeof sampleRate === "number" &&
+                Number.isFinite(sampleRate) &&
+                sampleRate > 0
+              ) {
+                agentAudio = { format, sampleRate };
+              } else if (format === "mulaw" && sampleRate === 8000) {
+                agentAudio = { format, sampleRate };
+              } else {
+                rejectAgentAudio(format, sampleRate);
+              }
+              return;
+            }
             if (
               serverSocket.readyState === WebSocket.OPEN &&
               (msg.type === "transcript" ||
@@ -272,37 +311,34 @@ export class TwilioAdapter {
           } catch {
             // ignore non-JSON
           }
-        } else if (event.data instanceof ArrayBuffer) {
-          // Audio from agent. This is expected to be 16kHz 16-bit mono PCM.
-          //
-          // IMPORTANT: The default Workers AI TTS returns MP3, which cannot
-          // be decoded to PCM on Workers (no AudioContext). For Twilio, the
-          // VoiceAgent MUST be configured with a TTS provider that outputs
-          // raw PCM (e.g., ElevenLabs with output_format "pcm_16000", or a
-          // custom synthesize() that returns 16kHz 16-bit PCM).
-          //
-          // Convert: 16kHz PCM → resample to 8kHz → encode mulaw → base64
-          const pcm16k = new Int16Array(event.data);
-          const pcm8k = resamplePCM(pcm16k, 16000, 8000);
-          const mulawBytes = new Uint8Array(pcm8k.length);
-          for (let i = 0; i < pcm8k.length; i++) {
-            mulawBytes[i] = encodeMulaw(pcm8k[i]);
-          }
-          let binary = "";
-          for (let i = 0; i < mulawBytes.length; i++) {
-            binary += String.fromCharCode(mulawBytes[i]);
-          }
-          const payload = btoa(binary);
-
-          if (serverSocket.readyState === WebSocket.OPEN) {
-            serverSocket.send(
-              JSON.stringify({
-                event: "media",
-                streamSid,
-                media: { payload }
-              })
+        } else if (
+          event.data instanceof ArrayBuffer &&
+          agentAudio &&
+          serverSocket.readyState === WebSocket.OPEN
+        ) {
+          let payload: string;
+          if (agentAudio.format === "mulaw") {
+            payload = arrayBufferToBase64(event.data);
+          } else {
+            const pcm8k = resamplePCM(
+              new Int16Array(event.data),
+              agentAudio.sampleRate,
+              8000
             );
+            const mulawBytes = new Uint8Array(pcm8k.length);
+            for (let i = 0; i < pcm8k.length; i++) {
+              mulawBytes[i] = encodeMulaw(pcm8k[i]);
+            }
+            payload = arrayBufferToBase64(mulawBytes.buffer as ArrayBuffer);
           }
+
+          serverSocket.send(
+            JSON.stringify({
+              event: "media",
+              streamSid,
+              media: { payload }
+            })
+          );
         }
       });
 

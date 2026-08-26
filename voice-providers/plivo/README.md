@@ -9,10 +9,11 @@ Phone call → Plivo → Audio Streaming WebSocket → PlivoAdapter → VoiceAge
                                                                       ↓
                                                                 STT → LLM → TTS
                                                                       ↓
-Phone speaker ← Plivo ← mulaw 8kHz audio ← PlivoAdapter ← VoiceAgent
+Phone speaker ← Plivo ← mulaw 8kHz audio ← PlivoAdapter ← negotiated TTS audio
 ```
 
-The adapter bridges Plivo's bidirectional audio streaming protocol to VoiceAgent's binary PCM protocol (16kHz, 16-bit LE). Audio resampling and mulaw encoding/decoding happen automatically.
+The adapter converts Plivo's μ-law/8 kHz carrier stream to the VoiceAgent
+protocol and negotiates outbound audio from the configured TTS provider.
 
 ## Install
 
@@ -100,13 +101,21 @@ By default, each phone call creates a new VoiceAgent instance (using the Plivo C
 
 ## TTS output format
 
-VoiceAgent's default TTS (`WorkersAITTS`) outputs MP3. The Plivo adapter expects raw PCM to encode as mulaw. For production use, configure a TTS provider that outputs PCM directly:
+VoiceAgent announces the TTS provider's output contract before sending audio.
+The adapter resamples declared PCM16 from any positive sample rate and forwards
+declared μ-law/8 kHz unchanged. It rejects encoded MP3, Opus, WAV, unknown
+formats, and μ-law at rates other than 8 kHz.
+
+Configure the format on the provider; the adapter needs no duplicate audio
+option. For a custom PCM provider, declare its output:
 
 ```typescript
 import { type TTSProvider } from "@cloudflare/voice";
 
 class PlivoPCMTTS implements TTSProvider {
   constructor(private ai: Ai) {}
+  readonly audioFormat = "pcm16" as const;
+  readonly sampleRate = 16000;
 
   async synthesize(
     text: string,

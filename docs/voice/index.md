@@ -598,6 +598,17 @@ export class MyAgent extends VoiceAgent<Env> {
 }
 ```
 
+For SignalWire, Plivo, or Twilio, request raw audio while retaining any
+library, generated, or cloned voice ID:
+
+```typescript
+tts = new ElevenLabsTTS({
+  apiKey: this.env.ELEVENLABS_API_KEY,
+  voiceId: "your-cloned-voice-id",
+  outputFormat: "pcm_16000"
+});
+```
+
 **Deepgram STT:**
 
 ```typescript
@@ -711,21 +722,45 @@ export class MyAgent extends VoiceAgent<Env> {
 }
 ```
 
-## Telephony (Twilio)
+## Telephony
 
-Connect phone calls to your voice agent using the Twilio adapter:
+Install `@cloudflare/voice` and the adapter for your carrier in an existing
+Workers application, including applications with Payload CMS or another web
+framework:
 
 ```sh
-npm install @cloudflare/voice-twilio
+pnpm add @cloudflare/voice @cloudflare/voice-signalwire
+# or: @cloudflare/voice-plivo
+# or: @cloudflare/voice-twilio
 ```
 
-The adapter bridges Twilio Media Streams to your VoiceAgent:
+Route the carrier WebSocket to the same voice agent used by the rest of the
+application:
 
-```
-Phone → Twilio → WebSocket → TwilioAdapter → WebSocket → VoiceAgent
+```typescript
+if (new URL(request.url).pathname === "/signalwire") {
+  return SignalWireAdapter.handleRequest(request, env, "MyAgent");
+}
 ```
 
-**Important:** `WorkersAITTS` returns MP3, which cannot be decoded to PCM in the Workers runtime. When using the Twilio adapter, use a TTS provider that outputs raw PCM (for example, ElevenLabs with `outputFormat: "pcm_16000"`).
+The adapter receives the TTS provider's declared audio format automatically.
+Do not add a second audio-format option to the carrier adapter.
+
+| Provider output       | Phone adapter behavior                            |
+| --------------------- | ------------------------------------------------- |
+| PCM16, positive rate  | Resample to 8 kHz and encode as μ-law             |
+| μ-law, 8 kHz          | Forward bytes without re-encoding                 |
+| MP3, Opus, WAV, other | Reject and close with an unsupported-format error |
+
+`WorkersAIGrokTTS` works with its default declared PCM16/24 kHz output.
+ElevenLabs works directly with `outputFormat: "pcm_16000"` or `ulaw_8000`.
+For encoded ElevenLabs output, wrap the provider with `convertTTSProvider` and
+`mp3ToPcm16` before assigning it to `tts`.
+
+Applications that pin package tarballs or `file:` dependencies must replace
+both the `@cloudflare/voice` archive and carrier-adapter archive, then reinstall
+dependencies. Registry-based applications can upgrade both packages with the
+same `pnpm add` command.
 
 ## Pipeline Metrics
 

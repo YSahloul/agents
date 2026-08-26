@@ -4,7 +4,7 @@ SignalWire bidirectional cXML Stream adapter for the Cloudflare Agents voice pip
 
 ```text
 Caller → SignalWire PCMU/8 kHz → SignalWireAdapter → PCM16/16 kHz → VoiceAgent
-Caller ← SignalWire PCMU/8 kHz ← SignalWireAdapter ← PCM16/16 kHz ← VoiceAgent
+Caller ← SignalWire PCMU/8 kHz ← SignalWireAdapter ← negotiated TTS audio ← VoiceAgent
 ```
 
 ## Usage
@@ -18,6 +18,8 @@ import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
 // consume. Call @cf/deepgram/aura-2-en directly for raw linear16 PCM.
 class SignalWirePCMTTS implements TTSProvider {
   constructor(private ai: Ai) {}
+  readonly audioFormat = "pcm16" as const;
+  readonly sampleRate = 16000;
 
   async synthesize(text: string, signal?: AbortSignal) {
     const response = (await this.ai.run(
@@ -75,13 +77,19 @@ Point the SignalWire phone number's **WHEN A CALL COMES IN** webhook at
 
 ## Audio contract
 
-The stream must use mono `PCMU@8000h`. The adapter decodes inbound audio and
-resamples 8→16 kHz PCM16 for VoiceAgent, and resamples outbound VoiceAgent
-PCM16 (16 kHz) back to 8 kHz mulaw for SignalWire. Both rates are fixed —
-there is no dynamic format negotiation.
+The carrier stream must use mono `PCMU@8000h`. Inbound audio is decoded and
+resampled to PCM16/16 kHz for VoiceAgent.
 
-Configure a TTS provider that returns raw signed 16-bit little-endian PCM at
-16 kHz, as shown above.
+For outbound audio, VoiceAgent announces the TTS provider's format and sample
+rate. The adapter:
+
+- resamples declared PCM16 from any positive sample rate to 8 kHz and encodes it
+  as μ-law;
+- forwards declared μ-law/8 kHz without decoding or re-encoding it;
+- rejects MP3, Opus, WAV, unknown formats, and μ-law at rates other than 8 kHz.
+
+No adapter audio option is required. Configure the format on the TTS provider.
+Providers without declarations retain the legacy PCM16/16 kHz behavior.
 
 ## Barge-in and echo suppression
 

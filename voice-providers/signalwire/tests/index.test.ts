@@ -16,6 +16,8 @@ class FakeWebSocket {
   readyState = 1; // OPEN
   sent: unknown[] = [];
   closed = false;
+  closeCode?: number;
+  closeReason?: string;
   private handlers = new Map<string, Handler[]>();
 
   accept() {}
@@ -24,8 +26,10 @@ class FakeWebSocket {
     this.sent.push(data);
   }
 
-  close() {
+  close(code?: number, reason?: string) {
     this.closed = true;
+    this.closeCode = code;
+    this.closeReason = reason;
     this.readyState = 3; // CLOSED
   }
 
@@ -196,6 +200,19 @@ function sendMedia(harness: Harness, samples: Int16Array, track = "inbound") {
       media: { track, payload: pcmToMulawBase64(samples) }
     })
   });
+}
+
+function mediaPayload(message: Record<string, unknown> | undefined): string {
+  if (!message || !("media" in message)) {
+    throw new Error("Expected media message");
+  }
+  const media = message.media;
+  if (!media || typeof media !== "object" || !("payload" in media)) {
+    throw new Error("Expected media payload");
+  }
+  const payload = media.payload;
+  if (typeof payload !== "string") throw new Error("Expected base64 payload");
+  return payload;
 }
 
 describe("SignalWireAdapter.handleRequest", () => {
@@ -397,11 +414,11 @@ describe("outbound audio path (PCM 16kHz → mulaw 8kHz media)", () => {
     harness.agentSocket.emit("message", { data: pcm.buffer });
 
     const media = harness.serverSocket.jsonSent.find(
-      (m) => m.event === "media"
+      (message) => message.event === "media"
     );
     expect(media).toBeDefined();
     expect(media?.streamSid).toBe("stream-1");
-    const payload = (media!.media as { payload: string }).payload;
+    const payload = mediaPayload(media);
 
     const mulawBytes = new Uint8Array(base64ToArrayBuffer(payload));
     expect(mulawBytes).toHaveLength(160); // halved by 16→8kHz resample
@@ -410,6 +427,76 @@ describe("outbound audio path (PCM 16kHz → mulaw 8kHz media)", () => {
         300
       );
     }
+  });
+
+  it.each([
+    [16000, 320, 160],
+    [24000, 480, 160]
+  ])(
+    "converts declared PCM16/%i audio to 8 kHz",
+    async (sampleRate, inputBytes, outputBytes) => {
+      const harness = createHarness();
+      await startCall(harness);
+      harness.agentSocket.emit("message", {
+        data: JSON.stringify({
+          type: "audio_config",
+          format: "pcm16",
+          sampleRate
+        })
+      });
+      harness.agentSocket.emit("message", {
+        data: new Int16Array(inputBytes / 2).buffer
+      });
+
+      const media = harness.serverSocket.jsonSent.find(
+        (message) => message.event === "media"
+      );
+      const payload = mediaPayload(media);
+      expect(new Uint8Array(base64ToArrayBuffer(payload))).toHaveLength(
+        outputBytes / 2
+      );
+    }
+  );
+
+  it("forwards declared mulaw/8 kHz bytes unchanged", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    const mulaw = new Uint8Array([0, 1, 127, 255]);
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "audio_config",
+        format: "mulaw",
+        sampleRate: 8000
+      })
+    });
+    harness.agentSocket.emit("message", { data: mulaw.buffer });
+
+    const media = harness.serverSocket.jsonSent.find(
+      (message) => message.event === "media"
+    );
+    const payload = mediaPayload(media);
+    expect(new Uint8Array(base64ToArrayBuffer(payload))).toEqual(mulaw);
+  });
+
+  it.each([
+    ["mp3", undefined],
+    ["mulaw", 16000]
+  ])("rejects unsupported %s/%s audio", async (format, sampleRate) => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "audio_config", format, sampleRate })
+    });
+    harness.agentSocket.emit("message", { data: new ArrayBuffer(320) });
+
+    expect(
+      harness.serverSocket.jsonSent.some((message) => message.event === "media")
+    ).toBe(false);
+    expect(harness.agentSocket.closeCode).toBe(1003);
+    expect(harness.serverSocket.closeCode).toBe(1003);
+    expect(harness.agentSocket.closeReason).toBe(
+      "Unsupported agent audio format"
+    );
   });
 
   it("ignores agent audio that arrives before start", () => {
