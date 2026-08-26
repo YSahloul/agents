@@ -3,7 +3,7 @@ import {
   withVoice,
   type VoiceAgentMixinMembers,
   type VoiceAgentOptions
-} from "./voice";
+} from "./voice-core";
 import { SFUVoiceTransport, type SFUVoiceState } from "./sfu-transport";
 import type { SFUConfig } from "./sfu-utils";
 import type { VoiceServerAudioTransport } from "./types";
