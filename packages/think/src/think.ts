@@ -3045,7 +3045,7 @@ export class Think<
           this._restoreClientTools();
           this._restoreBody();
           this._setupProtocolHandlers();
-          await this._initializeChannels();
+          await this._initializeChannels(props);
         }
       );
 
@@ -4124,7 +4124,7 @@ export class Think<
    * per-channel policy. A channel id that collides with a `getMessengers()` id
    * is an error.
    */
-  configureChannels(): ThinkChannels | Promise<ThinkChannels> {
+  configureChannels(_props?: Props): ThinkChannels | Promise<ThinkChannels> {
     return {};
   }
 
@@ -4431,12 +4431,12 @@ export class Think<
     };
   }
 
-  private async _initializeChannels(): Promise<void> {
+  private async _initializeChannels(props?: Props): Promise<void> {
     if (this.parentPath.length > 0) {
       return;
     }
 
-    const configured = await this.configureChannels();
+    const configured = await this.configureChannels(props);
     const messengers = this.getMessengers();
     const { channels, messengers: messengerDefs } = resolveChannels(
       configured,
