@@ -41,6 +41,7 @@ export type VoiceClientMessage =
       type: "start_call";
       preferred_format?: VoiceAudioFormat;
       resumed?: boolean;
+      playback_markers?: boolean;
     }
   | { type: "end_call" }
   | {
@@ -56,6 +57,13 @@ export type VoiceClientMessage =
   | { type: "interrupt"; source?: "audio_level" }
   | { type: "text_message"; text: string };
 
+export interface VoicePlaybackMarkerMessage {
+  type: "playback_marker";
+  playbackId: string;
+  sequence: number;
+  text: string;
+}
+
 // --- Wire protocol: Server → Client ---
 
 export type VoiceServerMessage =
@@ -67,6 +75,7 @@ export type VoiceServerMessage =
   | { type: "transcript_delta"; text: string }
   | { type: "transcript_end"; text: string }
   | { type: "transcript_interim"; text: string }
+  | VoicePlaybackMarkerMessage
   | { type: "playback_interrupt" }
   | {
       type: "metrics";

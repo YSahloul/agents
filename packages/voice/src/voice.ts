@@ -1,4 +1,5 @@
 export * from "./voice-core";
+export type { VoicePlaybackMarkerMessage } from "./types";
 export {
   withSFUVoice,
   withSFUVoiceTransport,

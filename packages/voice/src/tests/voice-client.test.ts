@@ -348,6 +348,28 @@ describe("VoiceClient playback interrupt", () => {
 
     expect(source.stopped).toBe(true);
   });
+  it("consumes playback markers without exposing custom messages", () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    const customMessages: unknown[] = [];
+    client.addEventListener("custommessage", (message) =>
+      customMessages.push(message)
+    );
+
+    client.connect();
+    transport.receive(
+      JSON.stringify({
+        type: "playback_marker",
+        playbackId: "playback-1",
+        sequence: 1,
+        text: "Hello."
+      })
+    );
+
+    expect(client.lastCustomMessage).toBeNull();
+    expect(customMessages).toEqual([]);
+  });
+
   it("forwards transcript completion to input-owned playback", () => {
     const transport = new MockTransport();
     const audioInput = new FakeAudioInput();

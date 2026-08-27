@@ -229,10 +229,12 @@ describe("SignalWireAdapter.handleRequest", () => {
     expect(response.status).not.toBeGreaterThanOrEqual(400);
   });
 
-  it("connects to the agent and sends start_call on start", async () => {
+  it("connects to the agent and opts into playback markers on start", async () => {
     const harness = createHarness();
     await startCall(harness);
-    expect(harness.agentSocket.jsonSent).toEqual([{ type: "start_call" }]);
+    expect(harness.agentSocket.jsonSent).toEqual([
+      { type: "start_call", playback_markers: true }
+    ]);
   });
 
   it("uses the SignalWire callSid as the agent instance name by default", async () => {
@@ -506,6 +508,63 @@ describe("outbound audio path (PCM 16kHz → mulaw 8kHz media)", () => {
     harness.agentSocket.emit("message", { data: new ArrayBuffer(8) });
     expect(harness.serverSocket.jsonSent).toHaveLength(0);
   });
+  it("paces buffered mulaw frames at the 8 kHz carrier rate", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "audio_config",
+        format: "mulaw",
+        sampleRate: 8000
+      })
+    });
+    vi.useFakeTimers({ now: 1000 });
+    const mediaSentAt: number[] = [];
+    const send = harness.serverSocket.send.bind(harness.serverSocket);
+    vi.spyOn(harness.serverSocket, "send").mockImplementation((data) => {
+      if (
+        typeof data === "string" &&
+        (JSON.parse(data) as Record<string, unknown>).event === "media"
+      ) {
+        mediaSentAt.push(Date.now());
+      }
+      send(data);
+    });
+
+    harness.agentSocket.emit("message", { data: new ArrayBuffer(160) });
+    harness.agentSocket.emit("message", { data: new ArrayBuffer(160) });
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "playback_marker",
+        playbackId: "paced",
+        sequence: 1,
+        text: "Paced sentence."
+      })
+    });
+
+    expect(mediaSentAt).toEqual([1000]);
+    expect(
+      harness.serverSocket.jsonSent.some(
+        (message) =>
+          message.event === "mark" &&
+          (message.mark as { name?: string } | undefined)?.name ===
+            "playback:paced:1"
+      )
+    ).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(19);
+    expect(mediaSentAt).toEqual([1000]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mediaSentAt).toEqual([1000, 1020]);
+    expect(
+      harness.serverSocket.jsonSent.some(
+        (message) =>
+          message.event === "mark" &&
+          (message.mark as { name?: string } | undefined)?.name ===
+            "playback:paced:1"
+      )
+    ).toBe(true);
+  });
 });
 
 describe("agent JSON messages → SignalWire marks", () => {
@@ -522,6 +581,160 @@ describe("agent JSON messages → SignalWire marks", () => {
       transcript
     );
   });
+  it("orders media markers and acknowledges playback lifecycle", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "audio_config",
+        format: "mulaw",
+        sampleRate: 8000
+      })
+    });
+    harness.agentSocket.emit("message", { data: new ArrayBuffer(3) });
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "playback_marker",
+        playbackId: "playback-1",
+        sequence: 1,
+        text: "First sentence."
+      })
+    });
+    harness.agentSocket.emit("message", { data: new ArrayBuffer(4) });
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "playback_marker",
+        playbackId: "playback-1",
+        sequence: 2,
+        text: "Second sentence."
+      })
+    });
+    await tick();
+
+    const outbound = harness.serverSocket.jsonSent.filter(
+      (message) =>
+        message.event === "media" ||
+        (message.event === "mark" &&
+          typeof message.mark === "object" &&
+          message.mark !== null &&
+          "name" in message.mark &&
+          typeof message.mark.name === "string" &&
+          message.mark.name.startsWith("playback:"))
+    );
+    expect(outbound.map((message) => message.event)).toEqual([
+      "media",
+      "mark",
+      "media",
+      "mark"
+    ]);
+    const playbackMarks = outbound.filter(
+      (message) =>
+        message.event === "mark" &&
+        typeof message.mark === "object" &&
+        message.mark !== null &&
+        "name" in message.mark &&
+        typeof message.mark.name === "string" &&
+        message.mark.name.startsWith("playback:")
+    );
+    const firstMarkName = (playbackMarks[0].mark as { name: string }).name;
+    const secondMarkName = (playbackMarks[1].mark as { name: string }).name;
+    expect(firstMarkName).toBe("playback:playback-1:1");
+    expect(secondMarkName).toBe("playback:playback-1:2");
+
+    const traces = logSpy.mock.calls
+      .filter((call) => call[0] === "[VoiceTrace]")
+      .map((call) => call[1])
+      .filter(
+        (value): value is Record<string, unknown> =>
+          typeof value === "object" && value !== null
+      );
+    expect(traces.filter((trace) => trace.event === "tts_sent")).toEqual([
+      expect.objectContaining({
+        event: "tts_sent",
+        playbackId: "playback-1",
+        sequence: 1,
+        text: "First sentence.",
+        frames: 1,
+        bytes: 3
+      }),
+      expect.objectContaining({
+        event: "tts_sent",
+        playbackId: "playback-1",
+        sequence: 2,
+        text: "Second sentence.",
+        frames: 1,
+        bytes: 4
+      })
+    ]);
+
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({ event: "mark", mark: { name: "unrelated" } })
+    });
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({
+        event: "mark",
+        mark: { name: firstMarkName }
+      })
+    });
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({
+        event: "mark",
+        mark: { name: secondMarkName }
+      })
+    });
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({
+        event: "mark",
+        mark: { name: secondMarkName }
+      })
+    });
+    await tick();
+
+    expect(traces.filter((trace) => trace.event === "tts_played")).toEqual([]);
+    const playedTraces = logSpy.mock.calls
+      .filter((call) => call[0] === "[VoiceTrace]")
+      .map((call) => call[1])
+      .filter(
+        (value): value is Record<string, unknown> =>
+          typeof value === "object" &&
+          value !== null &&
+          value.event === "tts_played"
+      );
+    expect(playedTraces).toEqual([
+      expect.objectContaining({ playbackId: "playback-1", sequence: 1 }),
+      expect.objectContaining({ playbackId: "playback-1", sequence: 2 })
+    ]);
+  });
+
+  it("serializes Blob audio before its playback marker", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", {
+      data: new Blob([new Uint8Array([1, 2, 3, 4])])
+    });
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "playback_marker",
+        playbackId: "blob-playback",
+        sequence: 1,
+        text: "Blob sentence."
+      })
+    });
+    await tick();
+
+    const outbound = harness.serverSocket.jsonSent.filter(
+      (message) =>
+        message.event === "media" ||
+        (message.event === "mark" &&
+          typeof message.mark === "object" &&
+          message.mark !== null &&
+          "name" in message.mark &&
+          typeof message.mark.name === "string" &&
+          message.mark.name === "playback:blob-playback:1")
+    );
+    expect(outbound.map((message) => message.event)).toEqual(["media", "mark"]);
+  });
 
   it("ignores non-JSON agent messages", async () => {
     const harness = createHarness();
@@ -531,10 +744,85 @@ describe("agent JSON messages → SignalWire marks", () => {
   });
 });
 
-describe("barge-in", () => {
+describe("carrier playback gate", () => {
   const loud = new Int16Array(160).fill(1000);
-  const clears = (h: Harness) =>
-    h.serverSocket.jsonSent.filter((m) => m.event === "clear");
+  const sendStatus = (h: Harness, status: string) => {
+    h.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "status", status })
+    });
+  };
+  const lastMarkName = (h: Harness) => {
+    const mark = h.serverSocket.jsonSent
+      .filter((message) => message.event === "mark")
+      .pop();
+    const payload = mark?.mark;
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      !("name" in payload) ||
+      typeof payload.name !== "string"
+    ) {
+      throw new Error("Expected SignalWire mark name");
+    }
+    return payload.name;
+  };
+
+  it("holds inbound audio until SignalWire confirms listening", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+
+    sendStatus(harness, "speaking");
+    sendMedia(harness, loud);
+    expect(harness.agentSocket.binarySent).toHaveLength(0);
+
+    sendStatus(harness, "listening");
+    const resumeMark = lastMarkName(harness);
+    sendMedia(harness, loud);
+    expect(harness.agentSocket.binarySent).toHaveLength(0);
+
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({
+        event: "mark",
+        streamSid: "stream-1",
+        mark: { name: resumeMark }
+      })
+    });
+    sendMedia(harness, loud);
+    expect(harness.agentSocket.binarySent).toHaveLength(1);
+  });
+
+  it("ignores unrelated, malformed, duplicate, and stale marks", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    sendStatus(harness, "speaking");
+    sendStatus(harness, "listening");
+    const resumeMark = lastMarkName(harness);
+
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({ event: "mark", mark: { name: "unrelated" } })
+    });
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({ event: "mark" })
+    });
+    sendMedia(harness, loud);
+    expect(harness.agentSocket.binarySent).toHaveLength(0);
+
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({ event: "mark", mark: { name: resumeMark } })
+    });
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({ event: "mark", mark: { name: resumeMark } })
+    });
+    sendMedia(harness, loud);
+    expect(harness.agentSocket.binarySent).toHaveLength(1);
+
+    sendStatus(harness, "speaking");
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({ event: "mark", mark: { name: resumeMark } })
+    });
+    sendMedia(harness, loud);
+    expect(harness.agentSocket.binarySent).toHaveLength(1);
+  });
 
   it("does not clear playback from raw inbound energy", async () => {
     const harness = createHarness();
@@ -545,30 +833,72 @@ describe("barge-in", () => {
 
     for (let i = 0; i < 6; i++) sendMedia(harness, loud);
 
-    expect(clears(harness)).toHaveLength(0);
+    expect(
+      harness.serverSocket.jsonSent.filter((m) => m.event === "clear")
+    ).toHaveLength(0);
   });
 
-  it("forwards inbound audio while the agent is speaking", async () => {
+  it("clears playback and reopens audio on agent interruption", async () => {
     const harness = createHarness();
     await startCall(harness);
-    harness.agentSocket.emit("message", {
-      data: new Int16Array(320).fill(5000).buffer
-    });
+    sendStatus(harness, "speaking");
     sendMedia(harness, loud);
-    sendMedia(harness, loud);
+    expect(harness.agentSocket.binarySent).toHaveLength(0);
 
-    expect(harness.agentSocket.binarySent).toHaveLength(2);
-  });
-
-  it("clears SignalWire when VoiceAgent detects an interrupt", async () => {
-    const harness = createHarness();
-    await startCall(harness);
     harness.agentSocket.emit("message", {
       data: JSON.stringify({ type: "playback_interrupt" })
     });
+    sendMedia(harness, loud);
 
-    expect(clears(harness)).toEqual([
-      { event: "clear", streamSid: "stream-1" }
-    ]);
+    expect(
+      harness.serverSocket.jsonSent.filter((m) => m.event === "clear")
+    ).toEqual([{ event: "clear", streamSid: "stream-1" }]);
+    expect(harness.agentSocket.binarySent).toHaveLength(1);
+  });
+  it("discards pending playback acknowledgements after clear", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", { data: new ArrayBuffer(4) });
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "playback_marker",
+        playbackId: "interrupted",
+        sequence: 1,
+        text: "Interrupted sentence."
+      })
+    });
+    await tick();
+    const mark = harness.serverSocket.jsonSent.find(
+      (message) =>
+        message.event === "mark" &&
+        typeof message.mark === "object" &&
+        message.mark !== null &&
+        "name" in message.mark &&
+        typeof message.mark.name === "string" &&
+        message.mark.name.startsWith("playback:")
+    );
+    const markName = (mark?.mark as { name: string } | undefined)?.name;
+    expect(markName).toBe("playback:interrupted:1");
+
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "playback_interrupt" })
+    });
+    await tick();
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({ event: "mark", mark: { name: markName } })
+    });
+    await tick();
+
+    expect(
+      logSpy.mock.calls
+        .map((call) => call[1])
+        .filter(
+          (value): value is Record<string, unknown> =>
+            typeof value === "object" &&
+            value !== null &&
+            value.event === "tts_played"
+        )
+    ).toEqual([]);
   });
 });

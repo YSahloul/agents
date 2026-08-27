@@ -124,6 +124,55 @@ const VoiceAgent = withVoice(Agent, {
 | `transcriber` | `Transcriber` | Yes      | Continuous per-call STT provider |
 | `tts`         | `TTSProvider` | Yes      | Text-to-speech provider          |
 
+### Per-agent providers and models with Think
+
+`createVoiceThink()` carries typed Agent props into `configureChannels(props)`.
+Use them to select providers or models for each named voice Agent:
+
+```typescript
+import { getAgentByName } from "agents";
+import { createVoiceThink, voiceChannel } from "@cloudflare/think/voice";
+import {
+  WorkersAIFluxSTT,
+  WorkersAINova3STT,
+  WorkersAITTS
+} from "@cloudflare/voice";
+
+type VoiceProps = {
+  stt: "flux" | "nova-3";
+  ttsModel: string;
+};
+
+const VoiceThink = createVoiceThink<Env, unknown, VoiceProps>();
+
+export class MyAgent extends VoiceThink {
+  configureChannels(props?: VoiceProps) {
+    if (!props) throw new Error("Voice props are required");
+
+    return {
+      voice: voiceChannel({
+        transcriber:
+          props.stt === "flux"
+            ? new WorkersAIFluxSTT(this.env.AI)
+            : new WorkersAINova3STT(this.env.AI),
+        tts: new WorkersAITTS(this.env.AI, { model: props.ttsModel })
+      })
+    };
+  }
+}
+
+await getAgentByName(env.MyAgent, customerId, {
+  props: {
+    stt: "flux",
+    ttsModel: "@cf/deepgram/aura-1"
+  }
+});
+```
+
+`configureChannels(props)` runs during Agent startup before the voice channel is
+resolved. Pass only trusted configuration, or pass an ID and load the provider
+configuration from storage.
+
 ### Lifecycle hooks
 
 | Method                             | Description                                                                                                    |

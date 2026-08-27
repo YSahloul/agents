@@ -29,6 +29,14 @@ export interface SignalWireMediaMessage {
   };
 }
 
+export interface SignalWireMarkMessage {
+  event: "mark";
+  streamSid?: string;
+  mark: {
+    name: string;
+  };
+}
+
 export interface SignalWireDtmfMessage {
   event: "dtmf";
   streamSid?: string;

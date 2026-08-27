@@ -43,7 +43,8 @@ import type {
   Transcriber,
   TranscriberSession,
   VoiceServerAudioTransport,
-  VoiceCallStartContext
+  VoiceCallStartContext,
+  VoicePlaybackMarkerMessage
 } from "./types";
 import {
   AudioConnectionManager,
@@ -58,7 +59,12 @@ type ClientSpeechEnergy = {
 };
 type TTSOutputEvent =
   | { type: "audio"; audio: ArrayBuffer }
-  | { type: "text"; text: string };
+  | {
+      type: "playback_marker";
+      playbackId: string;
+      sequence: number;
+      text: string;
+    };
 
 type PlaybackTextTransport = VoiceServerAudioTransport & {
   resetPlaybackText(connectionId: string): void;
@@ -115,6 +121,7 @@ export type {
   VoiceRole,
   VoiceAudioFormat,
   VoiceCallStartContext,
+  VoicePlaybackMarkerMessage,
   VoiceAudioInput,
   VoiceTransport,
   VoiceServerAudioTransport,
@@ -353,6 +360,8 @@ export function withVoice<TBase extends AgentLike>(
 
     // Current async start_call identity per connection, used to ignore stale readiness.
     #startupTokens = new Map<string, symbol>();
+    // Connections that explicitly opted into sentence playback markers.
+    #playbackMarkerConnections = new Set<string>();
 
     // Voice protocol message types handled internally
     static #VOICE_MESSAGES = new Set([
@@ -408,6 +417,7 @@ export function withVoice<TBase extends AgentLike>(
       // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- overwriting lifecycle
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
         this.#startupTokens.delete(connection.id);
+        this.#playbackMarkerConnections.delete(connection.id);
         this.#clientSpeechEnergy.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
         this.#cm.cleanup(connection.id);
@@ -463,6 +473,14 @@ export function withVoice<TBase extends AgentLike>(
             case "hello":
               break;
             case "start_call": {
+              if (
+                "playback_markers" in parsed &&
+                parsed.playback_markers === true
+              ) {
+                this.#playbackMarkerConnections.add(connection.id);
+              } else {
+                this.#playbackMarkerConnections.delete(connection.id);
+              }
               const preferredFormat =
                 "preferred_format" in parsed &&
                 typeof parsed.preferred_format === "string"
@@ -475,6 +493,7 @@ export function withVoice<TBase extends AgentLike>(
               break;
             }
             case "end_call":
+              this.#playbackMarkerConnections.delete(connection.id);
               runBackground("end_call", () => this.#handleEndCall(connection));
               break;
             case "start_of_speech":
@@ -1654,6 +1673,8 @@ export function withVoice<TBase extends AgentLike>(
           : Number.POSITIVE_INFINITY
       );
       const ttsQueue: AsyncIterable<TTSOutputEvent>[] = [];
+      const playbackId = crypto.randomUUID();
+      let nextSequence = 0;
       let fullText = "";
       let pendingTranscriptText = "";
       let transcriptStarted = false;
@@ -1727,8 +1748,17 @@ export function withVoice<TBase extends AgentLike>(
           try {
             for await (const event of ttsQueue[i]) {
               if (signal.aborted) return;
-              if (event.type === "text") {
+              if (event.type === "playback_marker") {
                 markedTransport?.markPlaybackText(connection.id, event.text);
+                if (this.#playbackMarkerConnections.has(connection.id)) {
+                  const marker: VoicePlaybackMarkerMessage = {
+                    type: "playback_marker",
+                    playbackId: event.playbackId,
+                    sequence: event.sequence,
+                    text: event.text
+                  };
+                  this.#sendJSON(connection, marker);
+                }
                 continue;
               }
               await this.#sendAudio(connection, event.audio);
@@ -1751,9 +1781,9 @@ export function withVoice<TBase extends AgentLike>(
           notifyDrained();
         }
       })();
-
       const makeSentenceTTS = (
-        sentence: string
+        sentence: string,
+        sequence: number
       ): AsyncIterable<TTSOutputEvent> => {
         const self = this;
         async function* generate(): AsyncGenerator<TTSOutputEvent> {
@@ -1761,6 +1791,11 @@ export function withVoice<TBase extends AgentLike>(
           const text = await self.beforeSynthesize(sentence, connection);
           if (!text) return;
 
+          trace("tts_enqueued", {
+            playbackId,
+            sequence,
+            text
+          });
           let yieldedAudio = false;
           const hasStreamingTTS = typeof tts.synthesizeStream === "function";
           if (hasStreamingTTS) {
@@ -1788,19 +1823,25 @@ export function withVoice<TBase extends AgentLike>(
             }
           }
           if (yieldedAudio && !signal.aborted) {
-            yield { type: "text", text };
+            yield { type: "playback_marker", playbackId, sequence, text };
           }
           const synthMs = Date.now() - ttsStart;
           cumulativeTtsMs += synthMs;
-          trace("tts_sentence", { chars: text.length, synthMs, text });
+          trace("tts_sentence", {
+            chars: text.length,
+            synthMs,
+            playbackId,
+            sequence,
+            text
+          });
         }
-
         return markedTransport ? generate() : eagerAsyncIterable(generate());
       };
 
       const enqueueSentence = (sentence: string) => {
         firstSentenceAt ??= Date.now();
-        ttsQueue.push(makeSentenceTTS(sentence));
+        const sequence = ++nextSequence;
+        ttsQueue.push(makeSentenceTTS(sentence, sequence));
         notifyDrain();
       };
 

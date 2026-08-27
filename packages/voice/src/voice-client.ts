@@ -898,6 +898,8 @@ export class VoiceClient {
         this.#options.audioInput?.handleControlMessage?.(msg);
         this.#stopPlayback();
         break;
+      case "playback_marker":
+        break;
       case "transcript":
         // Final transcript arrived — clear interim
         this.#interimTranscript = null;

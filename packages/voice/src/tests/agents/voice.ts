@@ -747,11 +747,16 @@ export class TestVoiceAgent extends VoiceBase {
           );
           break;
         case "_set_tts_mode":
-          if (parsed.value === "controlled" || parsed.value === "marked") {
+          if (
+            parsed.value === "controlled" ||
+            parsed.value === "marked" ||
+            parsed.value === "sentence"
+          ) {
             this.tts =
               parsed.value === "marked" ? this.#markedTTS : this.#controlledTTS;
             this.#streamTurns = true;
-            this.#markerPipeline = parsed.value === "marked";
+            this.#markerPipeline =
+              parsed.value === "marked" || parsed.value === "sentence";
           } else if (parsed.value === "normal") {
             this.tts = new TestTTS();
             this.#streamTurns = false;

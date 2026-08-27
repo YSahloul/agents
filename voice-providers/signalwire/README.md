@@ -93,11 +93,12 @@ Providers without declarations retain the legacy PCM16/16 kHz behavior.
 
 ## Barge-in and echo suppression
 
-SignalWire can loop carrier playback into inbound audio, so the adapter does
-not use raw inbound energy to clear playback: that would cut off the agent on
-its own voice. Inbound audio always reaches VoiceAgent, whose STT/VAD sends a
-`playback_interrupt` when it detects caller speech. The adapter translates
-that ordered event to SignalWire's `clear` event.
+SignalWire can loop carrier playback into inbound audio. While the agent is
+speaking, the adapter drops inbound media until SignalWire acknowledges the
+agent's listening or idle mark, confirming that earlier carrier playback has
+finished. This keeps the agent's own TTS out of STT, but intentionally disables
+barge-in during carrier playback. A `playback_interrupt` still clears carrier
+audio and immediately reopens inbound media.
 
 SignalWire stream URLs do not support query parameters. Use the `<Stream
 authBearerToken="...">` attribute when creating cXML and validate its

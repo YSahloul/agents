@@ -17,8 +17,10 @@ import {
   mulawBase64ToPcm16,
   pcm16ToMulawBase64
 } from "./audio/utils.js";
+import type { VoicePlaybackMarkerMessage } from "@cloudflare/voice";
 import type {
   SignalWireDtmfMessage,
+  SignalWireMarkMessage,
   SignalWireMediaMessage,
   SignalWireStartMessage
 } from "./types.js";
@@ -75,6 +77,20 @@ export class SignalWireAdapter {
       | { format: "pcm16"; sampleRate: number }
       | { format: "mulaw"; sampleRate: 8000 }
       | null = { format: "pcm16", sampleRate: 16000 };
+    let playbackGated = false;
+    let outboundFrames = 0;
+    let outboundBytes = 0;
+    const pendingPlaybackMarkers = new Map<
+      string,
+      Pick<VoicePlaybackMarkerMessage, "playbackId" | "sequence" | "text"> & {
+        frames: number;
+        bytes: number;
+      }
+    >();
+    let pendingResumeMark: string | null = null;
+    let agentMessageChain: Promise<void> = Promise.resolve();
+    let nextOutboundMediaAt = 0;
+    let playbackGeneration = 0;
 
     const rejectAgentAudio = (format: unknown, sampleRate: unknown) => {
       agentAudio = null;
@@ -136,8 +152,10 @@ export class SignalWireAdapter {
         // Some runtimes may not expose a settable binaryType.
       }
       agentSocket = ws;
-
-      ws.addEventListener("message", async (event) => {
+      const handleAgentMessage = (event: {
+        data?: unknown;
+        playbackGeneration: number;
+      }) => {
         if (!streamSid) return;
 
         if (typeof event.data === "string") {
@@ -165,8 +183,74 @@ export class SignalWireAdapter {
             }
 
             if (msg.type === "playback_interrupt") {
+              pendingPlaybackMarkers.clear();
+              outboundFrames = 0;
+              nextOutboundMediaAt = 0;
+              outboundBytes = 0;
               sendClearAudio();
+              playbackGated = false;
+              pendingResumeMark = null;
               return;
+            }
+
+            if (msg.type === "playback_marker") {
+              const sequence = msg.sequence;
+              if (
+                typeof msg.playbackId !== "string" ||
+                typeof msg.text !== "string" ||
+                typeof sequence !== "number" ||
+                !Number.isInteger(sequence) ||
+                sequence <= 0
+              ) {
+                return;
+              }
+              if (
+                serverSocket.readyState !== WebSocket.OPEN ||
+                outboundFrames === 0
+              ) {
+                return;
+              }
+              const marker: VoicePlaybackMarkerMessage = {
+                type: "playback_marker",
+                playbackId: msg.playbackId,
+                sequence,
+                text: msg.text
+              };
+              const markName = `playback:${marker.playbackId}:${marker.sequence}`;
+              serverSocket.send(
+                JSON.stringify({
+                  event: "mark",
+                  streamSid,
+                  mark: { name: markName }
+                })
+              );
+              pendingPlaybackMarkers.set(markName, {
+                playbackId: marker.playbackId,
+                sequence: marker.sequence,
+                text: marker.text,
+                frames: outboundFrames,
+                bytes: outboundBytes
+              });
+              console.log("[VoiceTrace]", {
+                event: "tts_sent",
+                streamSid,
+                playbackId: marker.playbackId,
+                sequence: marker.sequence,
+                text: marker.text,
+                frames: outboundFrames,
+                bytes: outboundBytes
+              });
+              outboundFrames = 0;
+              outboundBytes = 0;
+              return;
+            }
+
+            if (msg.type === "status" && msg.status === "speaking") {
+              playbackGated = true;
+              pendingResumeMark = null;
+              outboundFrames = 0;
+              outboundBytes = 0;
+              nextOutboundMediaAt = 0;
             }
 
             if (
@@ -175,11 +259,19 @@ export class SignalWireAdapter {
                 msg.type === "transcript_end" ||
                 msg.type === "status")
             ) {
+              const markName = JSON.stringify(msg);
+              if (
+                playbackGated &&
+                msg.type === "status" &&
+                (msg.status === "listening" || msg.status === "idle")
+              ) {
+                pendingResumeMark = markName;
+              }
               serverSocket.send(
                 JSON.stringify({
                   event: "mark",
                   streamSid,
-                  mark: { name: JSON.stringify(msg) }
+                  mark: { name: markName }
                 })
               );
             }
@@ -187,15 +279,13 @@ export class SignalWireAdapter {
             // ignore non-JSON
           }
         } else {
-          const audio =
-            event.data instanceof ArrayBuffer
-              ? event.data
-              : event.data instanceof Blob
-                ? await event.data.arrayBuffer()
-                : null;
-          if (!audio) return;
-
-          if (agentAudio && serverSocket.readyState === WebSocket.OPEN) {
+          const sendAgentAudio = (audio: ArrayBuffer): Promise<void> | void => {
+            if (
+              !agentAudio ||
+              event.playbackGeneration !== playbackGeneration
+            ) {
+              return;
+            }
             const payload =
               agentAudio.format === "mulaw"
                 ? arrayBufferToBase64(audio)
@@ -203,15 +293,101 @@ export class SignalWireAdapter {
                     new Int16Array(audio),
                     agentAudio.sampleRate
                   );
-            serverSocket.send(
-              JSON.stringify({
-                event: "media",
-                streamSid,
-                media: { payload }
-              })
-            );
+            const padding = payload.endsWith("==")
+              ? 2
+              : payload.endsWith("=")
+                ? 1
+                : 0;
+            const bytes = (payload.length / 4) * 3 - padding;
+            const now = Date.now();
+            const sendAt = Math.max(now, nextOutboundMediaAt);
+            nextOutboundMediaAt = sendAt + bytes / 8;
+
+            const send = () => {
+              if (
+                event.playbackGeneration !== playbackGeneration ||
+                serverSocket.readyState !== WebSocket.OPEN
+              ) {
+                return;
+              }
+              serverSocket.send(
+                JSON.stringify({
+                  event: "media",
+                  streamSid,
+                  media: { payload }
+                })
+              );
+              outboundFrames++;
+              outboundBytes += bytes;
+            };
+            const delay = sendAt - now;
+            if (delay <= 0) {
+              send();
+              return;
+            }
+            return new Promise<void>((resolve) => {
+              setTimeout(resolve, delay);
+            }).then(send);
+          };
+          if (event.data instanceof Blob) {
+            return event.data.arrayBuffer().then(sendAgentAudio);
+          }
+          if (event.data instanceof ArrayBuffer) {
+            return sendAgentAudio(event.data);
           }
         }
+      };
+
+      const agentMessageQueue: Array<{
+        data?: unknown;
+        playbackGeneration: number;
+      }> = [];
+      let agentMessageProcessing = false;
+      const drainAgentMessages = () => {
+        if (agentMessageProcessing) return;
+        const event = agentMessageQueue.shift();
+        if (!event) return;
+
+        agentMessageProcessing = true;
+        let result: Promise<void> | void;
+        try {
+          result = handleAgentMessage(event);
+        } catch (error: unknown) {
+          console.error("[SignalWireAdapter] Agent message failed", error);
+          result = undefined;
+        }
+        if (result) {
+          agentMessageChain = Promise.resolve(result).catch(
+            (error: unknown) => {
+              console.error("[SignalWireAdapter] Agent message failed", error);
+            }
+          );
+          void agentMessageChain.then(() => {
+            agentMessageProcessing = false;
+            drainAgentMessages();
+          });
+        } else {
+          agentMessageProcessing = false;
+          drainAgentMessages();
+        }
+      };
+      ws.addEventListener("message", (event) => {
+        if (typeof event.data === "string") {
+          try {
+            const message = JSON.parse(event.data) as Record<string, unknown>;
+            if (message.type === "playback_interrupt") {
+              playbackGeneration++;
+              nextOutboundMediaAt = 0;
+            }
+          } catch {
+            // The protocol handler ignores non-JSON strings.
+          }
+        }
+        agentMessageQueue.push({
+          data: event.data,
+          playbackGeneration
+        });
+        drainAgentMessages();
       });
 
       ws.addEventListener("close", () => {
@@ -220,7 +396,7 @@ export class SignalWireAdapter {
         }
       });
 
-      ws.send(JSON.stringify({ type: "start_call" }));
+      ws.send(JSON.stringify({ type: "start_call", playback_markers: true }));
     };
 
     const handleCarrierMessage = async (event: MessageEvent) => {
@@ -235,6 +411,13 @@ export class SignalWireAdapter {
 
       switch (msg.event) {
         case "start": {
+          playbackGated = false;
+          pendingPlaybackMarkers.clear();
+          outboundFrames = 0;
+          outboundBytes = 0;
+          pendingResumeMark = null;
+          nextOutboundMediaAt = 0;
+          playbackGeneration++;
           const startMsg = msg as unknown as SignalWireStartMessage;
           if (
             startMsg.start.mediaFormat.encoding !== "audio/x-mulaw" ||
@@ -259,13 +442,48 @@ export class SignalWireAdapter {
           const mediaMsg = msg as unknown as SignalWireMediaMessage;
           if (mediaMsg.media.track !== "inbound") break;
 
-          // SignalWire loops carrier playback into inbound audio. Raw-energy
-          // barge-in therefore clears the agent on its own speech before STT
-          // can identify the transcript as echo. Forward all caller audio and
-          // let VoiceAgent's STT/VAD send playback_interrupt instead.
+          // ponytail: SignalWire barge-in is disabled during carrier playback;
+          // replace this gate with carrier separation or acoustic echo
+          // cancellation when simultaneous caller speech must be retained.
+          if (playbackGated) break;
           const pcm16k = mulawBase64ToPcm16(mediaMsg.media.payload);
           if (agentSocket?.readyState === WebSocket.OPEN) {
             agentSocket.send(pcm16k.buffer as ArrayBuffer);
+          }
+          break;
+        }
+
+        case "mark": {
+          const mark = "mark" in msg ? msg.mark : undefined;
+          if (
+            !mark ||
+            typeof mark !== "object" ||
+            !("name" in mark) ||
+            typeof mark.name !== "string"
+          ) {
+            break;
+          }
+          const markName: SignalWireMarkMessage["mark"]["name"] = mark.name;
+          if (
+            playbackGated &&
+            pendingResumeMark !== null &&
+            markName === pendingResumeMark
+          ) {
+            playbackGated = false;
+            pendingResumeMark = null;
+          }
+          const playback = pendingPlaybackMarkers.get(markName);
+          if (playback) {
+            pendingPlaybackMarkers.delete(markName);
+            console.log("[VoiceTrace]", {
+              event: "tts_played",
+              streamSid,
+              playbackId: playback.playbackId,
+              sequence: playback.sequence,
+              text: playback.text,
+              frames: playback.frames,
+              bytes: playback.bytes
+            });
           }
           break;
         }
