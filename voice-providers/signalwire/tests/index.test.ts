@@ -565,6 +565,42 @@ describe("outbound audio path (PCM 16kHz → mulaw 8kHz media)", () => {
       )
     ).toBe(true);
   });
+  it("clears immediately without waiting for paced media", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "audio_config",
+        format: "mulaw",
+        sampleRate: 8000
+      })
+    });
+    vi.useFakeTimers({ now: 1000 });
+
+    harness.agentSocket.emit("message", { data: new ArrayBuffer(160) });
+    harness.agentSocket.emit("message", { data: new ArrayBuffer(160) });
+    expect(
+      harness.serverSocket.jsonSent.filter(
+        (message) => message.event === "media"
+      )
+    ).toHaveLength(1);
+
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "playback_interrupt" })
+    });
+
+    expect(
+      harness.serverSocket.jsonSent.filter(
+        (message) => message.event === "clear"
+      )
+    ).toEqual([{ event: "clear", streamSid: "stream-1" }]);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(
+      harness.serverSocket.jsonSent.filter(
+        (message) => message.event === "media"
+      )
+    ).toHaveLength(1);
+  });
 });
 
 describe("agent JSON messages → SignalWire marks", () => {

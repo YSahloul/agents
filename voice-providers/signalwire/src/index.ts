@@ -180,15 +180,6 @@ export class SignalWireAdapter {
               return;
             }
 
-            if (msg.type === "playback_interrupt") {
-              pendingPlaybackMarkers.clear();
-              outboundFrames = 0;
-              nextOutboundMediaAt = 0;
-              outboundBytes = 0;
-              sendClearAudio();
-              return;
-            }
-
             if (msg.type === "playback_marker") {
               const sequence = msg.sequence;
               if (
@@ -365,6 +356,11 @@ export class SignalWireAdapter {
             if (message.type === "playback_interrupt") {
               playbackGeneration++;
               nextOutboundMediaAt = 0;
+              pendingPlaybackMarkers.clear();
+              outboundFrames = 0;
+              outboundBytes = 0;
+              sendClearAudio();
+              return;
             }
           } catch {
             // The protocol handler ignores non-JSON strings.
