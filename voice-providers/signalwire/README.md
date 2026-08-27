@@ -91,14 +91,16 @@ rate. The adapter:
 No adapter audio option is required. Configure the format on the TTS provider.
 Providers without declarations retain the legacy PCM16/16 kHz behavior.
 
-## Barge-in and echo suppression
+## Barge-in
 
-SignalWire can loop carrier playback into inbound audio. While the agent is
-speaking, the adapter drops inbound media until SignalWire acknowledges the
-agent's listening or idle mark, confirming that earlier carrier playback has
-finished. This keeps the agent's own TTS out of STT, but intentionally disables
-barge-in during carrier playback. A `playback_interrupt` still clears carrier
-audio and immediately reopens inbound media.
+The adapter forwards inbound media continuously, including while the agent is
+speaking, so VoiceAgent's STT can detect caller speech and emit a
+`playback_interrupt`. The interrupt clears queued carrier audio without
+suppressing subsequent caller audio.
+
+The adapter does not perform acoustic echo cancellation. Deployments whose
+carrier loops outbound playback into the inbound track need carrier separation
+or echo cancellation rather than dropping all inbound media during playback.
 
 SignalWire stream URLs do not support query parameters. Use the `<Stream
 authBearerToken="...">` attribute when creating cXML and validate its

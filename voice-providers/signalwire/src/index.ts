@@ -77,7 +77,6 @@ export class SignalWireAdapter {
       | { format: "pcm16"; sampleRate: number }
       | { format: "mulaw"; sampleRate: 8000 }
       | null = { format: "pcm16", sampleRate: 16000 };
-    let playbackGated = false;
     let outboundFrames = 0;
     let outboundBytes = 0;
     const pendingPlaybackMarkers = new Map<
@@ -87,7 +86,6 @@ export class SignalWireAdapter {
         bytes: number;
       }
     >();
-    let pendingResumeMark: string | null = null;
     let agentMessageChain: Promise<void> = Promise.resolve();
     let nextOutboundMediaAt = 0;
     let playbackGeneration = 0;
@@ -188,8 +186,6 @@ export class SignalWireAdapter {
               nextOutboundMediaAt = 0;
               outboundBytes = 0;
               sendClearAudio();
-              playbackGated = false;
-              pendingResumeMark = null;
               return;
             }
 
@@ -246,8 +242,6 @@ export class SignalWireAdapter {
             }
 
             if (msg.type === "status" && msg.status === "speaking") {
-              playbackGated = true;
-              pendingResumeMark = null;
               outboundFrames = 0;
               outboundBytes = 0;
               nextOutboundMediaAt = 0;
@@ -260,13 +254,6 @@ export class SignalWireAdapter {
                 msg.type === "status")
             ) {
               const markName = JSON.stringify(msg);
-              if (
-                playbackGated &&
-                msg.type === "status" &&
-                (msg.status === "listening" || msg.status === "idle")
-              ) {
-                pendingResumeMark = markName;
-              }
               serverSocket.send(
                 JSON.stringify({
                   event: "mark",
@@ -411,11 +398,9 @@ export class SignalWireAdapter {
 
       switch (msg.event) {
         case "start": {
-          playbackGated = false;
           pendingPlaybackMarkers.clear();
           outboundFrames = 0;
           outboundBytes = 0;
-          pendingResumeMark = null;
           nextOutboundMediaAt = 0;
           playbackGeneration++;
           const startMsg = msg as unknown as SignalWireStartMessage;
@@ -442,10 +427,6 @@ export class SignalWireAdapter {
           const mediaMsg = msg as unknown as SignalWireMediaMessage;
           if (mediaMsg.media.track !== "inbound") break;
 
-          // ponytail: SignalWire barge-in is disabled during carrier playback;
-          // replace this gate with carrier separation or acoustic echo
-          // cancellation when simultaneous caller speech must be retained.
-          if (playbackGated) break;
           const pcm16k = mulawBase64ToPcm16(mediaMsg.media.payload);
           if (agentSocket?.readyState === WebSocket.OPEN) {
             agentSocket.send(pcm16k.buffer as ArrayBuffer);
@@ -464,14 +445,6 @@ export class SignalWireAdapter {
             break;
           }
           const markName: SignalWireMarkMessage["mark"]["name"] = mark.name;
-          if (
-            playbackGated &&
-            pendingResumeMark !== null &&
-            markName === pendingResumeMark
-          ) {
-            playbackGated = false;
-            pendingResumeMark = null;
-          }
           const playback = pendingPlaybackMarkers.get(markName);
           if (playback) {
             pendingPlaybackMarkers.delete(markName);

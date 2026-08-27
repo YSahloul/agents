@@ -744,83 +744,18 @@ describe("agent JSON messages → SignalWire marks", () => {
   });
 });
 
-describe("carrier playback gate", () => {
+describe("carrier playback control", () => {
   const loud = new Int16Array(160).fill(1000);
-  const sendStatus = (h: Harness, status: string) => {
-    h.agentSocket.emit("message", {
-      data: JSON.stringify({ type: "status", status })
-    });
-  };
-  const lastMarkName = (h: Harness) => {
-    const mark = h.serverSocket.jsonSent
-      .filter((message) => message.event === "mark")
-      .pop();
-    const payload = mark?.mark;
-    if (
-      !payload ||
-      typeof payload !== "object" ||
-      !("name" in payload) ||
-      typeof payload.name !== "string"
-    ) {
-      throw new Error("Expected SignalWire mark name");
-    }
-    return payload.name;
-  };
 
-  it("holds inbound audio until SignalWire confirms listening", async () => {
+  it("forwards inbound audio while agent playback is active", async () => {
     const harness = createHarness();
     await startCall(harness);
-
-    sendStatus(harness, "speaking");
-    sendMedia(harness, loud);
-    expect(harness.agentSocket.binarySent).toHaveLength(0);
-
-    sendStatus(harness, "listening");
-    const resumeMark = lastMarkName(harness);
-    sendMedia(harness, loud);
-    expect(harness.agentSocket.binarySent).toHaveLength(0);
-
-    harness.serverSocket.emit("message", {
-      data: JSON.stringify({
-        event: "mark",
-        streamSid: "stream-1",
-        mark: { name: resumeMark }
-      })
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({ type: "status", status: "speaking" })
     });
-    sendMedia(harness, loud);
-    expect(harness.agentSocket.binarySent).toHaveLength(1);
-  });
 
-  it("ignores unrelated, malformed, duplicate, and stale marks", async () => {
-    const harness = createHarness();
-    await startCall(harness);
-    sendStatus(harness, "speaking");
-    sendStatus(harness, "listening");
-    const resumeMark = lastMarkName(harness);
-
-    harness.serverSocket.emit("message", {
-      data: JSON.stringify({ event: "mark", mark: { name: "unrelated" } })
-    });
-    harness.serverSocket.emit("message", {
-      data: JSON.stringify({ event: "mark" })
-    });
     sendMedia(harness, loud);
-    expect(harness.agentSocket.binarySent).toHaveLength(0);
 
-    harness.serverSocket.emit("message", {
-      data: JSON.stringify({ event: "mark", mark: { name: resumeMark } })
-    });
-    harness.serverSocket.emit("message", {
-      data: JSON.stringify({ event: "mark", mark: { name: resumeMark } })
-    });
-    sendMedia(harness, loud);
-    expect(harness.agentSocket.binarySent).toHaveLength(1);
-
-    sendStatus(harness, "speaking");
-    harness.serverSocket.emit("message", {
-      data: JSON.stringify({ event: "mark", mark: { name: resumeMark } })
-    });
-    sendMedia(harness, loud);
     expect(harness.agentSocket.binarySent).toHaveLength(1);
   });
 
@@ -838,12 +773,10 @@ describe("carrier playback gate", () => {
     ).toHaveLength(0);
   });
 
-  it("clears playback and reopens audio on agent interruption", async () => {
+  it("clears playback without suppressing later inbound audio", async () => {
     const harness = createHarness();
     await startCall(harness);
-    sendStatus(harness, "speaking");
     sendMedia(harness, loud);
-    expect(harness.agentSocket.binarySent).toHaveLength(0);
 
     harness.agentSocket.emit("message", {
       data: JSON.stringify({ type: "playback_interrupt" })
@@ -853,7 +786,7 @@ describe("carrier playback gate", () => {
     expect(
       harness.serverSocket.jsonSent.filter((m) => m.event === "clear")
     ).toEqual([{ event: "clear", streamSid: "stream-1" }]);
-    expect(harness.agentSocket.binarySent).toHaveLength(1);
+    expect(harness.agentSocket.binarySent).toHaveLength(2);
   });
   it("discards pending playback acknowledgements after clear", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
