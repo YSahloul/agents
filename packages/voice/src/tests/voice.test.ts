@@ -72,6 +72,10 @@ function uniqueStreamingTTSPath() {
   return `/agents/test-streaming-tts-voice-agent/voice-test-${++instanceCounter}`;
 }
 
+function uniqueMinInterruptPath() {
+  return `/agents/test-min-interrupt-voice-agent/voice-test-${++instanceCounter}`;
+}
+
 function waitForStatus(ws: WebSocket, status: string) {
   return waitForMessageMatching(
     ws,
@@ -408,6 +412,41 @@ describe("VoiceAgent — protocol", () => {
     expect(await getCounts(ws)).toMatchObject({
       callStart: 2,
       callStartResumed: [false, true]
+    });
+    ws.close();
+  });
+
+  it("drops inbound audio while the opening hook runs when configured", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "_hold_call_start" });
+    await waitForAck(ws, "_hold_call_start");
+    await startCall(ws);
+
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+    await waitForMicrotasks();
+    expect((await getTurnState(ws)).transcripts).toEqual([]);
+
+    sendJSON(ws, { type: "_release_call_start" });
+    await waitForAck(ws, "_release_call_start");
+    await waitForMicrotasks();
+
+    const transcript = waitForMessageMatching(
+      ws,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        (message as Record<string, unknown>).type === "transcript" &&
+        (message as Record<string, unknown>).role === "user"
+    );
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+    expect((await transcript) as Record<string, unknown>).toMatchObject({
+      text: "utterance 1 (20000 bytes)"
     });
     ws.close();
   });
@@ -1856,6 +1895,48 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     recording.stop();
     ws.close();
   });
+
+  it("rejects active assistant echo before accepting real barge-in", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    sendJSON(ws, { type: "_set_audio_transport", value: true });
+    await waitForAck(ws, "_set_audio_transport");
+    await setTtsMode(ws, "controlled");
+    await startCall(ws);
+    const recording = recordSocket(ws);
+
+    sendJSON(ws, { type: "_emit_end", text: "confirmed audio" });
+    await waitForTransportSendCount(ws, 1);
+
+    sendJSON(ws, { type: "_emit_eager", text: "Echo confirmed audio" });
+    sendJSON(ws, { type: "_emit_end", text: "Echo confirmed audio" });
+    await waitForMicrotasks();
+
+    expect((await getCounts(ws)).interrupt).toBe(0);
+    expect(await getTurnState(ws)).toEqual({
+      transcripts: ["confirmed audio"],
+      abortCount: 0
+    });
+    expect(await getMessageCount(ws)).toBe(1);
+    expect(
+      recording.messages.filter(
+        (message) => message.type === "playback_interrupt"
+      )
+    ).toHaveLength(0);
+
+    sendJSON(ws, { type: "_emit_eager", text: "real interruption" });
+    sendJSON(ws, { type: "_emit_end", text: "real interruption" });
+
+    expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
+    expect(
+      recording.messages.filter(
+        (message) => message.type === "playback_interrupt"
+      )
+    ).toHaveLength(1);
+
+    recording.stop();
+    ws.close();
+  });
 });
 
 describe("VoiceAgent — interrupt", () => {
@@ -1987,6 +2068,55 @@ describe("VoiceAgent — interrupt", () => {
     expect(counts.interrupt).toBe(1);
 
     ws.close();
+  });
+
+  it("gates transcript barge-in below minInterruptWords", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { ws } = await connectWS(uniqueMinInterruptPath());
+    const recording = recordSocket(ws);
+    try {
+      await waitForStatus(ws, "idle");
+      await startCall(ws);
+
+      sendJSON(ws, { type: "text_message", text: "long response" });
+      await waitForStatus(ws, "thinking");
+
+      sendJSON(ws, { type: "_emit_speech_start", text: "no" });
+      expect((await getCounts(ws)).interrupt).toBe(0);
+      sendJSON(ws, { type: "_emit_speech_start", text: "no way" });
+      expect((await getCounts(ws)).interrupt).toBe(0);
+
+      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
+        event: "interrupt_trigger",
+        connectionId: expect.any(String),
+        trigger: "flux_speech_start",
+        transcript: "no",
+        activePipeline: true,
+        action: "below_min_words"
+      });
+      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
+        event: "interrupt_trigger",
+        connectionId: expect.any(String),
+        trigger: "flux_speech_start",
+        transcript: "no way",
+        activePipeline: true,
+        action: "below_min_words"
+      });
+
+      const playbackInterrupt = waitForType(ws, "playback_interrupt");
+      sendJSON(ws, { type: "_emit_speech_start", text: "talk to me" });
+      await playbackInterrupt;
+      expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
+      expect(
+        recording.messages.filter(
+          (message) => message.type === "playback_interrupt"
+        )
+      ).toHaveLength(1);
+    } finally {
+      recording.stop();
+      ws.close();
+      log.mockRestore();
+    }
   });
 });
 

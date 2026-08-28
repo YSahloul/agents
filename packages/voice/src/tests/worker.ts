@@ -8,7 +8,8 @@ export {
   TestAiSdkFullStreamVoiceAgent,
   TestAiSdkTextStreamVoiceAgent,
   TestPcm24kVoiceAgent,
-  TestStreamingTtsVoiceAgent
+  TestStreamingTtsVoiceAgent,
+  TestMinInterruptVoiceAgent
 } from "./agents/voice";
 
 export {
@@ -31,6 +32,7 @@ export type Env = {
   TestAiSdkTextStreamVoiceAgent: DurableObjectNamespace;
   TestPcm24kVoiceAgent: DurableObjectNamespace;
   TestStreamingTtsVoiceAgent: DurableObjectNamespace;
+  TestMinInterruptVoiceAgent: DurableObjectNamespace;
   TestVoiceInputAgent: DurableObjectNamespace;
   TestSFUVoiceAgent: DurableObjectNamespace;
   TestSFUTransportVoiceAgent: DurableObjectNamespace;

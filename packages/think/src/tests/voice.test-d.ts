@@ -18,17 +18,12 @@ declare const transcriber: Transcriber;
 declare const tts: TTSProvider & Partial<StreamingTTSProvider>;
 
 const options = {
-  channel: "phone"
+  channel: "phone",
+  filterEchoedTranscripts: true,
+  listenDuringCallStart: false,
+  minInterruptWords: 3
 } satisfies CreateVoiceThinkOptions;
 const VoiceThink = createVoiceThink<TestEnv>(options);
-const _removedFilterOption = {
-  // @ts-expect-error Removed Voice echo filtering option.
-  filterEchoedTranscripts: true
-} satisfies CreateVoiceThinkOptions;
-const _removedCallStartOption = {
-  // @ts-expect-error Removed Voice call-start suppression option.
-  listenDuringCallStart: false
-} satisfies CreateVoiceThinkOptions;
 
 class Agent extends VoiceThink {
   configureChannels() {

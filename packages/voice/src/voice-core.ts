@@ -220,6 +220,28 @@ export interface VoiceAgentOptions {
   persistMessages?: boolean;
   /** Max conversation messages to retain. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
+  /**
+   * Drop transcriptions that closely match the previous assistant message.
+   * This suppresses speakerphone echo after STT without disabling barge-in.
+   * @default false
+   */
+  filterEchoedTranscripts?: boolean;
+  /**
+   * Accept inbound audio while `onCallStart()` runs. Disable when the hook
+   * plays an opening greeting and the transport can loop that audio back into
+   * STT. The opening hook is not interruptible while disabled. @default true
+   */
+  listenDuringCallStart?: boolean;
+  /**
+   * Minimum words the transcript must contain before a barge-in is allowed
+   * to interrupt active playback. Suppresses single-word backchannels
+   * ("yeah", "okay") and short echo fragments from cutting off the
+   * assistant mid-sentence. Applies to every transcript-bearing trigger
+   * (`flux_speech_start`, `flux_eager_utterance`, `flux_confirmed_utterance`)
+   * -- client-side `audio_level` interrupts carry no transcript and are
+   * never gated by this option. `0` disables the gate. @default 0
+   */
+  minInterruptWords?: number;
 }
 
 interface SpeculativeTurn {
@@ -228,6 +250,10 @@ interface SpeculativeTurn {
   outcome: Promise<boolean>;
   pipelineStarted: boolean;
   settle(confirmed: boolean): void;
+}
+interface ActiveAssistantText {
+  signal: AbortSignal;
+  text: string;
 }
 type SpeculativeCancelReason =
   | "turn_resumed"
@@ -241,6 +267,20 @@ const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
 const DEFAULT_SAMPLE_RATE = 16000;
 const STREAMING_TTS_MAX_CHARS = 48;
+
+function isEchoOf(transcript: string, assistantText: string): boolean {
+  if (!assistantText) return false;
+  const assistant =
+    assistantText
+      .toLowerCase()
+      .match(/[\p{L}\p{N}]+/gu)
+      ?.join(" ") ?? "";
+  const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  if (heard.length >= 3 && assistant.includes(heard.join(" "))) return true;
+  const assistantWords = new Set(assistant.split(" "));
+  const hits = heard.filter((word) => assistantWords.has(word)).length;
+  return hits >= 4 && hits / heard.length >= 0.6;
+}
 
 // --- Mixin ---
 
@@ -355,6 +395,10 @@ export function withVoice<TBase extends AgentLike>(
     #conversationHistory: Array<{ role: VoiceRole; content: string }> = [];
     // Speculative Flux responses wait for EndOfTurn before entering history.
     #speculativeTurns = new Map<string, SpeculativeTurn>();
+    // Text currently being spoken, used to reject live speakerphone echo.
+    #activeAssistantText = new Map<string, ActiveAssistantText>();
+    // Connections whose opening hook should not feed inbound audio to STT.
+    #callStartInputSuppressed = new Set<string>();
     // Client-captured microphone energy for the current STT turn.
     #clientSpeechEnergy = new Map<string, ClientSpeechEnergy>();
 
@@ -417,6 +461,8 @@ export function withVoice<TBase extends AgentLike>(
       // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- overwriting lifecycle
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
         this.#startupTokens.delete(connection.id);
+        this.#activeAssistantText.delete(connection.id);
+        this.#callStartInputSuppressed.delete(connection.id);
         this.#playbackMarkerConnections.delete(connection.id);
         this.#clientSpeechEnergy.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
@@ -572,6 +618,7 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     receiveAudio(connectionId: string, audio: ArrayBuffer): void {
+      if (this.#callStartInputSuppressed.has(connectionId)) return;
       this.#cm.bufferAudio(connectionId, audio);
     }
     getPlaybackText(connectionId: string): string | null {
@@ -595,9 +642,24 @@ export function withVoice<TBase extends AgentLike>(
 
     afterTranscribe(
       transcript: string,
-      _connection: Connection
+      connection: Connection
     ): string | null | Promise<string | null> {
-      return transcript;
+      return opt("filterEchoedTranscripts", false) &&
+        this.#isEchoTranscript(connection.id, transcript)
+        ? null
+        : transcript;
+    }
+
+    #isEchoTranscript(connectionId: string, transcript: string): boolean {
+      const active = this.#activeAssistantText.get(connectionId);
+      if (active && isEchoOf(transcript, active.text)) return true;
+      const history = this.getConversationHistory();
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i].role === "assistant") {
+          return isEchoOf(transcript, history[i].content);
+        }
+      }
+      return false;
     }
 
     beforeSynthesize(
@@ -931,25 +993,44 @@ export function withVoice<TBase extends AgentLike>(
             });
           },
           onSpeechStart: (transcript?: string) => {
+            const echoed =
+              opt("filterEchoedTranscripts", false) &&
+              Boolean(
+                transcript && this.#isEchoTranscript(connection.id, transcript)
+              );
             const energy = this.#clientSpeechEnergy.get(connection.id);
             console.log("[VoiceTrace]", {
               event: "stt_speech_start",
               connectionId: connection.id,
               transcript: transcript ?? null,
+              echoed,
               clientStartRms: energy?.startRms ?? null,
               clientThreshold: energy?.threshold ?? null
             });
+            if (echoed) return;
             this.#handleBargeIn(connection, "flux_speech_start", transcript);
           },
           onEagerUtterance: (transcript: string) => {
+            const echoed =
+              opt("filterEchoedTranscripts", false) &&
+              this.#isEchoTranscript(connection.id, transcript);
             const energy = this.#clientSpeechEnergy.get(connection.id);
             console.log("[VoiceTrace]", {
               event: "stt_eager_utterance",
               connectionId: connection.id,
               transcript,
+              echoed,
               clientStartRms: energy?.startRms ?? null,
               clientThreshold: energy?.threshold ?? null
             });
+            if (echoed) return;
+            if (opt("filterEchoedTranscripts", false)) {
+              this.#handleBargeIn(
+                connection,
+                "flux_eager_utterance",
+                transcript
+              );
+            }
             this.#startSpeculativeTurn(connection, transcript);
           },
           onTurnResumed: () => {
@@ -1025,7 +1106,14 @@ export function withVoice<TBase extends AgentLike>(
       this.#startupTokens.delete(connection.id);
 
       this.#sendJSON(connection, { type: "status", status: "listening" });
-      await this.onCallStart(connection, { resumed });
+      if (!opt("listenDuringCallStart", true)) {
+        this.#callStartInputSuppressed.add(connection.id);
+      }
+      try {
+        await this.onCallStart(connection, { resumed });
+      } finally {
+        this.#callStartInputSuppressed.delete(connection.id);
+      }
     }
 
     #isCurrentStartup(connectionId: string, startupToken: symbol): boolean {
@@ -1128,6 +1216,21 @@ export function withVoice<TBase extends AgentLike>(
       trigger: string,
       transcript?: string
     ): void {
+      const minWords = opt("minInterruptWords", 0);
+      const wordCount = transcript?.trim()
+        ? transcript.trim().split(/\s+/).length
+        : 0;
+      if (minWords > 0 && wordCount < minWords) {
+        console.log("[VoiceTrace]", {
+          event: "interrupt_trigger",
+          connectionId: connection.id,
+          trigger,
+          transcript: transcript ?? null,
+          activePipeline: this.#cm.hasActivePipeline(connection.id),
+          action: "below_min_words"
+        });
+        return;
+      }
       this.#cancelSpeculativeTurn(connection.id, "speech_start");
       const activePipeline = this.#cm.hasActivePipeline(connection.id);
       const interrupted = this.#cm.abortPipeline(connection.id);
@@ -1301,6 +1404,13 @@ export function withVoice<TBase extends AgentLike>(
           }
           return;
         }
+        if (
+          !speculative &&
+          opt("filterEchoedTranscripts", false) &&
+          this.#cm.hasActivePipeline(connection.id)
+        ) {
+          this.#handleBargeIn(connection, "flux_confirmed_utterance", userText);
+        }
         signal = this.#cm.createPipelineAbort(connection.id);
         if (speculative) speculative.pipelineStarted = true;
 
@@ -1437,6 +1547,12 @@ export function withVoice<TBase extends AgentLike>(
         });
         this.#sendJSON(connection, { type: "status", status: "listening" });
       } finally {
+        if (
+          signal &&
+          this.#activeAssistantText.get(connection.id)?.signal === signal
+        ) {
+          this.#activeAssistantText.delete(connection.id);
+        }
         if (signal) this.#cm.clearPipelineAbort(connection.id, signal);
       }
     }
@@ -1473,6 +1589,10 @@ export function withVoice<TBase extends AgentLike>(
       }
 
       if (typeof response === "string") {
+        this.#activeAssistantText.set(connection.id, {
+          signal,
+          text: response
+        });
         const llmMs = Date.now() - llmStart;
 
         if (response.trim().length === 0) {
@@ -1611,6 +1731,10 @@ export function withVoice<TBase extends AgentLike>(
             trace("model_first_delta");
           }
           fullText += token;
+          this.#activeAssistantText.set(connection.id, {
+            signal,
+            text: fullText
+          });
           sendAssistantDelta(token);
           await writer.write(token);
         }
@@ -1904,6 +2028,10 @@ export function withVoice<TBase extends AgentLike>(
         }
 
         fullText += token;
+        this.#activeAssistantText.set(connection.id, {
+          signal,
+          text: fullText
+        });
         sendAssistantDelta(token);
 
         const sentences = chunker.add(token);

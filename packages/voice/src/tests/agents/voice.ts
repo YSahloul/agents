@@ -511,12 +511,18 @@ function isJsonValue(value: unknown): boolean {
 
 // --- Test agents ---
 
-const VoiceBase = withVoice(Agent);
+const VoiceBase = withVoice(Agent, {
+  filterEchoedTranscripts: true,
+  listenDuringCallStart: false
+});
 const Pcm24kVoiceBase = withVoice(Agent, {
   audioFormat: "pcm16",
   sampleRate: 24000
 });
 const PersistentVoiceBase = withVoice(Agent, { persistMessages: true });
+const MinInterruptVoiceBase = withVoice(Agent, {
+  minInterruptWords: 3
+});
 
 /**
  * Test VoiceAgent with continuous transcriber.
@@ -1159,6 +1165,54 @@ export class TestPcm24kVoiceAgent extends Pcm24kVoiceBase {
     _context: VoiceTurnContext
   ): Promise<string> {
     return `Echo: ${transcript}`;
+  }
+}
+
+/**
+ * Test VoiceAgent configured with `minInterruptWords: 3`. Holds its
+ * pipeline open until the abort signal fires, so tests can verify short
+ * transcripts are ignored while longer ones interrupt.
+ */
+export class TestMinInterruptVoiceAgent extends MinInterruptVoiceBase {
+  static options = { hibernate: false };
+
+  transcriber = new TestTranscriber();
+  tts = new TestTTS();
+
+  async onTurn(transcript: string, context: VoiceTurnContext): Promise<string> {
+    await new Promise<void>((resolve) => {
+      context.signal.addEventListener("abort", () => resolve());
+    });
+    return `Echo: ${transcript}`;
+  }
+
+  #interruptCount = 0;
+
+  onInterrupt(_connection: Connection): void {
+    this.#interruptCount++;
+  }
+
+  onMessage(connection: Connection, message: WSMessage) {
+    if (typeof message !== "string") return;
+    try {
+      const parsed = JSON.parse(message) as Record<string, unknown>;
+      switch (parsed.type) {
+        case "_emit_speech_start":
+          if (this.transcriber instanceof TestTranscriber) {
+            this.transcriber.lastSession?.emitSpeechStart(
+              typeof parsed.text === "string" ? parsed.text : undefined
+            );
+          }
+          break;
+        case "_get_counts":
+          connection.send(
+            JSON.stringify({ type: "_counts", interrupt: this.#interruptCount })
+          );
+          break;
+      }
+    } catch {
+      // ignore
+    }
   }
 }
 
