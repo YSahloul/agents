@@ -193,6 +193,12 @@ export interface TranscriberSessionOptions {
    */
   onSpeechStart?: (text?: string) => void;
   /**
+   * Called when a non-final transcript updates during an active user turn.
+   *
+   * This is an SDK callback for transcript growth, not a provider event name.
+   */
+  onSpeechUpdate?: (text: string) => void;
+  /**
    * Called when the model predicts that the user has finished speaking.
    * The transcript is provisional; providers may subsequently call
    * `onTurnResumed` instead of `onUtterance`.

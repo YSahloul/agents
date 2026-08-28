@@ -538,131 +538,62 @@ describe("WorkersAIFluxSTT", () => {
     expect(socket.closed).toBe(true);
   });
 
-  it("uses the latest interim transcript when EndOfTurn transcript is empty", async () => {
+  it("maps the documented Flux state sequence", async () => {
     const ai = new MockAi();
-    const utterances: string[] = [];
-    const interims: string[] = [];
+    const callbacks: string[] = [];
 
     new WorkersAIFluxSTT(ai).createSession({
-      onInterim: (text) => interims.push(text),
-      onUtterance: (text) => utterances.push(text)
-    });
-
-    const socket = await waitForConnect(ai);
-    socket.message(JSON.stringify({ event: "StartOfTurn" }));
-    socket.message(JSON.stringify({ event: "Update", transcript: "hello" }));
-    socket.message(
-      JSON.stringify({ event: "Update", transcript: "hello world" })
-    );
-    socket.message(JSON.stringify({ event: "EndOfTurn", transcript: "" }));
-
-    expect(interims).toEqual(["hello", "hello world"]);
-    expect(utterances).toEqual(["hello world"]);
-  });
-  it("uses StartOfTurn transcript when EndOfTurn transcript is empty", async () => {
-    const ai = new MockAi();
-    const utterances: string[] = [];
-    const interims: string[] = [];
-    const speechStarts: Array<string | undefined> = [];
-
-    new WorkersAIFluxSTT(ai).createSession({
-      onInterim: (text) => interims.push(text),
-      onSpeechStart: (text) => speechStarts.push(text),
-      onUtterance: (text) => utterances.push(text)
+      onInterim: (text) => callbacks.push(`interim:${text}`),
+      onSpeechStart: (text) => callbacks.push(`speech-start:${text}`),
+      onSpeechUpdate: (text) => callbacks.push(`speech-update:${text}`),
+      onEagerUtterance: (text) => callbacks.push(`eager:${text}`),
+      onTurnResumed: (text) => callbacks.push(`resumed:${text}`),
+      onUtterance: (text) => callbacks.push(`final:${text}`)
     });
 
     const socket = await waitForConnect(ai);
     socket.message(
       JSON.stringify({ event: "StartOfTurn", transcript: "hello" })
     );
-    socket.message(JSON.stringify({ event: "EndOfTurn", transcript: "" }));
-
-    expect(interims).toEqual(["hello"]);
-    expect(speechStarts).toEqual(["hello"]);
-    expect(utterances).toEqual(["hello"]);
-  });
-
-  it("emits speech start without requiring a transcript", async () => {
-    const ai = new MockAi();
-    const speechStarts: Array<string | undefined> = [];
-
-    new WorkersAIFluxSTT(ai).createSession({
-      onSpeechStart: (text) => speechStarts.push(text)
-    });
-
-    const socket = await waitForConnect(ai);
-    socket.message(JSON.stringify({ event: "StartOfTurn" }));
-
-    expect(speechStarts).toEqual([undefined]);
-  });
-
-  it("prefers non-empty EndOfTurn transcript and clears turn state", async () => {
-    const ai = new MockAi();
-    const utterances: string[] = [];
-
-    new WorkersAIFluxSTT(ai).createSession({
-      onUtterance: (text) => utterances.push(text)
-    });
-
-    const socket = await waitForConnect(ai);
-    socket.message(JSON.stringify({ event: "Update", transcript: "stale" }));
     socket.message(
-      JSON.stringify({ event: "EndOfTurn", transcript: "final text" })
-    );
-    socket.message(JSON.stringify({ event: "EndOfTurn", transcript: "" }));
-
-    expect(utterances).toEqual(["final text"]);
-  });
-
-  it("preserves accumulated transcript when TurnResumed arrives empty", async () => {
-    const ai = new MockAi();
-    const utterances: string[] = [];
-    const interims: string[] = [];
-
-    new WorkersAIFluxSTT(ai).createSession({
-      onInterim: (text) => interims.push(text),
-      onUtterance: (text) => utterances.push(text)
-    });
-
-    const socket = await waitForConnect(ai);
-    socket.message(JSON.stringify({ event: "StartOfTurn" }));
-    socket.message(
-      JSON.stringify({ event: "Update", transcript: "who is there" })
-    );
-    // Eager end-of-turn, then the model hears the user still talking and
-    // resumes with an empty transcript — must NOT wipe the accumulation.
-    socket.message(
-      JSON.stringify({ event: "EagerEndOfTurn", transcript: "who is there" })
-    );
-    socket.message(JSON.stringify({ event: "TurnResumed", transcript: "" }));
-    socket.message(
-      JSON.stringify({ event: "Update", transcript: "who is there or two" })
-    );
-    socket.message(JSON.stringify({ event: "EndOfTurn", transcript: "" }));
-
-    expect(utterances).toEqual(["who is there or two"]);
-  });
-
-  it("fires onSpeechStart once (StartOfTurn) and TurnResumed does not re-signal", async () => {
-    const ai = new MockAi();
-    const speechStarts: Array<string | undefined> = [];
-
-    new WorkersAIFluxSTT(ai).createSession({
-      onSpeechStart: (text) => speechStarts.push(text)
-    });
-
-    const socket = await waitForConnect(ai);
-    socket.message(JSON.stringify({ event: "StartOfTurn" }));
-    socket.message(
-      JSON.stringify({ event: "EagerEndOfTurn", transcript: "hello" })
+      JSON.stringify({ event: "Update", transcript: "hello there" })
     );
     socket.message(
-      JSON.stringify({ event: "TurnResumed", transcript: "hello" })
+      JSON.stringify({ event: "EagerEndOfTurn", transcript: "first draft" })
     );
-    socket.message(JSON.stringify({ event: "EndOfTurn", transcript: "" }));
+    socket.message(
+      JSON.stringify({
+        event: "TurnResumed",
+        transcript: "first draft extended"
+      })
+    );
+    socket.message(
+      JSON.stringify({
+        event: "Update",
+        transcript: "second draft"
+      })
+    );
+    socket.message(
+      JSON.stringify({
+        event: "EagerEndOfTurn",
+        transcript: "second draft"
+      })
+    );
+    socket.message(
+      JSON.stringify({ event: "EndOfTurn", transcript: "second draft" })
+    );
 
-    // Upstream: TurnResumed does NOT fire onSpeechStart — only StartOfTurn does
-    expect(speechStarts).toEqual([undefined]);
+    expect(callbacks).toEqual([
+      "speech-start:hello",
+      "interim:hello there",
+      "speech-update:hello there",
+      "eager:first draft",
+      "resumed:first draft extended",
+      "interim:second draft",
+      "speech-update:second draft",
+      "eager:second draft",
+      "final:second draft"
+    ]);
   });
 
   it("forwards the full keyterms array to ai.run", async () => {
@@ -682,9 +613,11 @@ describe("WorkersAINova3STT", () => {
   it("waits for transcript evidence before emitting speech start", async () => {
     const ai = new MockAi();
     const speechStarts: Array<string | undefined> = [];
+    const speechUpdates: string[] = [];
 
     new WorkersAINova3STT(ai).createSession({
-      onSpeechStart: (text) => speechStarts.push(text)
+      onSpeechStart: (text) => speechStarts.push(text),
+      onSpeechUpdate: (text) => speechUpdates.push(text)
     });
 
     const socket = await waitForConnect(ai);
@@ -709,6 +642,7 @@ describe("WorkersAINova3STT", () => {
     );
 
     expect(speechStarts).toEqual(["hello"]);
+    expect(speechUpdates).toEqual(["hello", "hello there"]);
   });
 
   it("combines finalized segments and interim text without changing normal behavior", async () => {

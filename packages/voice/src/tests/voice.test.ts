@@ -1646,41 +1646,6 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     ws.close();
   });
 
-  it("restarts from mismatched final text without releasing the draft", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    await startCall(ws);
-    const recording = recordSocket(ws);
-
-    sendJSON(ws, { type: "_emit_eager", text: "draft text" });
-    await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
-
-    const responseDone = waitForType(ws, "transcript_end");
-    const listening = waitForStatus(ws, "listening");
-    sendJSON(ws, { type: "_emit_end", text: "final text" });
-    await responseDone;
-    await listening;
-
-    expect(await getTurnState(ws)).toEqual({
-      transcripts: ["draft text", "final text"],
-      abortCount: 1
-    });
-    expect(await getMessageCount(ws)).toBe(2);
-    const userMessages = recording.messages.filter(
-      (message) => message.type === "transcript" && message.role === "user"
-    );
-    expect(userMessages.map((message) => message.text)).toEqual(["final text"]);
-    const assistantMessages = recording.messages.filter(
-      (message) => message.type === "transcript_end"
-    );
-    expect(assistantMessages.map((message) => message.text)).toEqual([
-      "Echo: final text"
-    ]);
-
-    recording.stop();
-    ws.close();
-  });
-
   it("suppresses rejected cancelled drafts and surfaces confirmed failures", async () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const first = await connectWS(uniquePath());
@@ -1831,16 +1796,19 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     ).toEqual([]);
   });
 
-  it("supports eager resume eager confirm without stale state", async () => {
+  it("supports the documented eager resume eager confirm sequence", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
     await startCall(ws);
     const recording = recordSocket(ws);
 
+    sendJSON(ws, { type: "_emit_speech_start", text: "first" });
+    sendJSON(ws, { type: "_emit_speech_update", text: "first draft" });
     sendJSON(ws, { type: "_emit_eager", text: "first draft" });
     await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
-    sendJSON(ws, { type: "_emit_turn_resumed" });
+    sendJSON(ws, { type: "_emit_turn_resumed", text: "first draft extended" });
     await waitUntilTurnState(ws, (state) => state.abortCount === 1);
+    sendJSON(ws, { type: "_emit_speech_update", text: "second draft" });
 
     sendJSON(ws, { type: "_emit_eager", text: "second draft" });
     await waitUntilTurnState(ws, (state) => state.transcripts.length === 2);
@@ -1867,7 +1835,7 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     ws.close();
   });
 
-  it("interrupts controlled streaming audio after an eager transcript", async () => {
+  it("interrupts controlled streaming audio at speech start", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
     sendJSON(ws, { type: "_set_audio_transport", value: true });
@@ -1915,6 +1883,14 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     sendJSON(ws, { type: "_emit_end", text: "confirmed audio" });
     await waitForTransportSendCount(ws, 1);
 
+    sendJSON(ws, {
+      type: "_emit_speech_start",
+      text: "Echo confirmed audio"
+    });
+    sendJSON(ws, {
+      type: "_emit_speech_update",
+      text: "Echo confirmed audio"
+    });
     sendJSON(ws, { type: "_emit_eager", text: "Echo confirmed audio" });
     sendJSON(ws, { type: "_emit_end", text: "Echo confirmed audio" });
     await waitForMicrotasks();
@@ -1931,6 +1907,8 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
       )
     ).toHaveLength(0);
 
+    sendJSON(ws, { type: "_emit_speech_start", text: "real interruption" });
+    sendJSON(ws, { type: "_emit_speech_update", text: "real interruption" });
     sendJSON(ws, { type: "_emit_eager", text: "real interruption" });
     sendJSON(ws, { type: "_emit_end", text: "real interruption" });
 
@@ -2077,8 +2055,7 @@ describe("VoiceAgent — interrupt", () => {
     ws.close();
   });
 
-  it("gates eager transcript barge-in below minInterruptWords", async () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  it("interrupts on the first speech update reaching minInterruptWords", async () => {
     const { ws } = await connectWS(uniqueMinInterruptPath());
     const recording = recordSocket(ws);
     try {
@@ -2094,56 +2071,39 @@ describe("VoiceAgent — interrupt", () => {
         abortCount: 0
       });
 
-      for (const transcript of ["no", "no way"]) {
-        sendJSON(ws, { type: "_emit_speech_start", text: transcript });
-        sendJSON(ws, { type: "_emit_eager", text: transcript });
-        await waitForMicrotasks();
-
-        expect(await getTurnState(ws)).toEqual({
-          transcripts: ["long response"],
-          abortCount: 0
-        });
-        expect(
-          recording.messages.filter(
-            (message) => message.type === "playback_interrupt"
-          )
-        ).toHaveLength(0);
-        for (const trigger of ["flux_speech_start", "flux_eager_utterance"]) {
-          expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
-            event: "interrupt_trigger",
-            connectionId: expect.any(String),
-            trigger,
-            transcript,
-            activePipeline: true,
-            action: "below_min_words"
-          });
-        }
-      }
+      sendJSON(ws, { type: "_emit_speech_start", text: "hold on" });
+      await waitForMicrotasks();
+      expect(
+        recording.messages.filter(
+          (message) => message.type === "playback_interrupt"
+        )
+      ).toHaveLength(0);
+      expect((await waitForInterruptCount(ws, 0)).interrupt).toBe(0);
 
       const playbackInterrupt = waitForType(ws, "playback_interrupt");
-      sendJSON(ws, { type: "_emit_speech_start", text: "talk to me" });
-      sendJSON(ws, { type: "_emit_eager", text: "talk to me" });
+      sendJSON(ws, { type: "_emit_speech_update", text: "hold on now" });
       await playbackInterrupt;
+      expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
+
+      sendJSON(ws, { type: "_emit_eager", text: "hold on now" });
+      sendJSON(ws, { type: "_emit_end", text: "hold on now" });
+      await waitForMicrotasks();
 
       expect(
-        await waitUntilTurnState(
-          ws,
-          (state) => state.abortCount === 1 && state.transcripts.length === 2
-        )
+        await waitUntilTurnState(ws, (state) => state.transcripts.length === 2)
       ).toEqual({
-        transcripts: ["long response", "talk to me"],
+        transcripts: ["long response", "hold on now"],
         abortCount: 1
       });
-      expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
       expect(
         recording.messages.filter(
           (message) => message.type === "playback_interrupt"
         )
       ).toHaveLength(1);
+      expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
     } finally {
       recording.stop();
       ws.close();
-      log.mockRestore();
     }
   });
 });
@@ -2774,6 +2734,90 @@ describe("VoiceAgent — server audio transport", () => {
     ).toEqual([]);
     recording.stop();
     ws.close();
+  });
+
+  it("interrupts carrier playback after the pipeline completes", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { ws } = await connectWS(uniqueMinInterruptPath());
+    const recording = recordSocket(ws);
+    try {
+      await waitForStatus(ws, "idle");
+      sendJSON(ws, { type: "_set_hold_turn", value: false });
+      await waitForAck(ws, "_set_hold_turn");
+      sendJSON(ws, {
+        type: "start_call",
+        playback_markers: true,
+        playback_marker_acks: true
+      });
+      await waitForStatus(ws, "listening");
+
+      const firstMarkerPromise = waitForMessageMatching(
+        ws,
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          (message as Record<string, unknown>).type === "playback_marker" &&
+          (message as Record<string, unknown>).sequence === 1
+      );
+      const secondMarkerPromise = waitForMessageMatching(
+        ws,
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          (message as Record<string, unknown>).type === "playback_marker" &&
+          (message as Record<string, unknown>).sequence === 2
+      );
+      const completed = waitForStatus(ws, "listening");
+      sendJSON(ws, {
+        type: "text_message",
+        text: "First sentence. Second sentence."
+      });
+      const [firstMarker, secondMarker] = (await Promise.all([
+        firstMarkerPromise,
+        secondMarkerPromise
+      ])) as [Record<string, unknown>, Record<string, unknown>];
+      await completed;
+
+      sendJSON(ws, {
+        type: "playback_marker_ack",
+        playbackId: firstMarker.playbackId,
+        sequence: firstMarker.sequence
+      });
+      await expect(getPlaybackText(ws)).resolves.toBe("Echo: First sentence.");
+
+      sendJSON(ws, { type: "_emit_speech_start", text: "hold on" });
+      await waitForMicrotasks();
+      expect(
+        recording.messages.filter(
+          (message) => message.type === "playback_interrupt"
+        )
+      ).toHaveLength(0);
+
+      const playbackInterrupt = waitForType(ws, "playback_interrupt");
+      sendJSON(ws, { type: "_emit_speech_update", text: "hold on now" });
+      await playbackInterrupt;
+      expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
+      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
+        event: "interrupt_trigger",
+        connectionId: expect.any(String),
+        trigger: "onSpeechUpdate",
+        transcript: "hold on now",
+        activePipeline: false,
+        pendingPlayback: true,
+        action: "interrupt"
+      });
+
+      sendJSON(ws, {
+        type: "playback_marker_ack",
+        playbackId: secondMarker.playbackId,
+        sequence: secondMarker.sequence
+      });
+      await expect(getPlaybackText(ws)).resolves.toBe("Echo: First sentence.");
+    } finally {
+      recording.stop();
+      ws.close();
+      log.mockRestore();
+    }
   });
 
   it("stops the transport on abrupt connection close", async () => {

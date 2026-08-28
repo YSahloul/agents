@@ -173,6 +173,7 @@ class TestTranscriberSession implements TranscriberSession {
   #closed = false;
   #onInterim: ((text: string) => void) | undefined;
   #onSpeechStart: ((text?: string) => void) | undefined;
+  #onSpeechUpdate: ((text: string) => void) | undefined;
   #onUtterance: ((text: string) => void) | undefined;
   #onEagerUtterance: ((text: string) => void) | undefined;
   #onTurnResumed: ((text?: string) => void) | undefined;
@@ -184,6 +185,7 @@ class TestTranscriberSession implements TranscriberSession {
   constructor(options?: TranscriberSessionOptions, utteranceThreshold = 20000) {
     this.#onInterim = options?.onInterim;
     this.#onSpeechStart = options?.onSpeechStart;
+    this.#onSpeechUpdate = options?.onSpeechUpdate;
     this.#onUtterance = options?.onUtterance;
     this.#onEagerUtterance = options?.onEagerUtterance;
     this.#onTurnResumed = options?.onTurnResumed;
@@ -211,6 +213,9 @@ class TestTranscriberSession implements TranscriberSession {
 
   emitSpeechStart(transcript?: string): void {
     if (!this.#closed) this.#onSpeechStart?.(transcript);
+  }
+  emitSpeechUpdate(transcript: string): void {
+    if (!this.#closed) this.#onSpeechUpdate?.(transcript);
   }
   emitEnd(transcript: string): void {
     if (!this.#closed) this.#onUtterance?.(transcript);
@@ -920,6 +925,14 @@ export class TestVoiceAgent extends VoiceBase {
             );
           }
           break;
+        case "_emit_speech_update":
+          if (
+            typeof parsed.text === "string" &&
+            this.transcriber instanceof TestTranscriber
+          ) {
+            this.transcriber.lastSession?.emitSpeechUpdate(parsed.text);
+          }
+          break;
         case "_emit_turn_resumed":
           if (this.transcriber instanceof TestTranscriber) {
             this.transcriber.lastSession?.emitTurnResumed(
@@ -1190,9 +1203,18 @@ export class TestMinInterruptVoiceAgent extends MinInterruptVoiceBase {
 
   #turnTranscripts: string[] = [];
   #turnAbortCount = 0;
+  #holdTurn = true;
 
-  async onTurn(transcript: string, context: VoiceTurnContext): Promise<string> {
+  async onTurn(
+    transcript: string,
+    context: VoiceTurnContext
+  ): Promise<TextSource> {
     this.#turnTranscripts.push(transcript);
+    if (!this.#holdTurn) {
+      return (async function* () {
+        yield `Echo: ${transcript}`;
+      })();
+    }
     await new Promise<void>((resolve) => {
       const onAbort = () => {
         this.#turnAbortCount++;
@@ -1215,11 +1237,25 @@ export class TestMinInterruptVoiceAgent extends MinInterruptVoiceBase {
     try {
       const parsed = JSON.parse(message) as Record<string, unknown>;
       switch (parsed.type) {
+        case "_set_hold_turn":
+          this.#holdTurn = parsed.value !== false;
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
         case "_emit_speech_start":
           if (this.transcriber instanceof TestTranscriber) {
             this.transcriber.lastSession?.emitSpeechStart(
               typeof parsed.text === "string" ? parsed.text : undefined
             );
+          }
+          break;
+        case "_emit_speech_update":
+          if (
+            typeof parsed.text === "string" &&
+            this.transcriber instanceof TestTranscriber
+          ) {
+            this.transcriber.lastSession?.emitSpeechUpdate(parsed.text);
           }
           break;
         case "_emit_eager":
@@ -1229,6 +1265,22 @@ export class TestMinInterruptVoiceAgent extends MinInterruptVoiceBase {
           ) {
             this.transcriber.lastSession?.emitEager(parsed.text);
           }
+          break;
+        case "_emit_end":
+          if (
+            typeof parsed.text === "string" &&
+            this.transcriber instanceof TestTranscriber
+          ) {
+            this.transcriber.lastSession?.emitEnd(parsed.text);
+          }
+          break;
+        case "_get_playback_text":
+          connection.send(
+            JSON.stringify({
+              type: "_playback_text",
+              text: this.getPlaybackText(connection.id)
+            })
+          );
           break;
         case "_get_turn_state":
           connection.send(

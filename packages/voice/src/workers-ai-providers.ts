@@ -845,6 +845,7 @@ interface FluxEvent {
 class FluxSession implements TranscriberSession {
   #onInterim: ((text: string) => void) | undefined;
   #onSpeechStart: ((text?: string) => void) | undefined;
+  #onSpeechUpdate: ((text: string) => void) | undefined;
   #onUtterance: ((text: string) => void) | undefined;
   #onEagerUtterance: ((transcript: string) => void) | undefined;
   #onTurnResumed: ((transcript?: string) => void) | undefined;
@@ -856,7 +857,6 @@ class FluxSession implements TranscriberSession {
   #closed = false;
 
   #pendingChunks: ArrayBuffer[] = [];
-  #currentTranscript = "";
 
   #ready: Promise<void>;
   #resolveReady: (() => void) | null = null;
@@ -871,6 +871,7 @@ class FluxSession implements TranscriberSession {
     this.#config = config;
     this.#onInterim = options?.onInterim;
     this.#onSpeechStart = options?.onSpeechStart;
+    this.#onSpeechUpdate = options?.onSpeechUpdate;
     this.#onUtterance = options?.onUtterance;
     this.#onEagerUtterance = options?.onEagerUtterance;
     this.#onTurnResumed = options?.onTurnResumed;
@@ -938,8 +939,6 @@ class FluxSession implements TranscriberSession {
       const reconnect = () => {
         if (this.#closed || this.#ws !== ws) return;
         this.#connected = false;
-        this.#ws = null;
-        this.#currentTranscript = "";
         void this.#connect();
       };
       ws.addEventListener("close", reconnect);
@@ -1015,44 +1014,32 @@ class FluxSession implements TranscriberSession {
 
       switch (data.event) {
         case "StartOfTurn":
-          this.#currentTranscript = "";
-          this.#onSpeechStart?.(transcript || undefined);
           if (transcript) {
-            this.#currentTranscript = transcript;
-            this.#onInterim?.(transcript);
+            this.#onSpeechStart?.(transcript);
           }
           break;
 
         case "Update":
           if (transcript) {
-            this.#currentTranscript = transcript;
             this.#onInterim?.(transcript);
+            this.#onSpeechUpdate?.(transcript);
           }
           break;
-
-        case "EndOfTurn": {
-          const finalTranscript = transcript || this.#currentTranscript;
-          this.#currentTranscript = "";
-          if (finalTranscript) {
-            this.#onUtterance?.(finalTranscript);
-          }
-          break;
-        }
 
         case "EagerEndOfTurn":
           if (transcript) {
-            this.#currentTranscript = transcript;
-            this.#onInterim?.(transcript);
             this.#onEagerUtterance?.(transcript);
           }
           break;
 
         case "TurnResumed":
-          this.#currentTranscript = transcript;
-          if (transcript) {
-            this.#onInterim?.(transcript);
-          }
           this.#onTurnResumed?.(transcript || undefined);
+          break;
+
+        case "EndOfTurn":
+          if (transcript) {
+            this.#onUtterance?.(transcript);
+          }
           break;
       }
     } catch {
@@ -1171,6 +1158,7 @@ interface Nova3Result {
  */
 class Nova3Session implements TranscriberSession {
   #onSpeechStart: ((text?: string) => void) | undefined;
+  #onSpeechUpdate: ((text: string) => void) | undefined;
   #onInterim: ((text: string) => void) | undefined;
   #onUtterance: ((text: string) => void) | undefined;
 
@@ -1189,6 +1177,7 @@ class Nova3Session implements TranscriberSession {
     options?: TranscriberSessionOptions
   ) {
     this.#onSpeechStart = options?.onSpeechStart;
+    this.#onSpeechUpdate = options?.onSpeechUpdate;
     this.#onInterim = options?.onInterim;
     this.#onUtterance = options?.onUtterance;
     this.#connect(ai, config);
@@ -1324,6 +1313,7 @@ class Nova3Session implements TranscriberSession {
               ? finalizedSegments.join(" ") + " " + transcript
               : transcript;
           this.#onInterim?.(display);
+          this.#onSpeechUpdate?.(display);
         }
       }
     } catch {
