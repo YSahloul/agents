@@ -22,11 +22,24 @@
  * voice protocol. The transcriber session is per-call — created at start_call,
  * closed at end_call. The model handles turn detection.
  *
+ * Event map and ownership:
+ * - `#handleStartCall` and `#handleEndCall` own call lifecycle.
+ * - `#handleInterrupt` and `#handleBargeIn` decide interruption policy.
+ * - `#runPipeline` and `#streamResponse` own turn and response processing.
+ * - `AudioConnectionManager` alone owns the active pipeline AbortController.
+ *
+ * Fork extensions are Flux eager/speculative turns, assistant-echo rejection,
+ * call-start input suppression, server audio transports, and playback markers.
+ * Rejected echo or short-fragment STT events must not replace the active
+ * pipeline. Accepted barge-in emits `playback_interrupt`; carrier clearing
+ * remains the audio transport adapter's responsibility.
+ *
  * @experimental This API is not yet stable and may change.
  */
 
 import type { Agent, Connection, WSMessage } from "agents";
 import { SentenceChunker } from "./sentence-chunker";
+import { countTranscriptWords, isEchoOf } from "./voice-interruption";
 import {
   iterateText,
   iterateTextEvents,
@@ -267,20 +280,6 @@ const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
 const DEFAULT_SAMPLE_RATE = 16000;
 const STREAMING_TTS_MAX_CHARS = 48;
-
-function isEchoOf(transcript: string, assistantText: string): boolean {
-  if (!assistantText) return false;
-  const assistant =
-    assistantText
-      .toLowerCase()
-      .match(/[\p{L}\p{N}]+/gu)
-      ?.join(" ") ?? "";
-  const heard = transcript.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-  if (heard.length >= 3 && assistant.includes(heard.join(" "))) return true;
-  const assistantWords = new Set(assistant.split(" "));
-  const hits = heard.filter((word) => assistantWords.has(word)).length;
-  return hits >= 4 && hits / heard.length >= 0.6;
-}
 
 // --- Mixin ---
 
@@ -726,6 +725,8 @@ export function withVoice<TBase extends AgentLike>(
       }));
     }
 
+    // --- Audio transport helpers ---
+
     async #sendAudio(
       connection: Connection,
       audio: ArrayBuffer
@@ -748,7 +749,7 @@ export function withVoice<TBase extends AgentLike>(
       await transport.stop(connectionId);
     }
 
-    // --- Convenience methods ---
+    // --- Speculative-turn bookkeeping ---
 
     #cancelSpeculativeTurn(
       connectionId: string,
@@ -788,6 +789,9 @@ export function withVoice<TBase extends AgentLike>(
       });
       this.#runPipeline(connection, transcript, turn);
     }
+
+    // --- Public call controls ---
+
     forceEndCall(connection: Connection): void {
       if (!this.#cm.isInCall(connection.id)) return;
       runBackground("force_end_call", () => this.#handleEndCall(connection));
@@ -845,6 +849,8 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
+    // --- Synthesis helpers ---
+
     #requireTTS(): TTSProvider & Partial<StreamingTTSProvider> {
       if (!this.tts) {
         throw new Error(
@@ -894,7 +900,7 @@ export function withVoice<TBase extends AgentLike>(
       if (!signal.aborted) await this.#flushAudio(connection);
     }
 
-    // --- Internal: call lifecycle ---
+    // --- Call lifecycle ---
 
     async #handleStartCall(
       connection: Connection,
@@ -1025,11 +1031,12 @@ export function withVoice<TBase extends AgentLike>(
             });
             if (echoed) return;
             if (opt("filterEchoedTranscripts", false)) {
-              this.#handleBargeIn(
+              const mayStartTurn = this.#handleBargeIn(
                 connection,
                 "flux_eager_utterance",
                 transcript
               );
+              if (!mayStartTurn) return;
             }
             this.#startSpeculativeTurn(connection, transcript);
           },
@@ -1186,6 +1193,8 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
+    // --- Interruption policy ---
+
     async #handleInterrupt(
       connection: Connection,
       trigger: string
@@ -1215,24 +1224,22 @@ export function withVoice<TBase extends AgentLike>(
       connection: Connection,
       trigger: string,
       transcript?: string
-    ): void {
+    ): boolean {
+      const activePipeline = this.#cm.hasActivePipeline(connection.id);
       const minWords = opt("minInterruptWords", 0);
-      const wordCount = transcript?.trim()
-        ? transcript.trim().split(/\s+/).length
-        : 0;
+      const wordCount = countTranscriptWords(transcript);
       if (minWords > 0 && wordCount < minWords) {
         console.log("[VoiceTrace]", {
           event: "interrupt_trigger",
           connectionId: connection.id,
           trigger,
           transcript: transcript ?? null,
-          activePipeline: this.#cm.hasActivePipeline(connection.id),
+          activePipeline,
           action: "below_min_words"
         });
-        return;
+        return !activePipeline;
       }
       this.#cancelSpeculativeTurn(connection.id, "speech_start");
-      const activePipeline = this.#cm.hasActivePipeline(connection.id);
       const interrupted = this.#cm.abortPipeline(connection.id);
       console.log("[VoiceTrace]", {
         event: "interrupt_trigger",
@@ -1242,7 +1249,7 @@ export function withVoice<TBase extends AgentLike>(
         activePipeline,
         action: interrupted ? "interrupt" : "no_active_pipeline"
       });
-      if (!interrupted) return;
+      if (!interrupted) return true;
       this.#sendJSON(connection, { type: "playback_interrupt" });
       this.#sendJSON(connection, { type: "status", status: "listening" });
       runBackground("barge_in", async () => {
@@ -1254,9 +1261,10 @@ export function withVoice<TBase extends AgentLike>(
           await this.onInterrupt(connection);
         }
       });
+      return true;
     }
 
-    // --- Internal: text message handling ---
+    // --- Text-message pipeline ---
 
     async #handleTextMessage(connection: Connection, text: string) {
       if (!text || text.trim().length === 0) return;
@@ -1373,7 +1381,7 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
-    // --- Internal: voice pipeline ---
+    // --- Voice pipeline ---
 
     async #runPipeline(
       connection: Connection,
@@ -1557,7 +1565,7 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
-    // --- Internal: streaming TTS pipeline ---
+    // --- Streaming TTS ---
 
     async #streamResponse(
       connection: Connection,
@@ -2081,7 +2089,7 @@ export function withVoice<TBase extends AgentLike>(
       };
     }
 
-    // --- Internal: protocol helpers ---
+    // --- Protocol helpers ---
 
     #sendJSON(connection: Connection, data: unknown) {
       const parsed = data as Record<string, unknown>;

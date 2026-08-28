@@ -2070,7 +2070,7 @@ describe("VoiceAgent — interrupt", () => {
     ws.close();
   });
 
-  it("gates transcript barge-in below minInterruptWords", async () => {
+  it("gates eager transcript barge-in below minInterruptWords", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { ws } = await connectWS(uniqueMinInterruptPath());
     const recording = recordSocket(ws);
@@ -2080,32 +2080,53 @@ describe("VoiceAgent — interrupt", () => {
 
       sendJSON(ws, { type: "text_message", text: "long response" });
       await waitForStatus(ws, "thinking");
-
-      sendJSON(ws, { type: "_emit_speech_start", text: "no" });
-      expect((await getCounts(ws)).interrupt).toBe(0);
-      sendJSON(ws, { type: "_emit_speech_start", text: "no way" });
-      expect((await getCounts(ws)).interrupt).toBe(0);
-
-      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
-        event: "interrupt_trigger",
-        connectionId: expect.any(String),
-        trigger: "flux_speech_start",
-        transcript: "no",
-        activePipeline: true,
-        action: "below_min_words"
+      expect(
+        await waitUntilTurnState(ws, (state) => state.transcripts.length === 1)
+      ).toEqual({
+        transcripts: ["long response"],
+        abortCount: 0
       });
-      expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
-        event: "interrupt_trigger",
-        connectionId: expect.any(String),
-        trigger: "flux_speech_start",
-        transcript: "no way",
-        activePipeline: true,
-        action: "below_min_words"
-      });
+
+      for (const transcript of ["no", "no way"]) {
+        sendJSON(ws, { type: "_emit_speech_start", text: transcript });
+        sendJSON(ws, { type: "_emit_eager", text: transcript });
+        await waitForMicrotasks();
+
+        expect(await getTurnState(ws)).toEqual({
+          transcripts: ["long response"],
+          abortCount: 0
+        });
+        expect(
+          recording.messages.filter(
+            (message) => message.type === "playback_interrupt"
+          )
+        ).toHaveLength(0);
+        for (const trigger of ["flux_speech_start", "flux_eager_utterance"]) {
+          expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
+            event: "interrupt_trigger",
+            connectionId: expect.any(String),
+            trigger,
+            transcript,
+            activePipeline: true,
+            action: "below_min_words"
+          });
+        }
+      }
 
       const playbackInterrupt = waitForType(ws, "playback_interrupt");
       sendJSON(ws, { type: "_emit_speech_start", text: "talk to me" });
+      sendJSON(ws, { type: "_emit_eager", text: "talk to me" });
       await playbackInterrupt;
+
+      expect(
+        await waitUntilTurnState(
+          ws,
+          (state) => state.abortCount === 1 && state.transcripts.length === 2
+        )
+      ).toEqual({
+        transcripts: ["long response", "talk to me"],
+        abortCount: 1
+      });
       expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
       expect(
         recording.messages.filter(

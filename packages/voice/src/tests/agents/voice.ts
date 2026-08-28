@@ -521,6 +521,7 @@ const Pcm24kVoiceBase = withVoice(Agent, {
 });
 const PersistentVoiceBase = withVoice(Agent, { persistMessages: true });
 const MinInterruptVoiceBase = withVoice(Agent, {
+  filterEchoedTranscripts: true,
   minInterruptWords: 3
 });
 
@@ -1179,9 +1180,18 @@ export class TestMinInterruptVoiceAgent extends MinInterruptVoiceBase {
   transcriber = new TestTranscriber();
   tts = new TestTTS();
 
+  #turnTranscripts: string[] = [];
+  #turnAbortCount = 0;
+
   async onTurn(transcript: string, context: VoiceTurnContext): Promise<string> {
+    this.#turnTranscripts.push(transcript);
     await new Promise<void>((resolve) => {
-      context.signal.addEventListener("abort", () => resolve());
+      const onAbort = () => {
+        this.#turnAbortCount++;
+        resolve();
+      };
+      if (context.signal.aborted) onAbort();
+      else context.signal.addEventListener("abort", onAbort, { once: true });
     });
     return `Echo: ${transcript}`;
   }
@@ -1203,6 +1213,23 @@ export class TestMinInterruptVoiceAgent extends MinInterruptVoiceBase {
               typeof parsed.text === "string" ? parsed.text : undefined
             );
           }
+          break;
+        case "_emit_eager":
+          if (
+            typeof parsed.text === "string" &&
+            this.transcriber instanceof TestTranscriber
+          ) {
+            this.transcriber.lastSession?.emitEager(parsed.text);
+          }
+          break;
+        case "_get_turn_state":
+          connection.send(
+            JSON.stringify({
+              type: "_turn_state",
+              transcripts: this.#turnTranscripts,
+              abortCount: this.#turnAbortCount
+            })
+          );
           break;
         case "_get_counts":
           connection.send(
