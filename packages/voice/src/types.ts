@@ -42,6 +42,7 @@ export type VoiceClientMessage =
       preferred_format?: VoiceAudioFormat;
       resumed?: boolean;
       playback_markers?: boolean;
+      playback_marker_acks?: boolean;
     }
   | { type: "end_call" }
   | {
@@ -55,13 +56,20 @@ export type VoiceClientMessage =
       threshold?: number;
     }
   | { type: "interrupt"; source?: "audio_level" }
-  | { type: "text_message"; text: string };
+  | { type: "text_message"; text: string }
+  | VoicePlaybackMarkerAckMessage;
 
 export interface VoicePlaybackMarkerMessage {
   type: "playback_marker";
   playbackId: string;
   sequence: number;
   text: string;
+}
+
+export interface VoicePlaybackMarkerAckMessage {
+  type: "playback_marker_ack";
+  playbackId: string;
+  sequence: number;
 }
 
 // --- Wire protocol: Server → Client ---

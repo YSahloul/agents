@@ -104,6 +104,32 @@ describe("Think voice adapter", () => {
     expect(nextPrompt).not.toContain("Discarded ending.");
   });
 
+  it("persists carrier-acknowledged speech through client playback markers", async () => {
+    const agent = await freshAgent(
+      `voice-client-marker-${crypto.randomUUID()}`
+    );
+    await agent.setVoiceResponseForTest("First sentence. Discarded ending.");
+    await agent.useClientPlaybackMarkerAcksForTest();
+    await agent.runMarkedVoiceTurnForTest("tell me a story");
+    await expect(agent.ackOneClientPlaybackMarkerForTest()).resolves.toBe(
+      "First sentence."
+    );
+    await agent.interruptMarkedVoiceTurnForTest();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(textOf(messages[1])).toBe("First sentence.");
+
+    await agent.setVoiceResponseForTest("Continuation answer.");
+    await agent.runMarkedVoiceTurnForTest("continue");
+    const nextPrompt = await agent.getLastModelPromptForTest();
+    expect(nextPrompt).toContain("First sentence.");
+    expect(nextPrompt).not.toContain("Discarded ending.");
+  });
+
   it("deletes an interrupted text-only assistant with no playback mark", async () => {
     const agent = await freshAgent(`voice-zero-marker-${crypto.randomUUID()}`);
     await agent.setVoiceResponseForTest("Nothing reached playback.");

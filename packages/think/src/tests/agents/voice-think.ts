@@ -6,6 +6,7 @@ import type {
   TranscriberSession,
   TranscriberSessionOptions,
   TTSProvider,
+  VoicePlaybackMarkerMessage,
   VoiceServerAudioTransport,
   VoiceTurnContext
 } from "@cloudflare/voice";
@@ -138,9 +139,12 @@ export class ThinkVoiceTestAgent extends VoiceThink {
 
   private _lastModelPrompt = "";
   private _voiceConnection: Connection | null = null;
+  private _useClientPlaybackMarkerAcks = false;
+  private _voiceListening = false;
   readonly #transcriber = new TestTranscriber();
   readonly #tts = new TestTTS();
   readonly #playbackTextTransport = new TestPlaybackTextTransport();
+  readonly #clientPlaybackMarkers: VoicePlaybackMarkerMessage[] = [];
 
   override configureChannels() {
     return {
@@ -157,8 +161,10 @@ export class ThinkVoiceTestAgent extends VoiceThink {
       this._lastModelPrompt = prompt;
     });
   }
-  override createAudioTransport(): VoiceServerAudioTransport {
-    return this.#playbackTextTransport;
+  override createAudioTransport(): VoiceServerAudioTransport | null {
+    return this._useClientPlaybackMarkerAcks
+      ? null
+      : this.#playbackTextTransport;
   }
 
   async setVoiceResponseForTest(response: string): Promise<void> {
@@ -209,24 +215,66 @@ export class ThinkVoiceTestAgent extends VoiceThink {
   async runVoiceTurnForTest(input: string): Promise<void> {
     await this.runTurn({ input, channel: "voice" });
   }
+  async useClientPlaybackMarkerAcksForTest(): Promise<void> {
+    if (this._voiceConnection) throw new Error("Voice call already started");
+    this._useClientPlaybackMarkerAcks = true;
+  }
+
   async runMarkedVoiceTurnForTest(input: string): Promise<void> {
     if (!this._voiceConnection) {
       this._voiceConnection = {
         id: "marked-voice-test",
         uri: "https://example.com/voice",
-        send() {}
+        send: (message: unknown) => {
+          if (typeof message !== "string") return;
+          try {
+            const parsed = JSON.parse(message) as Record<string, unknown>;
+            if (parsed.type === "status" && parsed.status === "listening") {
+              this._voiceListening = true;
+            }
+            if (
+              parsed.type === "playback_marker" &&
+              typeof parsed.playbackId === "string" &&
+              typeof parsed.sequence === "number" &&
+              typeof parsed.text === "string"
+            ) {
+              this.#clientPlaybackMarkers.push({
+                type: "playback_marker",
+                playbackId: parsed.playbackId,
+                sequence: parsed.sequence,
+                text: parsed.text
+              });
+            }
+          } catch {
+            // Ignore non-JSON server messages in this test connection.
+          }
+        }
       } as unknown as Connection;
       this.onMessage(
         this._voiceConnection,
-        JSON.stringify({ type: "start_call" })
+        JSON.stringify(
+          this._useClientPlaybackMarkerAcks
+            ? {
+                type: "start_call",
+                playback_markers: true,
+                playback_marker_acks: true
+              }
+            : { type: "start_call" }
+        )
       );
       for (
         let attempt = 0;
-        attempt < 100 && !this.#playbackTextTransport.started;
+        attempt < 100 &&
+        (this._useClientPlaybackMarkerAcks
+          ? !this._voiceListening
+          : !this.#playbackTextTransport.started);
         attempt++
       ) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await scheduler.wait(0);
       }
+    }
+    if (this._useClientPlaybackMarkerAcks) {
+      this.#clientPlaybackMarkers.length = 0;
     }
     this.onMessage(
       this._voiceConnection,
@@ -240,14 +288,17 @@ export class ThinkVoiceTestAgent extends VoiceThink {
         )
         .map((part) => part.text)
         .join("");
+      const hasPlaybackMarker = this._useClientPlaybackMarkerAcks
+        ? this.#clientPlaybackMarkers.length > 0
+        : this.#playbackTextTransport.pending.length > 0;
       if (
         latest?.role === "assistant" &&
         text === this._response &&
-        this.#playbackTextTransport.pending.length > 0
+        hasPlaybackMarker
       ) {
         return;
       }
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await scheduler.wait(0);
     }
     throw new Error("Timed out waiting for marked voice turn");
   }
@@ -256,9 +307,24 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     return this.#playbackTextTransport.drainOne();
   }
 
+  async ackOneClientPlaybackMarkerForTest(): Promise<string | undefined> {
+    if (!this._voiceConnection) throw new Error("Voice call not started");
+    const marker = this.#clientPlaybackMarkers.shift();
+    if (!marker) return undefined;
+    this.onMessage(
+      this._voiceConnection,
+      JSON.stringify({
+        type: "playback_marker_ack",
+        playbackId: marker.playbackId,
+        sequence: marker.sequence
+      })
+    );
+    return marker.text;
+  }
+
   async interruptMarkedVoiceTurnForTest(): Promise<void> {
     if (!this._voiceConnection) throw new Error("Voice call not started");
-    const playedText = this.#playbackTextTransport.getPlaybackText();
+    const playedText = this.getPlaybackText(this._voiceConnection.id) ?? "";
     this.onMessage(
       this._voiceConnection,
       JSON.stringify({ type: "interrupt" })
@@ -277,7 +343,7 @@ export class ThinkVoiceTestAgent extends VoiceThink {
       ) {
         return;
       }
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await scheduler.wait(0);
     }
     throw new Error("Timed out waiting for interrupted voice finalization");
   }

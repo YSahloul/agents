@@ -17,7 +17,10 @@ import {
   mulawBase64ToPcm16,
   pcm16ToMulawBase64
 } from "./audio/utils.js";
-import type { VoicePlaybackMarkerMessage } from "@cloudflare/voice";
+import type {
+  VoicePlaybackMarkerAckMessage,
+  VoicePlaybackMarkerMessage
+} from "@cloudflare/voice";
 import type {
   SignalWireDtmfMessage,
   SignalWireMarkMessage,
@@ -379,7 +382,13 @@ export class SignalWireAdapter {
         }
       });
 
-      ws.send(JSON.stringify({ type: "start_call", playback_markers: true }));
+      ws.send(
+        JSON.stringify({
+          type: "start_call",
+          playback_markers: true,
+          playback_marker_acks: true
+        })
+      );
     };
 
     const handleCarrierMessage = async (event: MessageEvent) => {
@@ -444,6 +453,14 @@ export class SignalWireAdapter {
           const playback = pendingPlaybackMarkers.get(markName);
           if (playback) {
             pendingPlaybackMarkers.delete(markName);
+            if (agentSocket?.readyState === WebSocket.OPEN) {
+              const acknowledgement: VoicePlaybackMarkerAckMessage = {
+                type: "playback_marker_ack",
+                playbackId: playback.playbackId,
+                sequence: playback.sequence
+              };
+              agentSocket.send(JSON.stringify(acknowledgement));
+            }
             console.log("[VoiceTrace]", {
               event: "tts_played",
               streamSid,

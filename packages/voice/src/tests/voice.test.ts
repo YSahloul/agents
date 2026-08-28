@@ -115,6 +115,13 @@ async function getTransportEvents(ws: WebSocket): Promise<string[]> {
   return message.events;
 }
 
+async function getPlaybackText(ws: WebSocket): Promise<string | null> {
+  const response = waitForType(ws, "_playback_text");
+  sendJSON(ws, { type: "_get_playback_text" });
+  const message = (await response) as { text: string | null };
+  return message.text;
+}
+
 async function setTranscriberMode(
   ws: WebSocket,
   value:
@@ -2646,8 +2653,13 @@ describe("VoiceAgent — server audio transport", () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
     await setTtsMode(ws, "sentence");
-    sendJSON(ws, { type: "start_call", playback_markers: true });
+    sendJSON(ws, {
+      type: "start_call",
+      playback_markers: true,
+      playback_marker_acks: true
+    });
     await waitForStatus(ws, "listening");
+    await expect(getPlaybackText(ws)).resolves.toBe("");
     const recording = recordSocket(ws);
     sendJSON(ws, { type: "text_message", text: "marker pipeline" });
     await vi.waitFor(() => expect(recording.binaryCount).toBeGreaterThan(0));
@@ -2662,6 +2674,24 @@ describe("VoiceAgent — server audio transport", () => {
     sendJSON(ws, { type: "_release_tts" });
     await waitForAck(ws, "_release_tts");
     const firstMarker = (await firstMarkerPromise) as Record<string, unknown>;
+    sendJSON(ws, {
+      type: "playback_marker_ack",
+      playbackId: firstMarker.playbackId,
+      sequence: 999
+    });
+    await expect(getPlaybackText(ws)).resolves.toBe("");
+    sendJSON(ws, {
+      type: "playback_marker_ack",
+      playbackId: firstMarker.playbackId,
+      sequence: firstMarker.sequence
+    });
+    await expect(getPlaybackText(ws)).resolves.toBe("First sentence.");
+    sendJSON(ws, {
+      type: "playback_marker_ack",
+      playbackId: firstMarker.playbackId,
+      sequence: firstMarker.sequence
+    });
+    await expect(getPlaybackText(ws)).resolves.toBe("First sentence.");
     sendJSON(ws, { type: "_release_model_stream" });
     await waitForAck(ws, "_release_model_stream");
     const secondMarkerPromise = waitForMessageMatching(
@@ -2672,9 +2702,18 @@ describe("VoiceAgent — server audio transport", () => {
         (message as Record<string, unknown>).type === "playback_marker" &&
         (message as Record<string, unknown>).sequence === 2
     );
+    const completed = waitForStatus(ws, "listening");
     sendJSON(ws, { type: "_release_tts" });
     await waitForAck(ws, "_release_tts");
     const secondMarker = (await secondMarkerPromise) as Record<string, unknown>;
+    sendJSON(ws, {
+      type: "playback_marker_ack",
+      playbackId: secondMarker.playbackId,
+      sequence: secondMarker.sequence
+    });
+    await expect(getPlaybackText(ws)).resolves.toBe(
+      "First sentence. Second sentence."
+    );
 
     const markers = recording.events.filter(
       (event): event is Record<string, unknown> =>
@@ -2709,12 +2748,13 @@ describe("VoiceAgent — server audio transport", () => {
         .filter((event) => event === "binary")
     ).not.toHaveLength(0);
 
-    await waitForStatus(ws, "listening");
+    await completed;
     const binaryCountBeforeInterrupt = recording.binaryCount;
     sendJSON(ws, { type: "text_message", text: "marker pipeline" });
     await vi.waitFor(() =>
       expect(recording.binaryCount).toBeGreaterThan(binaryCountBeforeInterrupt)
     );
+    await expect(getPlaybackText(ws)).resolves.toBe("");
     sendJSON(ws, { type: "_release_model_stream" });
     await waitForAck(ws, "_release_model_stream");
     await vi.waitFor(() =>

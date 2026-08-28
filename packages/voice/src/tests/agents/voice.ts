@@ -797,6 +797,14 @@ export class TestVoiceAgent extends VoiceBase {
             })
           );
           break;
+        case "_get_playback_text":
+          connection.send(
+            JSON.stringify({
+              type: "_playback_text",
+              text: this.getPlaybackText(connection.id)
+            })
+          );
+          break;
         case "_get_turn_state":
           connection.send(
             JSON.stringify({

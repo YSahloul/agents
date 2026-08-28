@@ -233,7 +233,11 @@ describe("SignalWireAdapter.handleRequest", () => {
     const harness = createHarness();
     await startCall(harness);
     expect(harness.agentSocket.jsonSent).toEqual([
-      { type: "start_call", playback_markers: true }
+      {
+        type: "start_call",
+        playback_markers: true,
+        playback_marker_acks: true
+      }
     ]);
   });
 
@@ -726,6 +730,22 @@ describe("agent JSON messages → SignalWire marks", () => {
       })
     });
     await tick();
+    expect(
+      harness.agentSocket.jsonSent.filter(
+        (message) => message.type === "playback_marker_ack"
+      )
+    ).toEqual([
+      {
+        type: "playback_marker_ack",
+        playbackId: "playback-1",
+        sequence: 1
+      },
+      {
+        type: "playback_marker_ack",
+        playbackId: "playback-1",
+        sequence: 2
+      }
+    ]);
 
     expect(traces.filter((trace) => trace.event === "tts_played")).toEqual([]);
     const playedTraces = logSpy.mock.calls
@@ -858,6 +878,11 @@ describe("carrier playback control", () => {
       data: JSON.stringify({ event: "mark", mark: { name: markName } })
     });
     await tick();
+    expect(
+      harness.agentSocket.jsonSent.filter(
+        (message) => message.type === "playback_marker_ack"
+      )
+    ).toEqual([]);
 
     expect(
       logSpy.mock.calls

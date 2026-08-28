@@ -70,6 +70,11 @@ type ClientSpeechEnergy = {
   peakRms: number | null;
   threshold: number | null;
 };
+type ClientPlaybackMarkerState = {
+  markers: Map<string, string>;
+  acknowledgedMarkers: Set<string>;
+  acknowledgedText: string[];
+};
 type TTSOutputEvent =
   | { type: "audio"; audio: ArrayBuffer }
   | {
@@ -96,6 +101,10 @@ function playbackTextTransport(
     return null;
   }
   return transport as PlaybackTextTransport;
+}
+
+function playbackMarkerKey(playbackId: string, sequence: number): string {
+  return `${playbackId}:${sequence}`;
 }
 
 function readClientRms(
@@ -135,6 +144,7 @@ export type {
   VoiceAudioFormat,
   VoiceCallStartContext,
   VoicePlaybackMarkerMessage,
+  VoicePlaybackMarkerAckMessage,
   VoiceAudioInput,
   VoiceTransport,
   VoiceServerAudioTransport,
@@ -405,6 +415,8 @@ export function withVoice<TBase extends AgentLike>(
     #startupTokens = new Map<string, symbol>();
     // Connections that explicitly opted into sentence playback markers.
     #playbackMarkerConnections = new Set<string>();
+    // Carrier-acknowledged marker text for clients that support acknowledgements.
+    #clientPlaybackMarkers = new Map<string, ClientPlaybackMarkerState>();
 
     // Voice protocol message types handled internally
     static #VOICE_MESSAGES = new Set([
@@ -414,6 +426,7 @@ export function withVoice<TBase extends AgentLike>(
       "start_of_speech",
       "end_of_speech",
       "interrupt",
+      "playback_marker_ack",
       "text_message"
     ]);
 
@@ -463,6 +476,7 @@ export function withVoice<TBase extends AgentLike>(
         this.#activeAssistantText.delete(connection.id);
         this.#callStartInputSuppressed.delete(connection.id);
         this.#playbackMarkerConnections.delete(connection.id);
+        this.#clientPlaybackMarkers.delete(connection.id);
         this.#clientSpeechEnergy.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
         this.#cm.cleanup(connection.id);
@@ -518,13 +532,26 @@ export function withVoice<TBase extends AgentLike>(
             case "hello":
               break;
             case "start_call": {
-              if (
+              const playbackMarkers =
                 "playback_markers" in parsed &&
-                parsed.playback_markers === true
-              ) {
+                parsed.playback_markers === true;
+              if (playbackMarkers) {
                 this.#playbackMarkerConnections.add(connection.id);
               } else {
                 this.#playbackMarkerConnections.delete(connection.id);
+              }
+              if (
+                playbackMarkers &&
+                "playback_marker_acks" in parsed &&
+                parsed.playback_marker_acks === true
+              ) {
+                this.#clientPlaybackMarkers.set(connection.id, {
+                  markers: new Map(),
+                  acknowledgedMarkers: new Set(),
+                  acknowledgedText: []
+                });
+              } else {
+                this.#clientPlaybackMarkers.delete(connection.id);
               }
               const preferredFormat =
                 "preferred_format" in parsed &&
@@ -539,6 +566,7 @@ export function withVoice<TBase extends AgentLike>(
             }
             case "end_call":
               this.#playbackMarkerConnections.delete(connection.id);
+              this.#clientPlaybackMarkers.delete(connection.id);
               runBackground("end_call", () => this.#handleEndCall(connection));
               break;
             case "start_of_speech":
@@ -568,6 +596,31 @@ export function withVoice<TBase extends AgentLike>(
               runBackground("interrupt", () =>
                 this.#handleInterrupt(connection, source)
               );
+              break;
+            }
+            case "playback_marker_ack": {
+              const state = this.#clientPlaybackMarkers.get(connection.id);
+              const playbackId =
+                "playbackId" in parsed ? parsed.playbackId : undefined;
+              const sequence =
+                "sequence" in parsed ? parsed.sequence : undefined;
+              if (
+                !state ||
+                typeof playbackId !== "string" ||
+                playbackId.length === 0 ||
+                !Number.isInteger(sequence) ||
+                typeof sequence !== "number" ||
+                sequence <= 0
+              ) {
+                break;
+              }
+              const key = playbackMarkerKey(playbackId, sequence);
+              const text = state.markers.get(key);
+              if (text === undefined || state.acknowledgedMarkers.has(key)) {
+                break;
+              }
+              state.acknowledgedMarkers.add(key);
+              state.acknowledgedText.push(text);
               break;
             }
             case "text_message": {
@@ -621,10 +674,14 @@ export function withVoice<TBase extends AgentLike>(
       this.#cm.bufferAudio(connectionId, audio);
     }
     getPlaybackText(connectionId: string): string | null {
+      const transport = playbackTextTransport(
+        this.#audioTransports.get(connectionId)
+      );
+      if (transport) return transport.getPlaybackText(connectionId);
       return (
-        playbackTextTransport(
-          this.#audioTransports.get(connectionId)
-        )?.getPlaybackText(connectionId) ?? null
+        this.#clientPlaybackMarkers
+          .get(connectionId)
+          ?.acknowledgedText.join(" ") ?? null
       );
     }
 
@@ -1581,6 +1638,10 @@ export function withVoice<TBase extends AgentLike>(
       firstSentenceMs: number;
       firstAudioMs: number;
     }> {
+      const clientMarkers = this.#clientPlaybackMarkers.get(connection.id);
+      clientMarkers?.markers.clear();
+      clientMarkers?.acknowledgedMarkers.clear();
+      if (clientMarkers) clientMarkers.acknowledgedText.length = 0;
       const markedTransport = playbackTextTransport(
         this.#audioTransports.get(connection.id)
       );
@@ -1889,6 +1950,11 @@ export function withVoice<TBase extends AgentLike>(
                     sequence: event.sequence,
                     text: event.text
                   };
+                  const state = this.#clientPlaybackMarkers.get(connection.id);
+                  state?.markers.set(
+                    playbackMarkerKey(marker.playbackId, marker.sequence),
+                    marker.text
+                  );
                   this.#sendJSON(connection, marker);
                 }
                 continue;
