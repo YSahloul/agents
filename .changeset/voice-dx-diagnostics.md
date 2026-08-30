@@ -8,13 +8,10 @@
 "@cloudflare/voice-twilio": patch
 ---
 
-Improve voice lifecycle accuracy, diagnostics, and per-turn timing visibility.
+Realign Voice with the upstream diagnostics lifecycle while preserving the fork's production transports, streaming providers, interruption behavior, and public root API.
 
-- Clear stale interim transcripts when calls start, end, disconnect, close, or fail during startup.
-- Emit `speaking` only when the first server audio chunk is sent.
-- Add structured, content-free browser diagnostics and structured Worker error logging without reading arbitrary provider response bodies.
-- Report transcriber startup and runtime failures through `onFatalError`, structured client errors, and reliable call cleanup.
-- Preserve model finish reasons and distinguish no-output, output-limit, content-filtered, and model-error completions.
-- Add stable typed per-turn timing summaries for speech, text, terminal outcomes, model streaming, reasoning exposed by the model stream, and overlapping TTS work through `VoiceClient` and the React hooks.
-- Keep the existing four-field metrics wire shape compatible while making no-audio and streamed TTS accounting consistent.
-- Update the bundled voice providers to propagate lifecycle failures and log errors consistently.
+- Add the `@cloudflare/voice/errors` subpath, sanitized browser diagnostics, structured Worker errors, fatal transcriber reporting, completion outcomes, and stable per-turn model/TTS metrics.
+- Restore `voice.ts` as the primary implementation and use a package-only barrel to keep SFU, RPC, and audio-converter exports cycle-free without changing `@cloudflare/voice`.
+- Keep Flux eager-turn confirmation, transcript-threshold barge-in, assistant-echo filtering, server audio transports, playback-marker acknowledgements, and acknowledged playback text integrated with diagnostic turn cleanup.
+- Keep durable SQLite conversation history as the default while allowing session-owning integrations such as Think to select bounded in-memory history with `persistMessages: false`.
+- Update VoiceClient, React hooks, Voice Input, Workers AI providers, and bundled provider packages to report lifecycle failures and structured errors consistently.

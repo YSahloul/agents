@@ -2,6 +2,6 @@
 "@cloudflare/voice": minor
 ---
 
-Make `withVoice` conversation history transient by default while preserving the original Durable Object SQLite behavior behind `persistMessages: true`.
+Add configurable Voice conversation persistence while keeping Durable Object SQLite history as the default.
 
-Confirmed user and assistant messages remain available through `context.messages`, `saveMessage()`, and `getConversationHistory()`. With the default `persistMessages: false`, history exists only for the current Durable Object instance. Set `persistMessages: true` when messages must survive eviction and restart.
+Set `persistMessages: false` when another layer, such as Think Session, owns durable conversation history. The opt-out retains bounded in-memory messages for `context.messages`, `saveMessage()`, and `getConversationHistory()` without creating the Voice history table.
