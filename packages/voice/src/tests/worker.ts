@@ -3,6 +3,7 @@ import { routeAgentRequest } from "agents";
 export {
   TestVoiceAgent,
   TestPersistentVoiceAgent,
+  TestDiagnosticVoiceAgent,
   TestEmptyResponseVoiceAgent,
   TestContextVoiceAgent,
   TestAiSdkFullStreamVoiceAgent,
@@ -14,6 +15,7 @@ export {
 
 export {
   TestVoiceInputAgent,
+  TestDiagnosticVoiceInputAgent,
   TestRejectCallVoiceInputAgent
 } from "./agents/voice-input";
 
@@ -26,6 +28,7 @@ export {
 export type Env = {
   TestVoiceAgent: DurableObjectNamespace;
   TestPersistentVoiceAgent: DurableObjectNamespace;
+  TestDiagnosticVoiceAgent: DurableObjectNamespace;
   TestEmptyResponseVoiceAgent: DurableObjectNamespace;
   TestContextVoiceAgent: DurableObjectNamespace;
   TestAiSdkFullStreamVoiceAgent: DurableObjectNamespace;
@@ -37,6 +40,8 @@ export type Env = {
   TestSFUVoiceAgent: DurableObjectNamespace;
   TestSFUTransportVoiceAgent: DurableObjectNamespace;
   TestMissingSFUConfigAgent: DurableObjectNamespace;
+  TestDiagnosticVoiceInputAgent: DurableObjectNamespace;
+  TestRejectCallVoiceInputAgent: DurableObjectNamespace;
 };
 
 export default {

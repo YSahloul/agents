@@ -20,6 +20,10 @@
         "name": "TestPersistentVoiceAgent"
       },
       {
+        "class_name": "TestDiagnosticVoiceAgent",
+        "name": "TestDiagnosticVoiceAgent"
+      },
+      {
         "class_name": "TestEmptyResponseVoiceAgent",
         "name": "TestEmptyResponseVoiceAgent"
       },
@@ -52,6 +56,10 @@
         "name": "TestVoiceInputAgent"
       },
       {
+        "class_name": "TestDiagnosticVoiceInputAgent",
+        "name": "TestDiagnosticVoiceInputAgent"
+      },
+      {
         "class_name": "TestRejectCallVoiceInputAgent",
         "name": "TestRejectCallVoiceInputAgent"
       },
@@ -75,6 +83,7 @@
       "new_sqlite_classes": [
         "TestVoiceAgent",
         "TestPersistentVoiceAgent",
+        "TestDiagnosticVoiceAgent",
         "TestEmptyResponseVoiceAgent",
         "TestContextVoiceAgent",
         "TestAiSdkFullStreamVoiceAgent",
@@ -83,6 +92,7 @@
         "TestStreamingTtsVoiceAgent",
         "TestMinInterruptVoiceAgent",
         "TestVoiceInputAgent",
+        "TestDiagnosticVoiceInputAgent",
         "TestRejectCallVoiceInputAgent",
         "TestSFUVoiceAgent",
         "TestSFUTransportVoiceAgent",

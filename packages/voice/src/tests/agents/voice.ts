@@ -7,6 +7,7 @@ import {
   type ToolSet
 } from "ai";
 import { z } from "zod";
+import { VoiceProviderError } from "../../errors";
 import { withVoice, type TextSource, type VoiceTurnContext } from "../../voice";
 import type {
   TTSProvider,
@@ -19,9 +20,43 @@ import type {
   VoiceCallStartContext
 } from "../../types";
 
+type TestTTSMode = "immediate" | "pending" | "no_audio" | "error";
+
+function isTestTTSMode(value: unknown): value is TestTTSMode {
+  return (
+    value === "immediate" ||
+    value === "pending" ||
+    value === "no_audio" ||
+    value === "error"
+  );
+}
+
 /** Deterministic TTS provider for tests — encodes text as bytes. */
 class TestTTS implements TTSProvider {
+  #mode: TestTTSMode = "immediate";
+  #resolvePending: (() => void) | null = null;
+  synthesisCount = 0;
+
+  setMode(mode: TestTTSMode): void {
+    this.#mode = mode;
+  }
+
+  resolvePending(): void {
+    this.#mode = "immediate";
+    this.#resolvePending?.();
+    this.#resolvePending = null;
+  }
+
   async synthesize(text: string): Promise<ArrayBuffer | null> {
+    this.synthesisCount++;
+    if (this.#mode === "pending") {
+      await new Promise<void>((resolve) => {
+        this.#resolvePending = resolve;
+      });
+    }
+    if (this.#mode === "no_audio") return null;
+    if (this.#mode === "error") throw new Error("test TTS failed");
+
     const buffer = new ArrayBuffer(text.length);
     const view = new Uint8Array(buffer);
     for (let i = 0; i < text.length; i++) {
@@ -171,13 +206,15 @@ class TestTranscriberSession implements TranscriberSession {
   #totalBytes = 0;
   #utteranceCount = 0;
   #closed = false;
-  #onInterim: ((text: string) => void) | undefined;
-  #onSpeechStart: ((text?: string) => void) | undefined;
-  #onSpeechUpdate: ((text: string) => void) | undefined;
-  #onUtterance: ((text: string) => void) | undefined;
-  #onEagerUtterance: ((text: string) => void) | undefined;
-  #onTurnResumed: ((text?: string) => void) | undefined;
+  #onInterim: TranscriberSessionOptions["onInterim"];
+  #onSpeechStart: TranscriberSessionOptions["onSpeechStart"];
+  #onSpeechUpdate: TranscriberSessionOptions["onSpeechUpdate"];
+  #onUtterance: TranscriberSessionOptions["onUtterance"];
+  #onEagerUtterance: TranscriberSessionOptions["onEagerUtterance"];
+  #onTurnResumed: TranscriberSessionOptions["onTurnResumed"];
+  #onFatalError: TranscriberSessionOptions["onFatalError"];
   #utteranceThreshold: number;
+  #speechStarted = false;
 
   // Test introspection: agent_context values delivered mid-session.
   agentContexts: string[] = [];
@@ -189,13 +226,17 @@ class TestTranscriberSession implements TranscriberSession {
     this.#onUtterance = options?.onUtterance;
     this.#onEagerUtterance = options?.onEagerUtterance;
     this.#onTurnResumed = options?.onTurnResumed;
+    this.#onFatalError = options?.onFatalError;
     this.#utteranceThreshold = utteranceThreshold;
   }
 
   feed(chunk: ArrayBuffer): void {
     if (this.#closed) return;
     this.#totalBytes += chunk.byteLength;
-    this.#onSpeechStart?.(`hearing ${this.#totalBytes} bytes`);
+    if (!this.#speechStarted) {
+      this.#speechStarted = true;
+      this.#onSpeechStart?.(`hearing ${this.#totalBytes} bytes`);
+    }
     this.#onInterim?.(`hearing ${this.#totalBytes} bytes`);
 
     const nextThreshold = (this.#utteranceCount + 1) * this.#utteranceThreshold;
@@ -203,6 +244,7 @@ class TestTranscriberSession implements TranscriberSession {
       this.#utteranceCount++;
       const transcript = `utterance ${this.#utteranceCount} (${this.#totalBytes} bytes)`;
       this.#onUtterance?.(transcript);
+      this.#speechStarted = false;
     }
   }
 
@@ -225,6 +267,9 @@ class TestTranscriberSession implements TranscriberSession {
   }
   emitTurnResumed(transcript?: string): void {
     if (!this.#closed) this.#onTurnResumed?.(transcript);
+  }
+  reportFatalError(error: Error): void {
+    this.#onFatalError?.(error);
   }
   close(): void {
     this.#closed = true;
@@ -256,6 +301,7 @@ type TestTranscriberMode =
   | "pending_ready"
   | "pending_ready_no_close_settle"
   | "reject_ready"
+  | "reject_ready_object"
   | "create_throw";
 
 function isTestTranscriberMode(value: unknown): value is TestTranscriberMode {
@@ -265,6 +311,7 @@ function isTestTranscriberMode(value: unknown): value is TestTranscriberMode {
     value === "pending_ready" ||
     value === "pending_ready_no_close_settle" ||
     value === "reject_ready" ||
+    value === "reject_ready_object" ||
     value === "create_throw"
   );
 }
@@ -272,7 +319,7 @@ function isTestTranscriberMode(value: unknown): value is TestTranscriberMode {
 class ControlledReadyTranscriberSession extends TestTranscriberSession {
   #ready: Promise<void>;
   #resolveReady: (() => void) | null = null;
-  #rejectReady: ((reason: unknown) => void) | null = null;
+  #rejectReady: ((reason: Error) => void) | null = null;
   #settleOnClose: boolean;
 
   constructor(options?: TranscriberSessionOptions, settleOnClose = true) {
@@ -297,12 +344,12 @@ class ControlledReadyTranscriberSession extends TestTranscriberSession {
     resolve();
   }
 
-  rejectReady(message = "readiness failed"): void {
+  rejectReady(reason: Error = new Error("readiness failed")): void {
     const reject = this.#rejectReady;
     if (!reject) return;
     this.#resolveReady = null;
     this.#rejectReady = null;
-    reject(new Error(message));
+    reject(reason);
   }
 
   close(): void {
@@ -311,10 +358,18 @@ class ControlledReadyTranscriberSession extends TestTranscriberSession {
   }
 }
 
-const v3FinishReason = (unified: "stop" | "tool-calls") => ({
-  unified,
-  raw: undefined
-});
+type MockFinishReason =
+  | "stop"
+  | "length"
+  | "content-filter"
+  | "tool-calls"
+  | "error"
+  | "other";
+
+const v3FinishReason = (
+  unified: MockFinishReason,
+  raw: string | undefined = undefined
+) => ({ unified, raw });
 
 const v3Usage = (inputTokens: number, outputTokens: number) => ({
   inputTokens: {
@@ -328,7 +383,12 @@ const v3Usage = (inputTokens: number, outputTokens: number) => ({
 
 type MockTextStreamPart =
   | { type: "text"; text: string }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; cause?: unknown; asObject?: boolean }
+  | {
+      type: "finish";
+      finishReason: MockFinishReason;
+      rawFinishReason?: string;
+    }
   | {
       type: "tool-call";
       toolName: string;
@@ -370,6 +430,7 @@ function createToolCallingTextStreamModel(
       callCount++;
       const step = response[callCount - 1] ?? [];
       const hasToolCall = step.some((part) => part.type === "tool-call");
+      const finish = step.find((part) => part.type === "finish");
 
       const stream = new ReadableStream({
         start(controller) {
@@ -389,8 +450,12 @@ function createToolCallingTextStreamModel(
             } else if (part.type === "error") {
               controller.enqueue({
                 type: "error",
-                error: new Error(part.message)
+                error: part.asObject
+                  ? part.cause
+                  : new Error(part.message, { cause: part.cause })
               });
+            } else if (part.type === "finish") {
+              continue;
             } else {
               const id = part.toolCallId ?? `tc-${callCount}-${i}`;
               controller.enqueue({
@@ -415,7 +480,10 @@ function createToolCallingTextStreamModel(
 
           controller.enqueue({
             type: "finish",
-            finishReason: v3FinishReason(hasToolCall ? "tool-calls" : "stop"),
+            finishReason: v3FinishReason(
+              finish?.finishReason ?? (hasToolCall ? "tool-calls" : "stop"),
+              finish?.rawFinishReason
+            ),
             usage: v3Usage(10 * callCount, 5 * callCount)
           });
 
@@ -484,7 +552,26 @@ function isMockTextStreamResponse(
         step.every((part) => {
           if (!isRecord(part)) return false;
           if (part.type === "text") return typeof part.text === "string";
-          if (part.type === "error") return typeof part.message === "string";
+          if (part.type === "error") {
+            return (
+              typeof part.message === "string" &&
+              (part.cause === undefined || isJsonValue(part.cause)) &&
+              (part.asObject === undefined ||
+                typeof part.asObject === "boolean")
+            );
+          }
+          if (part.type === "finish") {
+            return (
+              (part.finishReason === "stop" ||
+                part.finishReason === "length" ||
+                part.finishReason === "content-filter" ||
+                part.finishReason === "tool-calls" ||
+                part.finishReason === "error" ||
+                part.finishReason === "other") &&
+              (part.rawFinishReason === undefined ||
+                typeof part.rawFinishReason === "string")
+            );
+          }
           return (
             part.type === "tool-call" &&
             typeof part.toolName === "string" &&
@@ -518,13 +605,17 @@ function isJsonValue(value: unknown): boolean {
 
 const VoiceBase = withVoice(Agent, {
   filterEchoedTranscripts: true,
-  listenDuringCallStart: false
+  listenDuringCallStart: false,
+  persistMessages: false
+});
+const DiagnosticVoiceBase = withVoice(Agent, {
+  diagnostics: { browserConsole: true }
 });
 const Pcm24kVoiceBase = withVoice(Agent, {
   audioFormat: "pcm16",
   sampleRate: 24000
 });
-const PersistentVoiceBase = withVoice(Agent, { persistMessages: true });
+const PersistentVoiceBase = withVoice(Agent);
 const MinInterruptVoiceBase = withVoice(Agent, {
   filterEchoedTranscripts: true,
   minInterruptWords: 3
@@ -549,6 +640,7 @@ export class TestVoiceAgent extends VoiceBase {
   #beforeCallStartResult: boolean | "throw" = true;
   #keepAliveShouldThrow = false;
   #turnDelayMs = 0;
+  #turnResponseMode: "string" | "stream" = "string";
   #transcriberMode: TestTranscriberMode = "default";
   #lastReadySession: ControlledReadyTranscriberSession | null = null;
   #readySessions: ControlledReadyTranscriberSession[] = [];
@@ -613,6 +705,12 @@ export class TestVoiceAgent extends VoiceBase {
         this.#readySessions.push(session);
         if (mode === "reject_ready") {
           session.rejectReady();
+        } else if (mode === "reject_ready_object") {
+          session.rejectReady(
+            new VoiceProviderError("upstream unavailable", {
+              code: "provider_unavailable"
+            })
+          );
         }
         return session;
       }
@@ -666,11 +764,19 @@ export class TestVoiceAgent extends VoiceBase {
         if (!signal.aborted) yield "Second sentence.";
       })();
     }
-    if (!this.#streamTurns) return `Echo: ${transcript}`;
-    return (async function* () {
-      yield "Echo:";
-      yield ` ${transcript}`;
-    })();
+    if (this.#streamTurns) {
+      return (async function* () {
+        yield "Echo:";
+        yield ` ${transcript}`;
+      })();
+    }
+    const response = `Echo: ${transcript}`;
+    if (this.#turnResponseMode === "stream") {
+      return (async function* () {
+        yield response;
+      })();
+    }
+    return response;
   }
 
   beforeCallStart(_connection: Connection): boolean {
@@ -758,6 +864,14 @@ export class TestVoiceAgent extends VoiceBase {
             JSON.stringify({ type: "_ack", command: parsed.type })
           );
           break;
+        case "_set_turn_response_mode":
+          if (parsed.value === "string" || parsed.value === "stream") {
+            this.#turnResponseMode = parsed.value;
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
         case "_set_tts_mode":
           if (
             parsed.value === "controlled" ||
@@ -773,6 +887,11 @@ export class TestVoiceAgent extends VoiceBase {
             this.tts = new TestTTS();
             this.#streamTurns = false;
             this.#markerPipeline = false;
+          } else if (
+            isTestTTSMode(parsed.value) &&
+            this.tts instanceof TestTTS
+          ) {
+            this.tts.setMode(parsed.value);
           }
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
@@ -781,6 +900,12 @@ export class TestVoiceAgent extends VoiceBase {
         case "_release_tts":
           this.#controlledTTS.release();
           this.#markedTTS.release();
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_resolve_tts":
+          if (this.tts instanceof TestTTS) this.tts.resolvePending();
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
           );
@@ -842,6 +967,17 @@ export class TestVoiceAgent extends VoiceBase {
             JSON.stringify({ type: "_ack", command: parsed.type })
           );
           break;
+        case "_report_transcriber_fatal":
+          this.#lastReadySession?.reportFatalError(
+            new Error(
+              (parsed.error as { message?: string } | undefined)?.message ??
+                "transcriber failed"
+            )
+          );
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
         case "_reject_transcriber_ready_at":
           if (typeof parsed.index === "number") {
             this.#readySessions[parsed.index]?.rejectReady();
@@ -864,6 +1000,19 @@ export class TestVoiceAgent extends VoiceBase {
         case "_transport_ingress":
           if (typeof parsed.byteLength === "number") {
             this.#audioTransport.emit(parsed.byteLength);
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_report_transcriber_fatal_at":
+          if (typeof parsed.index === "number") {
+            this.#readySessions[parsed.index]?.reportFatalError(
+              new Error(
+                (parsed.error as { message?: string } | undefined)?.message ??
+                  "transcriber failed"
+              )
+            );
           }
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
@@ -1011,6 +1160,125 @@ export class TestVoiceAgent extends VoiceBase {
 /** VoiceAgent fixture with durable message persistence enabled. */
 export class TestPersistentVoiceAgent extends PersistentVoiceBase {}
 
+export class TestDiagnosticVoiceAgent extends DiagnosticVoiceBase {
+  transcriber = new TestTranscriber();
+  tts = new TestTTS();
+  #responseMode:
+    | "string"
+    | "pending_multi"
+    | "empty_stream"
+    | "reasoning_stream"
+    | "pending_reasoning" = "string";
+  #resolveTurnStream: (() => void) | null = null;
+  #skipSynthesis = false;
+
+  async onTurn(
+    transcript: string,
+    context: VoiceTurnContext
+  ): Promise<string | AsyncIterable<unknown>> {
+    if (this.#responseMode === "pending_multi") {
+      const pending = new Promise<void>((resolve) => {
+        this.#resolveTurnStream = resolve;
+      });
+      context.connection.send(JSON.stringify({ type: "_turn_stream_pending" }));
+      return (async function* () {
+        await pending;
+        yield "First sentence. Second sentence.";
+      })();
+    }
+    if (this.#responseMode === "empty_stream") {
+      return (async function* () {})();
+    }
+    if (this.#responseMode === "reasoning_stream") {
+      return (async function* () {
+        yield { type: "reasoning-start", id: "reasoning" };
+        yield {
+          type: "reasoning-delta",
+          id: "reasoning",
+          text: "private reasoning content"
+        };
+        yield { type: "reasoning-end", id: "reasoning" };
+        yield {
+          type: "text-delta",
+          id: "answer",
+          text: "Visible answer."
+        };
+        yield { type: "finish", finishReason: "stop" };
+      })();
+    }
+    if (this.#responseMode === "pending_reasoning") {
+      const pending = new Promise<void>((resolve) => {
+        this.#resolveTurnStream = resolve;
+      });
+      return (async function* () {
+        yield { type: "reasoning-start", id: "reasoning" };
+        yield {
+          type: "reasoning-delta",
+          id: "reasoning",
+          text: "private unfinished reasoning"
+        };
+        context.connection.send(
+          JSON.stringify({ type: "_reasoning_stream_pending" })
+        );
+        await pending;
+        yield { type: "reasoning-end", id: "reasoning" };
+        yield { type: "text-delta", id: "answer", text: "Late answer." };
+      })();
+    }
+    return `Echo: ${transcript}`;
+  }
+
+  beforeSynthesize(text: string): string | null {
+    return this.#skipSynthesis ? null : text;
+  }
+
+  onMessage(connection: Connection, message: WSMessage): void {
+    if (typeof message !== "string") return;
+    try {
+      const parsed = JSON.parse(message) as Record<string, unknown>;
+      switch (parsed.type) {
+        case "_set_diagnostic_response_mode":
+          if (
+            parsed.value === "string" ||
+            parsed.value === "pending_multi" ||
+            parsed.value === "empty_stream" ||
+            parsed.value === "reasoning_stream" ||
+            parsed.value === "pending_reasoning"
+          ) {
+            this.#responseMode = parsed.value;
+          }
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_resolve_turn_stream":
+          this.#resolveTurnStream?.();
+          this.#resolveTurnStream = null;
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_set_skip_synthesis":
+          this.#skipSynthesis = parsed.value === true;
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_get_tts_count":
+          connection.send(
+            JSON.stringify({
+              type: "_tts_count",
+              count: this.tts.synthesisCount
+            })
+          );
+          break;
+      }
+    } catch {
+      // ignore
+    }
+  }
+}
+
 /**
  * Test VoiceAgent that returns empty strings from onTurn.
  * Used to test the empty response guard.
@@ -1131,6 +1399,11 @@ export class TestAiSdkFullStreamVoiceAgent extends VoiceBase {
           this.#mockResponse = parsed.response;
         }
         connection.send(JSON.stringify({ type: "_ack", command: parsed.type }));
+      } else if (parsed.type === "_get_message_count") {
+        const count = this.getConversationHistory(
+          Number.MAX_SAFE_INTEGER
+        ).length;
+        connection.send(JSON.stringify({ type: "_message_count", count }));
       }
     } catch {
       // ignore

@@ -6,7 +6,12 @@ async function main() {
   await build({
     clean: true,
     dts: true,
-    entry: ["src/voice.ts", "src/voice-client.ts", "src/voice-react.tsx"],
+    entry: {
+      voice: "src/index.ts",
+      "voice-client": "src/voice-client.ts",
+      "voice-react": "src/voice-react.tsx",
+      errors: "src/errors.ts"
+    },
     skipNodeModulesBundle: true,
     external: ["cloudflare:workers"],
     format: "esm",

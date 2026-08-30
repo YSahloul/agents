@@ -5,6 +5,11 @@ import type {
   TranscriberSession,
   TranscriberSessionOptions
 } from "@cloudflare/voice";
+import {
+  logVoiceError,
+  toVoiceError,
+  VoiceProviderError
+} from "@cloudflare/voice/errors";
 
 const DEFAULT_STT_MODEL_ID = "scribe_v2_realtime";
 const DEFAULT_STT_AUDIO_FORMAT = "pcm_16000";
@@ -143,15 +148,25 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
       );
 
       if (!response.ok) {
-        console.error(
-          `[ElevenLabsTTS] Error: ${response.status} ${response.statusText}`
-        );
+        logVoiceError({
+          component: "ElevenLabsTTS",
+          stage: "synthesize",
+          message: "ElevenLabs TTS request failed",
+          error: new VoiceProviderError("ElevenLabs TTS request failed", {
+            status: response.status
+          })
+        });
         return null;
       }
 
       return await response.arrayBuffer();
     } catch (error) {
-      console.error("[ElevenLabsTTS] Error:", error);
+      logVoiceError({
+        component: "ElevenLabsTTS",
+        stage: "synthesize",
+        message: "ElevenLabs TTS request failed",
+        error: toVoiceError(error, "ElevenLabs TTS request failed")
+      });
       return null;
     }
   }
@@ -186,9 +201,15 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
       );
 
       if (!response.ok || !response.body) {
-        console.error(
-          `[ElevenLabsTTS] Stream error: ${response.status} ${response.statusText}`
-        );
+        logVoiceError({
+          component: "ElevenLabsTTS",
+          stage: "synthesize_stream",
+          message: "ElevenLabs TTS stream request failed",
+          error: new VoiceProviderError(
+            "ElevenLabs TTS stream request failed",
+            { status: response.status }
+          )
+        });
         return;
       }
 
@@ -205,7 +226,12 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
         }
       }
     } catch (error) {
-      console.error("[ElevenLabsTTS] Stream error:", error);
+      logVoiceError({
+        component: "ElevenLabsTTS",
+        stage: "synthesize_stream",
+        message: "ElevenLabs TTS stream failed",
+        error: toVoiceError(error, "ElevenLabs TTS stream failed")
+      });
     }
   }
 }
@@ -232,6 +258,7 @@ class ElevenLabsSTTSession implements TranscriberSession {
   #sessionOptions: TranscriberSessionOptions | undefined;
   #ws: WebSocket | null = null;
   #closed = false;
+  #fatalReported = false;
   #ready: Promise<void>;
   #readyResolve!: () => void;
   #readyReject!: (error: Error) => void;
@@ -266,9 +293,12 @@ class ElevenLabsSTTSession implements TranscriberSession {
       if (this.#pendingBytes + chunk.byteLength > MAX_PENDING_BYTES) {
         if (!this.#pendingOverflowLogged) {
           this.#pendingOverflowLogged = true;
-          console.error(
-            "[ElevenLabsSTT] Pending audio buffer full — dropping audio until the socket connects."
-          );
+          logVoiceError({
+            component: "ElevenLabsSTT",
+            stage: "audio_buffer",
+            message: "ElevenLabs pending audio buffer full",
+            error: new Error("Dropping audio until the socket connects")
+          });
         }
         return;
       }
@@ -308,22 +338,35 @@ class ElevenLabsSTTSession implements TranscriberSession {
 
       const ws = (response as unknown as { webSocket?: WebSocket }).webSocket;
       if (!ws) {
-        throw new Error(
-          `ElevenLabsSTT: failed to establish WebSocket connection (HTTP ${response.status}).`
+        throw new VoiceProviderError(
+          "ElevenLabs STT WebSocket upgrade failed",
+          { status: response.status }
         );
       }
 
       ws.addEventListener("message", (event: MessageEvent) => {
         this.#handleMessage(event);
       });
-      ws.addEventListener("error", () => {
-        this.#rejectReady(new Error("ElevenLabsSTT: WebSocket error."));
+      ws.addEventListener("error", (event: Event) => {
+        const error = new Error("ElevenLabsSTT: WebSocket error.", {
+          cause: event
+        });
+        this.#reportFatal(error);
+        this.#rejectReady(error);
         this.#closed = true;
       });
-      ws.addEventListener("close", () => {
-        this.#rejectReady(
-          new Error("ElevenLabsSTT: WebSocket closed before session start.")
+      ws.addEventListener("close", (event: CloseEvent) => {
+        if (this.#closed) return;
+        const error = new VoiceProviderError(
+          "ElevenLabsSTT: WebSocket closed before session start.",
+          {
+            closeCode: event.code,
+            closeReason: event.reason,
+            wasClean: event.wasClean
+          }
         );
+        this.#reportFatal(error);
+        this.#rejectReady(error);
         this.#closed = true;
       });
 
@@ -345,8 +388,18 @@ class ElevenLabsSTTSession implements TranscriberSession {
       this.#pendingChunks = [];
       this.#pendingBytes = 0;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.#rejectReady(new Error(message));
+      const voiceError = toVoiceError(
+        error,
+        "ElevenLabs STT connection failed"
+      );
+      logVoiceError({
+        component: "ElevenLabsSTT",
+        stage: "connection",
+        message: "ElevenLabs STT connection failed",
+        error: voiceError
+      });
+      this.#reportFatal(voiceError);
+      this.#rejectReady(voiceError);
       this.#closed = true;
     }
   }
@@ -361,6 +414,12 @@ class ElevenLabsSTTSession implements TranscriberSession {
     if (this.#readySettled) return;
     this.#readySettled = true;
     this.#readyReject(error);
+  }
+
+  #reportFatal(error: Error): void {
+    if (this.#closed || this.#fatalReported) return;
+    this.#fatalReported = true;
+    this.#sessionOptions?.onFatalError?.(error);
   }
 
   #connectionUrl(): string {
@@ -448,7 +507,12 @@ class ElevenLabsSTTSession implements TranscriberSession {
       }
     } catch (error) {
       if (!this.#closed) {
-        console.error("[ElevenLabsSTT] WebSocket send failed:", error);
+        logVoiceError({
+          component: "ElevenLabsSTT",
+          stage: "websocket_send",
+          message: "ElevenLabs WebSocket send failed",
+          error: toVoiceError(error, "ElevenLabs WebSocket send failed")
+        });
       }
     }
   }
@@ -500,9 +564,16 @@ class ElevenLabsSTTSession implements TranscriberSession {
     }
 
     if (typeof messageType === "string" && messageType.includes("error")) {
-      console.error(
-        `[ElevenLabsSTT] ${messageType}: ${stringProp(data, "error") ?? event.data}`
-      );
+      const error = new VoiceProviderError("ElevenLabs server error", {
+        code: messageType
+      });
+      logVoiceError({
+        component: "ElevenLabsSTT",
+        stage: "provider_message",
+        message: "ElevenLabs server error",
+        error
+      });
+      this.#reportFatal(error);
     }
   }
 }

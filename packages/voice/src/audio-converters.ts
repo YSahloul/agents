@@ -1,5 +1,5 @@
 import { Decoder as Mp3Decoder } from "minimp3-wasm";
-import mp3DecoderModule from "minimp3-wasm/dist/decoder.opt.wasm";
+import * as mp3DecoderModule from "minimp3-wasm/dist/decoder.opt.wasm";
 
 import type {
   StreamingTextTTSProvider,
@@ -118,6 +118,14 @@ export class StreamingMp3ToPcm16 {
     private readonly options: Mp3ToPcm16Options
   ) {}
 
+  private static isWasmExports(value: object): value is WebAssembly.Exports {
+    return (
+      "memory" in value &&
+      value.memory instanceof WebAssembly.Memory &&
+      "decoder_init" in value
+    );
+  }
+
   static async create(
     options: Mp3ToPcm16Options = {}
   ): Promise<StreamingMp3ToPcm16> {
@@ -127,8 +135,16 @@ export class StreamingMp3ToPcm16 {
     ) {
       throw new Error("MP3 PCM output sampleRate must be a positive integer");
     }
-    const instance = await WebAssembly.instantiate(mp3DecoderModule, {});
-    return new StreamingMp3ToPcm16(instance.exports, options);
+    const embeddedModule: unknown =
+      "default" in mp3DecoderModule ? mp3DecoderModule.default : undefined;
+    const wasm =
+      embeddedModule instanceof WebAssembly.Module
+        ? (await WebAssembly.instantiate(embeddedModule, {})).exports
+        : StreamingMp3ToPcm16.isWasmExports(mp3DecoderModule)
+          ? mp3DecoderModule
+          : null;
+    if (!wasm) throw new Error("MP3 decoder module did not expose WebAssembly");
+    return new StreamingMp3ToPcm16(wasm, options);
   }
 
   push(chunk: Uint8Array): Pcm16Chunk | null {

@@ -1,4 +1,6 @@
 import { PartySocket } from "partysocket";
+import { ClientDiagnostics } from "./diagnostics";
+import { toVoiceError } from "./errors";
 import { VOICE_PROTOCOL_VERSION } from "./types";
 
 function camelCaseToKebabCase(str: string): string {
@@ -18,8 +20,13 @@ import type {
   VoiceAudioFormat,
   VoiceAudioInput,
   VoiceTransport,
+  VoiceTransportCloseInfo,
+  VoiceError,
+  VoiceCompletionOutcome,
   TranscriptMessage,
-  VoicePipelineMetrics
+  VoicePipelineMetrics,
+  VoiceTurnMetrics,
+  VoiceDiagnosticEvent
 } from "./types";
 
 // Re-export shared types for consumers importing from this module
@@ -30,7 +37,19 @@ export type {
   VoiceAudioFormat,
   VoiceAudioInput,
   VoiceTransport,
+  VoiceTransportCloseInfo,
+  VoiceError,
+  VoiceErrorCode,
+  VoiceErrorStage,
+  VoiceCompletionOutcome,
+  VoiceCompletionOutcomeCode,
+  VoiceModelFinishReason,
+  VoiceDiagnosticsOptions,
+  VoiceDiagnosticEvent,
   VoicePipelineMetrics,
+  VoiceTurnMetrics,
+  VoiceTurnOutcome,
+  VoiceTurnSource,
   TranscriptMessage
 } from "./types";
 export { SFUVoiceAudioInput } from "./sfu-voice-client";
@@ -101,14 +120,28 @@ const UNSUPPORTED_OUTPUT_DEVICE_ERROR =
   "Audio output device selection is not supported in this browser.";
 const OUTPUT_DEVICE_SWITCH_ERROR = "Could not switch audio output device.";
 
+/**
+ * Low-level browser transport information for diagnosing connection failures.
+ * Error causes stay as the raw `unknown` value because browsers do not
+ * guarantee useful fields on WebSocket error events. The SDK does not
+ * serialize or log this local event; consumers must narrow it before use.
+ */
+export type VoiceConnectionDiagnostic =
+  | { type: "error"; cause: unknown }
+  | ({ type: "close" } & VoiceTransportCloseInfo);
+
 /** Maps each event name to the data type passed to its listeners. */
 export interface VoiceClientEventMap {
   statuschange: VoiceStatus;
   transcriptchange: TranscriptMessage[];
   interimtranscript: string | null;
   metricschange: VoicePipelineMetrics | null;
+  turnmetrics: VoiceTurnMetrics;
   audiolevelchange: number;
   connectionchange: boolean;
+  connectiondiagnostic: VoiceConnectionDiagnostic;
+  voiceerror: VoiceError;
+  completionoutcome: VoiceCompletionOutcome;
   error: string | null;
   outputdeviceerror: string | null;
   mutechange: boolean;
@@ -196,7 +229,7 @@ export class WebSocketVoiceTransport implements VoiceTransport {
   };
 
   onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((info?: VoiceTransportCloseInfo) => void) | null = null;
   onerror: ((error?: unknown) => void) | null = null;
   onmessage: ((data: string | ArrayBuffer | Blob) => void) | null = null;
 
@@ -239,8 +272,17 @@ export class WebSocketVoiceTransport implements VoiceTransport {
     });
 
     socket.onopen = () => this.onopen?.();
-    socket.onclose = () => this.onclose?.();
-    socket.onerror = () => this.onerror?.();
+    socket.onclose = (event?: CloseEvent) =>
+      this.onclose?.(
+        event
+          ? {
+              code: event.code,
+              reason: event.reason,
+              wasClean: event.wasClean
+            }
+          : undefined
+      );
+    socket.onerror = (event) => this.onerror?.(event);
     socket.onmessage = (event: MessageEvent) => {
       this.onmessage?.(event.data);
     };
@@ -264,6 +306,7 @@ export class VoiceClient {
   #status: VoiceStatus = "idle";
   #transcript: TranscriptMessage[] = [];
   #metrics: VoicePipelineMetrics | null = null;
+  #turnMetrics: VoiceTurnMetrics | null = null;
   #audioLevel = 0;
   #isMuted = false;
   #connected = false;
@@ -281,6 +324,9 @@ export class VoiceClient {
   #callRecoveryTimer: number | null = null;
   #callRecoveryAttempt = 0;
   #pendingResumeAck: ((acknowledged: boolean) => void) | null = null;
+  #diagnostics = new ClientDiagnostics();
+  #audioReceivedForCurrentTurn = false;
+  #diagnosticTurnId: string | null = null;
 
   // Options (with defaults applied)
   #silenceThreshold: number;
@@ -347,6 +393,11 @@ export class VoiceClient {
     return this.#metrics;
   }
 
+  /** Last stable terminal summary received for any speech or text turn. */
+  get turnMetrics(): VoiceTurnMetrics | null {
+    return this.#turnMetrics;
+  }
+
   get audioLevel(): number {
     return this.#audioLevel;
   }
@@ -370,7 +421,8 @@ export class VoiceClient {
   /**
    * The current interim (partial) transcript from streaming STT.
    * Updates in real time as the user speaks. Cleared when the final
-   * transcript is produced. null when no interim text is available.
+   * transcript is produced or the call reaches a terminal reset.
+   * null when no interim text is available.
    */
   get interimTranscript(): string | null {
     return this.#interimTranscript;
@@ -574,6 +626,11 @@ export class VoiceClient {
     });
   }
 
+  #clearInterimTranscript(): void {
+    this.#interimTranscript = null;
+    this.#emit("interimtranscript", null);
+  }
+
   // --- Connection ---
 
   connect(): void {
@@ -606,12 +663,22 @@ export class VoiceClient {
       }
     };
 
-    transport.onclose = () => {
+    transport.onclose = (info) => {
+      this.#diagnostics.emit("connection.closed", {
+        ...(info?.code === undefined ? {} : { code: info.code }),
+        clean: info?.wasClean ?? false
+      });
       this.#connected = false;
+      this.#clearInterimTranscript();
       this.#emit("connectionchange", false);
+      this.#emit("connectiondiagnostic", { type: "close", ...info });
     };
 
-    transport.onerror = () => {
+    transport.onerror = (cause) => {
+      this.#diagnostics.emit("connection.error", {
+        error: toVoiceError(cause, "Connection failed")
+      });
+      this.#emit("connectiondiagnostic", { type: "error", cause });
       this.#error = "Connection lost. Reconnecting...";
       this.#emit("error", this.#error);
     };
@@ -627,10 +694,12 @@ export class VoiceClient {
         this.#handleJSONMessage(data);
       } else if (data instanceof Blob) {
         data.arrayBuffer().then((buffer) => {
+          this.#recordAudioReceived(buffer.byteLength);
           this.#playbackQueue.push(buffer);
           this.#processPlaybackQueue();
         });
       } else if (data instanceof ArrayBuffer) {
+        this.#recordAudioReceived(data.byteLength);
         this.#playbackQueue.push(data);
         this.#processPlaybackQueue();
       }
@@ -642,6 +711,7 @@ export class VoiceClient {
 
   disconnect(): void {
     this.endCall();
+    this.#diagnostics.emit("connection.disconnecting");
     this.#transport?.disconnect();
     this.#transport = null;
     this.#connected = false;
@@ -658,6 +728,7 @@ export class VoiceClient {
     }
     if (this.#inCall) return;
 
+    this.#clearInterimTranscript();
     const callGeneration = ++this.#callGeneration;
     this.#inCall = true;
     this.#serverCallAcknowledged = false;
@@ -675,13 +746,16 @@ export class VoiceClient {
       await this.#getPlaybackDestination(ctx);
       if (this.#abortStaleCallStartup(callGeneration)) return;
     }
+    this.#diagnostics.emit("call.starting");
     if (audioInput) {
+      this.#diagnostics.emit("microphone.starting", { source: "custom" });
       this.#configureAudioInput(audioInput);
       try {
         await audioInput.start();
         if (this.#abortStaleCallStartup(callGeneration)) return;
         audioInput.setMuted?.(this.#isMuted);
         await this.#setAudioInputOutputDevice(audioInput);
+        this.#diagnostics.emit("microphone.ready", { source: "custom" });
       } catch (error) {
         if (!this.#isCurrentCallStartup(callGeneration)) return;
         this.#callGeneration++;
@@ -704,10 +778,13 @@ export class VoiceClient {
       await this.#startMic();
     }
     if (audioInput?.handlesPlayback) this.#transport.sendJSON(startMsg);
-    this.#abortStaleCallStartup(callGeneration);
+    if (!this.#abortStaleCallStartup(callGeneration)) {
+      this.#diagnostics.emit("call.local_ready");
+    }
   }
 
   endCall(): void {
+    const wasInCall = this.#inCall;
     this.#callGeneration++;
     this.#clearCallRecovery();
     this.#inCall = false;
@@ -716,8 +793,12 @@ export class VoiceClient {
       this.#transport.sendJSON({ type: "end_call" });
     }
     this.#stopLocalCall();
+    this.#clearInterimTranscript();
     this.#status = "idle";
     this.#emit("statuschange", "idle");
+    if (wasInCall) {
+      this.#diagnostics.emit("call.ended", { reason: "requested" });
+    }
   }
 
   #isCurrentCallStartup(callGeneration: number): boolean {
@@ -833,6 +914,17 @@ export class VoiceClient {
 
   // --- Voice protocol handler ---
 
+  #recordAudioReceived(bytes: number): void {
+    if (this.#audioReceivedForCurrentTurn) return;
+    this.#audioReceivedForCurrentTurn = true;
+    this.#diagnostics.emit("audio.received", {
+      bytes,
+      ...(this.#diagnosticTurnId === null
+        ? {}
+        : { turn_id: this.#diagnosticTurnId })
+    });
+  }
+
   #handleJSONMessage(data: string): void {
     let msg: Record<string, unknown>;
     try {
@@ -843,12 +935,48 @@ export class VoiceClient {
     }
 
     switch (msg.type) {
-      case "welcome":
+      case "welcome": {
+        const diagnosticOptions =
+          typeof msg.diagnostics === "object" && msg.diagnostics !== null
+            ? (msg.diagnostics as Record<string, unknown>)
+            : null;
+        const diagnosticsEnabled = diagnosticOptions?.browser_console === true;
+        this.#diagnostics.setEnabled(diagnosticsEnabled);
+        if (diagnosticsEnabled) {
+          this.#diagnostics.emit("connection.ready", {
+            protocol_version: msg.protocol_version as number
+          });
+        }
         this.#serverProtocolVersion = msg.protocol_version as number;
         if (msg.protocol_version !== VOICE_PROTOCOL_VERSION) {
           console.warn(
             `[VoiceClient] Protocol version mismatch: client=${VOICE_PROTOCOL_VERSION}, server=${msg.protocol_version}`
           );
+        }
+        break;
+      }
+      case "diagnostic":
+        if (
+          typeof msg.event === "string" &&
+          typeof msg.timestamp === "number" &&
+          Number.isFinite(msg.timestamp)
+        ) {
+          const data =
+            typeof msg.data === "object" && msg.data !== null
+              ? (msg.data as VoiceDiagnosticEvent["data"])
+              : undefined;
+          if (
+            msg.event === "audio.first_sent" &&
+            typeof data?.turn_id === "string"
+          ) {
+            this.#diagnosticTurnId = data.turn_id;
+            this.#audioReceivedForCurrentTurn = false;
+          }
+          this.#diagnostics.receive({
+            event: msg.event,
+            timestamp: msg.timestamp,
+            ...(data === undefined ? {} : { data })
+          });
         }
         break;
       case "audio_config":
@@ -861,6 +989,10 @@ export class VoiceClient {
         break;
       case "status":
         this.#status = msg.status as VoiceStatus;
+        if (msg.status === "thinking" || msg.status === "speaking") {
+          this.#audioReceivedForCurrentTurn = false;
+          if (msg.status === "thinking") this.#diagnosticTurnId = null;
+        }
         if (msg.status === "idle" && this.#inCall) {
           if (this.#pendingResumeAck) {
             // A fast-path resume attempt failed server-side -- let
@@ -878,6 +1010,7 @@ export class VoiceClient {
             this.#inCall = false;
             this.#serverCallAcknowledged = false;
             this.#stopLocalCall();
+            this.#clearInterimTranscript();
           }
         }
         if (msg.status === "listening") {
@@ -896,7 +1029,7 @@ export class VoiceClient {
         break;
       case "playback_interrupt":
         this.#options.audioInput?.handleControlMessage?.(msg);
-        this.#stopPlayback();
+        this.#stopPlayback("server_interrupt");
         break;
       case "playback_marker":
         break;
@@ -909,7 +1042,9 @@ export class VoiceClient {
         // With continuous STT, the model detects the user's speech
         // server-side, so this arrives before the client's interrupt
         // detection fires.
-        if (msg.role === "user" && this.#isPlaying) this.#stopPlayback();
+        if (msg.role === "user" && this.#isPlaying) {
+          this.#stopPlayback("user_utterance");
+        }
 
         this.#transcript = [
           ...this.#transcript,
@@ -968,10 +1103,46 @@ export class VoiceClient {
         };
         this.#emit("metricschange", this.#metrics);
         break;
-      case "error":
-        this.#error = msg.message as string;
+      case "turn_metrics": {
+        const { type: _type, ...payload } = msg;
+        const metrics = payload as unknown as VoiceTurnMetrics;
+        this.#turnMetrics = metrics;
+        this.#emit("turnmetrics", metrics);
+        break;
+      }
+      case "completion_outcome": {
+        const outcome: VoiceCompletionOutcome = {
+          code: msg.code as VoiceCompletionOutcome["code"],
+          stage: "llm",
+          ...(msg.finishReason !== undefined
+            ? {
+                finishReason:
+                  msg.finishReason as VoiceCompletionOutcome["finishReason"]
+              }
+            : {}),
+          partialOutput: msg.partialOutput as boolean
+        };
+        this.#emit("completionoutcome", outcome);
+        break;
+      }
+      case "error": {
+        const voiceError: VoiceError = {
+          message: msg.message as string,
+          ...(msg.code !== undefined
+            ? { code: msg.code as VoiceError["code"] }
+            : {}),
+          ...(msg.stage !== undefined
+            ? { stage: msg.stage as VoiceError["stage"] }
+            : {}),
+          ...(msg.retryable !== undefined
+            ? { retryable: msg.retryable as boolean }
+            : {})
+        };
+        this.#error = voiceError.message;
+        this.#emit("voiceerror", voiceError);
         this.#emit("error", this.#error);
         break;
+      }
       default:
         if (this.#options.audioInput?.handleControlMessage?.(msg)) break;
         // App-level custom message — surface via event
@@ -1193,6 +1364,7 @@ export class VoiceClient {
           this.#playbackQueue.length === 0
         ) {
           this.#isPlaying = false;
+          this.#diagnostics.emit("playback.completed");
         }
       };
 
@@ -1205,6 +1377,9 @@ export class VoiceClient {
       this.#lastPlaybackEnd = this.#playbackCursor;
       source.start(startAt);
     } catch (err) {
+      this.#diagnostics.emit("playback.error", {
+        error: toVoiceError(err, "Playback failed")
+      });
       console.error("[VoiceClient] Audio playback error:", err);
     }
   }
@@ -1213,6 +1388,9 @@ export class VoiceClient {
     if (this.#isScheduling || this.#playbackQueue.length === 0) return;
     this.#isScheduling = true;
     this.#isPlaying = true;
+    this.#diagnostics.emit("playback.started", {
+      chunks: this.#playbackQueue.length
+    });
     const generation = this.#playbackGeneration;
 
     while (
@@ -1231,7 +1409,12 @@ export class VoiceClient {
     }
   }
 
-  #stopPlayback(): void {
+  #stopPlayback(reason = "stopped"): void {
+    const wasActive =
+      this.#isPlaying ||
+      this.#isScheduling ||
+      this.#playbackQueue.length > 0 ||
+      this.#scheduledSources.size > 0;
     this.#playbackGeneration++;
     const sources = [...this.#scheduledSources];
     this.#scheduledSources.clear();
@@ -1255,11 +1438,15 @@ export class VoiceClient {
     this.#lastPlaybackEnd = this.#audioContext
       ? this.#audioContext.currentTime
       : null;
+    if (wasActive) {
+      this.#diagnostics.emit("playback.stopped", { reason });
+    }
   }
 
   // --- Mic capture ---
 
   async #startMic(): Promise<void> {
+    this.#diagnostics.emit("microphone.starting", { source: "browser" });
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -1307,7 +1494,11 @@ export class VoiceClient {
 
       source.connect(workletNode);
       workletNode.connect(ctx.destination);
+      this.#diagnostics.emit("microphone.ready", { source: "browser" });
     } catch (err) {
+      this.#diagnostics.emit("microphone.error", {
+        error: toVoiceError(err, "Microphone failed")
+      });
       console.error("[VoiceClient] Mic error:", err);
       this.#error =
         "Microphone access denied. Please allow microphone access and try again.";
@@ -1316,10 +1507,12 @@ export class VoiceClient {
   }
 
   #stopMic(): void {
+    const wasActive = this.#workletNode !== null || this.#stream !== null;
     this.#workletNode?.disconnect();
     this.#workletNode = null;
     this.#stream?.getTracks().forEach((track) => track.stop());
     this.#stream = null;
+    if (wasActive) this.#diagnostics.emit("microphone.stopped");
     this.#resetDetection();
   }
 
@@ -1339,7 +1532,8 @@ export class VoiceClient {
     if (this.#isPlaying && rms > this.#interruptThreshold) {
       this.#interruptChunkCount++;
       if (this.#interruptChunkCount >= this.#interruptChunks) {
-        this.#stopPlayback();
+        this.#diagnostics.emit("speech.interrupt_detected");
+        this.#stopPlayback("speech_interrupt");
         this.#interruptChunkCount = 0;
         if (this.#transport?.connected) {
           this.#transport.sendJSON({
@@ -1357,6 +1551,8 @@ export class VoiceClient {
       if (!this.#isSpeaking) {
         this.#isSpeaking = true;
         this.#speechPeakRms = rms;
+        this.#diagnostics.emit("speech.started");
+        // Notify server that speech started (for streaming STT)
         if (this.#transport?.connected) {
           this.#transport.sendJSON({
             type: "start_of_speech",
@@ -1375,6 +1571,7 @@ export class VoiceClient {
       this.#silenceTimer = setTimeout(() => {
         this.#isSpeaking = false;
         this.#silenceTimer = null;
+        this.#diagnostics.emit("speech.ended");
         this.#sendSpeechEnd();
       }, this.#silenceDurationMs);
     }
