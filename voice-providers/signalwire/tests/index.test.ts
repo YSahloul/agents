@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { SignalWireAdapter } from "../src/index.js";
+import { AmbientOutput } from "../src/audio/ambient-output.js";
 import type { SignalWireAdapterOptions } from "../src/index.js";
 import {
   arrayBufferToBase64,
@@ -894,5 +895,85 @@ describe("carrier playback control", () => {
             value.event === "tts_played"
         )
     ).toEqual([]);
+  });
+});
+
+describe("continuous ambient output", () => {
+  const mulaw = (samples: Int16Array) =>
+    new Uint8Array(base64ToArrayBuffer(pcmToMulawBase64(samples)));
+
+  it("loops real ambience during silence and mixes it under speech", async () => {
+    vi.useFakeTimers();
+    const sent: Uint8Array[] = [];
+    const markers: Array<{ frames: number; bytes: number }> = [];
+    const output = new AmbientOutput({
+      audio: mulaw(new Int16Array(160).fill(1000)),
+      volume: 0.5,
+      sendAudio: (audio) => sent.push(audio),
+      sendMarker: (_marker, metrics) => markers.push(metrics)
+    });
+
+    output.start();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(decodeMulawReference(sent[0][0])).toBeGreaterThan(400);
+
+    output.enqueueAudio(mulaw(new Int16Array(160).fill(2000)));
+    expect(
+      output.enqueueMarker({
+        type: "playback_marker",
+        playbackId: "ambient",
+        sequence: 1,
+        text: "Hello."
+      })
+    ).toBe(true);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(decodeMulawReference(sent[1][0])).toBeGreaterThan(2300);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(markers).toEqual([{ frames: 1, bytes: 160 }]);
+    expect(decodeMulawReference(sent[2][0])).toBeGreaterThan(400);
+
+    output.clear();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(decodeMulawReference(sent[3][0])).toBeGreaterThan(400);
+    output.stop();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(sent).toHaveLength(4);
+  });
+
+  it("starts and stops the ambient pump with the SignalWire call", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness({
+      ambientAudio: mulaw(new Int16Array(160).fill(1000)),
+      ambientVolume: 0.5
+    });
+
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({
+        event: "start",
+        start: {
+          streamSid: "stream-1",
+          callSid: "call-1",
+          tracks: ["inbound"],
+          mediaFormat: {
+            encoding: "audio/x-mulaw",
+            sampleRate: 8000,
+            channels: 1
+          }
+        }
+      })
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(
+      harness.serverSocket.jsonSent.filter((message) => message.event === "media")
+    ).toHaveLength(1);
+
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({ event: "stop" })
+    });
+    await vi.advanceTimersByTimeAsync(40);
+    expect(
+      harness.serverSocket.jsonSent.filter((message) => message.event === "media")
+    ).toHaveLength(1);
   });
 });

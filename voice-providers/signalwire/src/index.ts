@@ -14,9 +14,11 @@
 
 import {
   arrayBufferToBase64,
+  base64ToUint8Array,
   mulawBase64ToPcm16,
   pcm16ToMulawBase64
 } from "./audio/utils.js";
+import { AmbientOutput } from "./audio/ambient-output.js";
 import type {
   VoicePlaybackMarkerAckMessage,
   VoicePlaybackMarkerMessage
@@ -49,6 +51,10 @@ export interface SignalWireAdapterOptions {
    * instance).
    */
   instanceName?: string;
+  /** Raw G.711 μ-law, 8 kHz, mono ambience, looped for the call. */
+  ambientAudio?: Uint8Array;
+  /** Ambient mix level from 0 to 1. Defaults to 0.15. */
+  ambientVolume?: number;
 }
 
 /**
@@ -92,6 +98,58 @@ export class SignalWireAdapter {
     let agentMessageChain: Promise<void> = Promise.resolve();
     let nextOutboundMediaAt = 0;
     let playbackGeneration = 0;
+
+    const sendCarrierAudio = (audio: Uint8Array) => {
+      if (!streamSid || serverSocket.readyState !== WebSocket.OPEN) return;
+      serverSocket.send(
+        JSON.stringify({
+          event: "media",
+          streamSid,
+          media: { payload: arrayBufferToBase64(audio.buffer as ArrayBuffer) }
+        })
+      );
+    };
+
+    const sendPlaybackMarker = (
+      marker: VoicePlaybackMarkerMessage,
+      metrics: { frames: number; bytes: number }
+    ) => {
+      if (!streamSid || serverSocket.readyState !== WebSocket.OPEN) return;
+      const markName = `playback:${marker.playbackId}:${marker.sequence}`;
+      serverSocket.send(
+        JSON.stringify({
+          event: "mark",
+          streamSid,
+          mark: { name: markName }
+        })
+      );
+      pendingPlaybackMarkers.set(markName, {
+        playbackId: marker.playbackId,
+        sequence: marker.sequence,
+        text: marker.text,
+        ...metrics
+      });
+      console.log("[VoiceTrace]", {
+        event: "tts_sent",
+        streamSid,
+        playbackId: marker.playbackId,
+        sequence: marker.sequence,
+        text: marker.text,
+        ...metrics
+      });
+    };
+
+    const configuredAmbientOutput = options?.ambientAudio
+      ? new AmbientOutput({
+          audio: options.ambientAudio,
+          volume: options.ambientVolume,
+          sendAudio: sendCarrierAudio,
+          sendMarker: sendPlaybackMarker
+        })
+      : undefined;
+    const ambientOutput = configuredAmbientOutput?.enabled
+      ? configuredAmbientOutput
+      : undefined;
 
     const rejectAgentAudio = (format: unknown, sampleRate: unknown) => {
       agentAudio = null;
@@ -194,39 +252,23 @@ export class SignalWireAdapter {
               ) {
                 return;
               }
-              if (
-                serverSocket.readyState !== WebSocket.OPEN ||
-                outboundFrames === 0
-              ) {
-                return;
-              }
               const marker: VoicePlaybackMarkerMessage = {
                 type: "playback_marker",
                 playbackId: msg.playbackId,
                 sequence,
                 text: msg.text
               };
-              const markName = `playback:${marker.playbackId}:${marker.sequence}`;
-              serverSocket.send(
-                JSON.stringify({
-                  event: "mark",
-                  streamSid,
-                  mark: { name: markName }
-                })
-              );
-              pendingPlaybackMarkers.set(markName, {
-                playbackId: marker.playbackId,
-                sequence: marker.sequence,
-                text: marker.text,
-                frames: outboundFrames,
-                bytes: outboundBytes
-              });
-              console.log("[VoiceTrace]", {
-                event: "tts_sent",
-                streamSid,
-                playbackId: marker.playbackId,
-                sequence: marker.sequence,
-                text: marker.text,
+              if (ambientOutput) {
+                ambientOutput.enqueueMarker(marker);
+                return;
+              }
+              if (
+                serverSocket.readyState !== WebSocket.OPEN ||
+                outboundFrames === 0
+              ) {
+                return;
+              }
+              sendPlaybackMarker(marker, {
                 frames: outboundFrames,
                 bytes: outboundBytes
               });
@@ -239,6 +281,7 @@ export class SignalWireAdapter {
               outboundFrames = 0;
               outboundBytes = 0;
               nextOutboundMediaAt = 0;
+              ambientOutput?.resetMetrics();
             }
 
             if (
@@ -274,6 +317,10 @@ export class SignalWireAdapter {
                     new Int16Array(audio),
                     agentAudio.sampleRate
                   );
+            if (ambientOutput) {
+              ambientOutput.enqueueAudio(base64ToUint8Array(payload));
+              return;
+            }
             const padding = payload.endsWith("==")
               ? 2
               : payload.endsWith("=")
@@ -362,6 +409,7 @@ export class SignalWireAdapter {
               pendingPlaybackMarkers.clear();
               outboundFrames = 0;
               outboundBytes = 0;
+              ambientOutput?.clear();
               sendClearAudio();
               return;
             }
@@ -377,6 +425,7 @@ export class SignalWireAdapter {
       });
 
       ws.addEventListener("close", () => {
+        ambientOutput?.stop();
         if (serverSocket.readyState === WebSocket.OPEN) {
           serverSocket.close();
         }
@@ -425,6 +474,7 @@ export class SignalWireAdapter {
           const instanceId =
             options?.instanceName ?? startMsg.start.callSid ?? "default";
           await connectToAgent(instanceId);
+          ambientOutput?.start();
           break;
         }
 
@@ -483,6 +533,7 @@ export class SignalWireAdapter {
         }
 
         case "stop":
+          ambientOutput?.stop();
           endAgentCall();
           break;
       }
@@ -495,7 +546,10 @@ export class SignalWireAdapter {
       });
     });
 
-    serverSocket.addEventListener("close", endAgentCall);
+    serverSocket.addEventListener("close", () => {
+      ambientOutput?.stop();
+      endAgentCall();
+    });
 
     return new Response(null, {
       status: 101,

@@ -110,9 +110,17 @@ authBearerToken="...">` attribute when creating cXML and validate its
 
 ```ts
 SignalWireAdapter.handleRequest(request, env, "MyAgent", {
-  instanceName: "shared-agent"
+  instanceName: "shared-agent",
+  // Raw G.711 μ-law, 8 kHz, mono recording.
+  ambientAudio: new Uint8Array(await env.AMBIENCE.get("office.ulaw").then((r) => r!.arrayBuffer())),
+  ambientVolume: 0.15
 });
 ```
 
+When `ambientAudio` is present, the adapter owns one continuous 20 ms output
+clock. It loops the recording under agent speech and sends the recording alone
+while the agent is silent. Playback interruption clears queued speech without
+stopping the ambient bed.
+
 Without `instanceName`, each SignalWire Call SID maps to a separate Durable
-Object instance.
+Object instance. Without `ambientAudio`, outbound behavior is unchanged.

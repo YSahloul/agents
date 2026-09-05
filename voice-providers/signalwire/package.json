@@ -1,7 +1,7 @@
 {
   "name": "@cloudflare/voice-signalwire",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "SignalWire bidirectional stream adapter for the Cloudflare Agents voice pipeline",
   "repository": {
     "directory": "voice-providers/signalwire",
