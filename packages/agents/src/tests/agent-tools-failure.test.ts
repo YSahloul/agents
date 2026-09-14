@@ -197,4 +197,55 @@ describe("agentTool failure envelope", () => {
     expect(captured?.runId).toBe("agent-tool:call-1");
     expect(captured?.parentToolCallId).toBe("call-1");
   });
+
+  it("dispatches detached runs without forwarding the parent abort signal", async () => {
+    let captured: RunAgentToolOptions | undefined;
+    const controller = new AbortController();
+    controller.abort("caller barge-in");
+    const parentSignal = controller.signal;
+    const subAgent = agentTool(class {} as unknown as ChatCapableAgentClass, {
+      description: "Run a background sub-agent",
+      inputSchema: z.object({ task: z.string() }),
+      detached: { onFinish: "onResearchDone" }
+    });
+    const execute = subAgent.execute as (
+      input: { task: string },
+      options: { toolCallId: string; abortSignal: AbortSignal }
+    ) => Promise<unknown>;
+
+    const output = await agentContext.run(
+      {
+        agent: {
+          async runAgentTool(
+            _cls: ChatCapableAgentClass,
+            options: RunAgentToolOptions
+          ) {
+            captured = options;
+            return {
+              runId: "agent-tool:call-detached",
+              agentType: "Child",
+              status: "running" as const
+            };
+          }
+        },
+        connection: undefined,
+        request: undefined,
+        email: undefined
+      },
+      () =>
+        execute(
+          { task: "research" },
+          { toolCallId: "call-detached", abortSignal: parentSignal }
+        )
+    );
+
+    expect(output).toEqual({
+      runId: "agent-tool:call-detached",
+      agentType: "Child",
+      status: "running"
+    });
+    expect(captured?.runId).toBe("agent-tool:call-detached");
+    expect(captured?.detached).toEqual({ onFinish: "onResearchDone" });
+    expect(captured?.signal).toBeUndefined();
+  });
 });

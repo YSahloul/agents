@@ -7,11 +7,13 @@ import {
 } from "ai";
 import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "./internal_context";
 import type {
-  ChatCapableAgentClass,
-  RunAgentToolOptions,
-  RunAgentToolResult,
   AgentToolDisplayMetadata,
-  AgentToolFailure
+  AgentToolFailure,
+  ChatCapableAgentClass,
+  DetachedAgentToolConfig,
+  DetachedRunAgentToolResult,
+  RunAgentToolOptions,
+  RunAgentToolResult
 } from "./agent-tool-types";
 
 type ParseSchema<Output = unknown> = {
@@ -29,6 +31,11 @@ type AgentToolFactoryOptions<Output = unknown, Input = unknown> = {
   displayName?: string;
   icon?: string;
   display?: AgentToolDisplayMetadata;
+  /**
+   * Run the child in the background. Detached runs do not inherit the parent
+   * turn's abort signal. Use `notify` or `onFinish` to deliver the result.
+   */
+  detached?: boolean | DetachedAgentToolConfig;
 };
 
 // Capture the concrete schema type so the overload below can derive its input
@@ -50,8 +57,14 @@ type AgentToolRunner = {
   runAgentTool<Input, Output>(
     cls: ChatCapableAgentClass,
     options: RunAgentToolOptions<Input>
-  ): Promise<RunAgentToolResult<Output>>;
+  ): Promise<RunAgentToolResult<Output> | DetachedRunAgentToolResult>;
 };
+
+type AgentToolFactoryResult<Output> =
+  | string
+  | Output
+  | AgentToolFailure
+  | DetachedRunAgentToolResult;
 
 /**
  * Preserve the existing Zod-style `.parse()` output-schema contract while
@@ -119,23 +132,26 @@ function failure(
 export function agentTool<InputSchema extends FlexibleSchema, Output = unknown>(
   cls: ChatCapableAgentClass,
   options: InferredAgentToolFactoryOptions<InputSchema, Output>
-): Tool<InferSchema<InputSchema>, string | Output | AgentToolFailure>;
+): Tool<InferSchema<InputSchema>, AgentToolFactoryResult<Output>>;
 // Preserve existing callers that explicitly provide agentTool<Input, Output>().
 export function agentTool<Input = unknown, Output = unknown>(
   cls: ChatCapableAgentClass,
   options: AgentToolFactoryOptions<Output, Input>
-): Tool<Input, string | Output | AgentToolFailure>;
+): Tool<Input, AgentToolFactoryResult<Output>>;
 export function agentTool<Input = unknown, Output = unknown>(
   cls: ChatCapableAgentClass,
   options: AgentToolFactoryOptions<Output, Input>
-): Tool<Input, string | Output | AgentToolFailure> {
+): Tool<Input, AgentToolFactoryResult<Output>> {
   const createTool = tool as unknown as <I, O>(config: {
     description: string;
     inputSchema: unknown;
     execute: (input: I, options?: ToolExecutionOptions) => Promise<O>;
   }) => Tool<I, O>;
+  if (options.detached && options.outputSchema) {
+    throw new Error("agentTool outputSchema is unavailable for detached runs");
+  }
 
-  return createTool<Input, string | Output | AgentToolFailure>({
+  return createTool<Input, AgentToolFactoryResult<Output>>({
     description: options.description,
     inputSchema: options.inputSchema,
     execute: async (input: Input, executeOptions?: ToolExecutionOptions) => {
@@ -167,10 +183,16 @@ export function agentTool<Input = unknown, Output = unknown>(
           input,
           runId,
           parentToolCallId: executeOptions?.toolCallId,
-          signal: executeOptions?.abortSignal,
-          display
+          display,
+          ...(options.detached
+            ? { detached: options.detached }
+            : { signal: executeOptions?.abortSignal })
         }
       );
+
+      if (options.detached) {
+        return result as DetachedRunAgentToolResult;
+      }
 
       if (result.status === "completed") {
         if (options.outputSchema) {
