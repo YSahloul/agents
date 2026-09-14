@@ -48,26 +48,6 @@ export class Assistant extends Think<Env> {
 }
 ```
 
-### Run a model-selected tool in the background
-
-Pass `detached` to `agentTool()` when the child must outlive the parent model
-turn. The generated tool returns a running handle immediately, does not inherit
-the parent turn's abort signal, and uses the same durable completion delivery as
-`runAgentTool()`:
-
-```ts
-research: agentTool(Researcher, {
-  description: "Research one topic in depth.",
-  inputSchema: z.object({ query: z.string() }),
-  detached: { notify: true }
-});
-```
-
-Use `detached: { onFinish: "methodName" }` instead when completion needs
-application-specific routing, such as submitting the result to a voice channel.
-Detached tools cannot use `outputSchema` because their output arrives through
-the completion notification or callback rather than the initial tool result.
-
 ### Use Valibot or another schema library
 
 `agentTool()` accepts the AI SDK's flexible schema format. For Valibot, wrap the
