@@ -557,3 +557,9 @@ export class SignalWireAdapter {
     });
   }
 }
+
+export {
+  redirectCall,
+  startCallRecording,
+  type SignalWireRestConfig
+} from "./rest.js";

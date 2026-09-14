@@ -75,6 +75,19 @@ export default {
 Point the SignalWire phone number's **WHEN A CALL COMES IN** webhook at
 `https://your-worker.workers.dev/answer`.
 
+## Call control
+
+The package also owns the SignalWire-specific Compatibility REST calls used alongside the media-stream adapter:
+
+```ts
+import { redirectCall, startCallRecording } from "@cloudflare/voice-signalwire";
+
+await startCallRecording(config, callSid, recordingStatusCallback);
+await redirectCall(config, callSid, cxmlUrl);
+```
+
+`SignalWireAdapter` handles the live media WebSocket. These helpers start call recording and replace an active call's cXML instructions.
+
 ## Audio contract
 
 The carrier stream must use mono `PCMU@8000h`. Inbound audio is decoded and
@@ -112,7 +125,9 @@ authBearerToken="...">` attribute when creating cXML and validate its
 SignalWireAdapter.handleRequest(request, env, "MyAgent", {
   instanceName: "shared-agent",
   // Raw G.711 μ-law, 8 kHz, mono recording.
-  ambientAudio: new Uint8Array(await env.AMBIENCE.get("office.ulaw").then((r) => r!.arrayBuffer())),
+  ambientAudio: new Uint8Array(
+    await env.AMBIENCE.get("office.ulaw").then((r) => r!.arrayBuffer())
+  ),
   ambientVolume: 0.15
 });
 ```
