@@ -1,9 +1,54 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { redirectCall, startCallRecording } from "../src/index.js";
+import {
+  createOutboundCall,
+  redirectCall,
+  startCallRecording
+} from "../src/index.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("SignalWire call control", () => {
+  it("creates an outbound cXML call with a completion callback", async () => {
+    const fetch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        Response.json({ sid: "call-sid-1", status: "queued" })
+    );
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(
+      createOutboundCall(
+        {
+          spaceUrl: "example.signalwire.com",
+          projectId: "proj-1",
+          apiToken: "tok-1"
+        },
+        {
+          from: "+15551234567",
+          to: "+15557654321",
+          url: "https://tenant.example/answer",
+          statusCallback: "https://tenant.example/signalwire/call-status",
+          timeout: 45
+        }
+      )
+    ).resolves.toEqual({ sid: "call-sid-1", status: "queued" });
+
+    const [url, init] = fetch.mock.calls[0];
+    expect(url).toBe(
+      "https://example.signalwire.com/api/laml/2010-04-01/Accounts/proj-1/Calls"
+    );
+    const body = new URLSearchParams(String(init?.body));
+    expect(Object.fromEntries(body)).toEqual({
+      From: "+15551234567",
+      To: "+15557654321",
+      Url: "https://tenant.example/answer",
+      Method: "POST",
+      StatusCallback: "https://tenant.example/signalwire/call-status",
+      StatusCallbackMethod: "POST",
+      StatusCallbackEvent: "completed",
+      Timeout: "45"
+    });
+  });
+
   it("starts dual-leg recording with completion callbacks", async () => {
     const fetch = vi.fn(
       async (_input: string | URL | Request, _init?: RequestInit) =>

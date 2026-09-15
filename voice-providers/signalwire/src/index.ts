@@ -559,7 +559,9 @@ export class SignalWireAdapter {
 }
 
 export {
+  createOutboundCall,
   redirectCall,
   startCallRecording,
+  type CreateOutboundCallOptions,
   type SignalWireRestConfig
 } from "./rest.js";

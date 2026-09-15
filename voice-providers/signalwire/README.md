@@ -80,13 +80,23 @@ Point the SignalWire phone number's **WHEN A CALL COMES IN** webhook at
 The package also owns the SignalWire-specific Compatibility REST calls used alongside the media-stream adapter:
 
 ```ts
-import { redirectCall, startCallRecording } from "@cloudflare/voice-signalwire";
+import {
+  createOutboundCall,
+  redirectCall,
+  startCallRecording
+} from "@cloudflare/voice-signalwire";
 
+await createOutboundCall(config, {
+  from: "+15551234567",
+  to: "+15557654321",
+  url: "https://tenant.example/answer",
+  statusCallback: "https://tenant.example/signalwire/call-status"
+});
 await startCallRecording(config, callSid, recordingStatusCallback);
 await redirectCall(config, callSid, cxmlUrl);
 ```
 
-`SignalWireAdapter` handles the live media WebSocket. These helpers start call recording and replace an active call's cXML instructions.
+`SignalWireAdapter` handles the live media WebSocket. These helpers create outbound calls, start recordings, and replace an active call's cXML instructions.
 
 ## Audio contract
 

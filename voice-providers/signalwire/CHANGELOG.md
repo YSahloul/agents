@@ -1,5 +1,11 @@
 # @cloudflare/voice-signalwire
 
+## 0.0.5
+
+### Minor Changes
+
+- Add outbound cXML call creation through SignalWire's Compatibility REST API.
+
 ## 0.0.4
 
 ### Minor Changes
