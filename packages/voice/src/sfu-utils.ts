@@ -190,6 +190,15 @@ export interface SFUConfig {
   appId: string;
   apiToken: string;
   apiBase?: string;
+  /**
+   * Public origin the SFU should dial for WebSocket-ingest tracks.
+   *
+   * The SFU connects from Cloudflare's network, so it cannot reach a
+   * `localhost` origin. Defaults to the host on the incoming request, which is
+   * correct in production; set this to a tunnel URL to run the SFU transport
+   * from a local dev server.
+   */
+  callbackOrigin?: string;
 }
 
 const DEFAULT_SFU_API_BASE = "https://rtc.live.cloudflare.com/v1";

@@ -89,10 +89,41 @@ class FakeAnalyser {
   }
 }
 
+class FakeDestination {
+  readonly stream = new FakeStream();
+  disconnected = false;
+
+  disconnect(): void {
+    this.disconnected = true;
+  }
+}
+
+class FakeDelayNode {
+  static instances: FakeDelayNode[] = [];
+  readonly delayTime: number;
+  readonly connections: unknown[] = [];
+  disconnected = false;
+
+  constructor(_context: unknown, options?: { delayTime?: number }) {
+    this.delayTime = options?.delayTime ?? 0;
+    FakeDelayNode.instances.push(this);
+  }
+
+  connect(node: unknown): unknown {
+    this.connections.push(node);
+    return node;
+  }
+
+  disconnect(): void {
+    this.disconnected = true;
+  }
+}
+
 class FakeAudioContext {
   static instances: FakeAudioContext[] = [];
   readonly analyser = new FakeAnalyser();
   readonly connections: unknown[] = [];
+  readonly destinations: FakeDestination[] = [];
   resumed = false;
   closed = false;
 
@@ -110,8 +141,18 @@ class FakeAudioContext {
 
   createMediaStreamSource(): MediaStreamAudioSourceNode {
     return {
-      connect: (node: unknown) => this.connections.push(node)
+      connect: (node: unknown) => {
+        this.connections.push(node);
+        return node;
+      },
+      disconnect: () => {}
     } as unknown as MediaStreamAudioSourceNode;
+  }
+
+  createMediaStreamDestination(): MediaStreamAudioDestinationNode {
+    const destination = new FakeDestination();
+    this.destinations.push(destination);
+    return destination as unknown as MediaStreamAudioDestinationNode;
   }
 
   async close(): Promise<void> {
@@ -299,9 +340,11 @@ beforeEach(() => {
   FakePeerConnection.deferFirstOffer = false;
   FakePeerConnection.transceiverMid = "0";
   FakeAudioContext.instances = [];
+  FakeDelayNode.instances = [];
 
   vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
   vi.stubGlobal("AudioContext", FakeAudioContext);
+  vi.stubGlobal("DelayNode", FakeDelayNode);
   Object.defineProperty(navigator, "mediaDevices", {
     configurable: true,
     value: {
@@ -701,6 +744,49 @@ describe("SFUVoiceAudioInput", () => {
     await expect(input.setOutputDevice("speaker-1")).rejects.toMatchObject({
       name: "NotSupportedError"
     });
+    input.stop();
+  });
+
+  it("delays playback while handing the undelayed stream to onPlaybackStream", async () => {
+    const received: MediaStream[] = [];
+    const input = new SFUVoiceAudioInput({
+      endpoint: "/voice",
+      playbackDelayMs: 100,
+      onPlaybackStream: (playback) => received.push(playback)
+    });
+    const start = input.start();
+    const peer = await waitForPeer();
+    peer.connect();
+    await start;
+
+    const raw = new FakeStream() as unknown as MediaStream;
+    peer.emitTrack(raw);
+
+    // A detector reading onPlaybackStream must not be delayed twice, or the
+    // offset doubles instead of cancelling.
+    expect(received).toEqual([raw]);
+    expect(FakeDelayNode.instances).toHaveLength(1);
+    expect(FakeDelayNode.instances[0].delayTime).toBeCloseTo(0.1);
+    const destination = FakeAudioContext.instances[0].destinations[0];
+    expect(destination).toBeDefined();
+    expect(audio.srcObject).toBe(destination.stream);
+    expect(audio.srcObject).not.toBe(raw);
+    input.stop();
+  });
+
+  it("plays the raw stream when no playback delay is configured", async () => {
+    const input = new SFUVoiceAudioInput({ endpoint: "/voice" });
+    const start = input.start();
+    const peer = await waitForPeer();
+    peer.connect();
+    await start;
+
+    const raw = new FakeStream() as unknown as MediaStream;
+    peer.emitTrack(raw);
+
+    expect(FakeDelayNode.instances).toHaveLength(0);
+    expect(FakeAudioContext.instances[0].destinations).toHaveLength(0);
+    expect(audio.srcObject).toBe(raw);
     input.stop();
   });
 });

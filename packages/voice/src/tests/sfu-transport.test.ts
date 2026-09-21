@@ -875,4 +875,33 @@ describe("SFUVoiceTransport", () => {
       "SFU voice transport connection is not active"
     );
   });
+
+  it("dials the configured callback origin instead of the request host", async () => {
+    const { calls, fetchMock } = createSfuFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new SFUVoiceTransport({
+      config: { ...CONFIG, callbackOrigin: "https://dev.example.net" }
+    });
+
+    upgrade(transport, "/voice/tts/subscribe");
+    await transport.start("call", () => {});
+
+    const publish = await transport.handleHttpRequest(
+      new Request(
+        "http://localhost:5173/agents/my-agent/alice/voice/tts/publish",
+        { method: "POST" }
+      )
+    );
+    expect(publish?.status).toBe(200);
+
+    const adapterCall = calls.find((call) =>
+      call.path.endsWith("/adapters/websocket/new")
+    );
+    expect(tracksFromBody(adapterCall?.body)).toEqual([
+      expect.objectContaining({
+        endpoint:
+          "wss://dev.example.net/agents/my-agent/alice/voice/tts/subscribe"
+      })
+    ]);
+  });
 });

@@ -13,6 +13,26 @@ export interface SFUVoiceAudioInputOptions {
   }>;
   /** Reports the RMS level of the remote TTS audio as it reaches playback. */
   onPlaybackAudioLevel?: (rms: number) => void;
+  /**
+   * Receives the remote TTS audio stream as it arrives from the SFU.
+   *
+   * Use this to drive a local renderer that reacts to the assistant's voice
+   * (lip-sync, visemes, amplitude animation) from the same audio the user
+   * hears. The stream is live for the duration of the call and is replaced on
+   * reconnect.
+   */
+  onPlaybackStream?: (stream: MediaStream) => void;
+  /**
+   * Delays assistant playback by this many milliseconds before it reaches the
+   * output device.
+   *
+   * Audio-driven lip-sync has to classify a phoneme before it can move the
+   * mouth, so the visemes trail the audio by roughly 50-100ms. Holding the
+   * audio back by the same amount lines the two up again. `onPlaybackStream`
+   * still receives the undelayed stream, so a detector reading it is not
+   * delayed twice. @default 0
+   */
+  playbackDelayMs?: number;
 }
 
 type SFUResponse = {
@@ -43,6 +63,10 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   readonly #onPlaybackAudioLevel:
     | SFUVoiceAudioInputOptions["onPlaybackAudioLevel"]
     | undefined;
+  readonly #onPlaybackStream:
+    | SFUVoiceAudioInputOptions["onPlaybackStream"]
+    | undefined;
+  readonly #playbackDelayMs: number;
   readonly #jsonHeaders: Headers;
   #generation = 0;
   #peer: RTCPeerConnection | null = null;
@@ -55,6 +79,9 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
   #microphoneSamples: Float32Array<ArrayBuffer> | null = null;
   #playbackAnalyser: AnalyserNode | null = null;
   #playbackSamples: Float32Array<ArrayBuffer> | null = null;
+  #playbackDelaySource: MediaStreamAudioSourceNode | null = null;
+  #playbackDelayNode: DelayNode | null = null;
+  #playbackDelayDestination: MediaStreamAudioDestinationNode | null = null;
   #shouldStopForwarding = false;
   #disconnectTimer: ReturnType<typeof setTimeout> | null = null;
   #stopForwarding: Promise<void> = Promise.resolve();
@@ -65,6 +92,8 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     this.#iceServers = options.iceServers ?? DEFAULT_ICE_SERVERS;
     this.#captureMicrophone = options.captureMicrophone;
     this.#onPlaybackAudioLevel = options.onPlaybackAudioLevel;
+    this.#onPlaybackStream = options.onPlaybackStream;
+    this.#playbackDelayMs = options.playbackDelayMs ?? 0;
     this.#headers = new Headers(options.headers);
     this.#jsonHeaders = new Headers(this.#headers);
     this.#jsonHeaders.set("Content-Type", "application/json");
@@ -132,8 +161,10 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
         if (generation !== this.#generation || this.#peer !== peer) return;
         const playbackStream =
           event.streams[0] ?? new MediaStream([event.track]);
-        audio.srcObject = playbackStream;
-        this.#startPlaybackAudioLevelAnalysis(playbackStream);
+        const heardStream = this.#delayedPlaybackStream(playbackStream);
+        audio.srcObject = heardStream;
+        this.#startPlaybackAudioLevelAnalysis(heardStream);
+        this.#onPlaybackStream?.(playbackStream);
         void audio.play().catch((error: unknown) => {
           console.warn("[SFUVoiceAudioInput] Audio playback failed:", error);
         });
@@ -229,6 +260,7 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
     this.#microphoneSamples = null;
     this.#playbackAnalyser = null;
     this.#playbackSamples = null;
+    this.#disconnectPlaybackDelay();
     this.#onPlaybackAudioLevel?.(0);
     this.#clearDisconnectTimer();
     this.#peer?.close();
@@ -390,6 +422,48 @@ export class SFUVoiceAudioInput implements VoiceAudioInput {
       this.#animationFrame = requestAnimationFrame(measure);
     };
     this.#animationFrame = requestAnimationFrame(measure);
+  }
+
+  /**
+   * Holds assistant playback back so audio-driven lip-sync can catch up.
+   *
+   * The graph lives on the analyser context, which is torn down with the call,
+   * so the delay line never outlives playback. The undelayed stream is what
+   * callers get from `onPlaybackStream`; delaying a detector's input would
+   * double the offset rather than cancel it.
+   */
+  #delayedPlaybackStream(stream: MediaStream): MediaStream {
+    const context = this.#analyserContext;
+    if (this.#playbackDelayMs <= 0 || !context) return stream;
+
+    this.#disconnectPlaybackDelay();
+
+    const source = context.createMediaStreamSource(stream);
+    const delay = new DelayNode(context, {
+      delayTime: this.#playbackDelayMs / 1000
+    });
+    const destination = context.createMediaStreamDestination();
+    source.connect(delay).connect(destination);
+
+    this.#playbackDelaySource = source;
+    this.#playbackDelayNode = delay;
+    this.#playbackDelayDestination = destination;
+    return destination.stream;
+  }
+
+  /**
+   * Tears down the delay line between renegotiations and on call teardown. The
+   * references are also what keep the graph alive: a destination node that is
+   * only reachable through the element's `srcObject` can be collected, and the
+   * audio stops with it.
+   */
+  #disconnectPlaybackDelay(): void {
+    this.#playbackDelaySource?.disconnect();
+    this.#playbackDelayNode?.disconnect();
+    this.#playbackDelayDestination?.disconnect();
+    this.#playbackDelaySource = null;
+    this.#playbackDelayNode = null;
+    this.#playbackDelayDestination = null;
   }
 
   #startPlaybackAudioLevelAnalysis(stream: MediaStream): void {

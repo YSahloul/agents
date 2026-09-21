@@ -1024,7 +1024,22 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
   #callbackUrl(request: Request, from: string, to: string): string {
     const url = new URL(request.url);
     const fromSuffix = this.#route(from);
-    url.pathname = `${url.pathname.slice(0, -fromSuffix.length)}${this.#route(to)}`;
+    const pathname = `${url.pathname.slice(0, -fromSuffix.length)}${this.#route(to)}`;
+
+    // The SFU dials this URL from Cloudflare's network, so it must be publicly
+    // routable. A local dev server derives a localhost origin from the request,
+    // which the SFU rejects outright (websocket_localhost_not_allowed).
+    const override = this.#config.callbackOrigin;
+    if (override) {
+      const base = new URL(override);
+      base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+      base.pathname = pathname;
+      base.search = "";
+      base.hash = "";
+      return base.toString();
+    }
+
+    url.pathname = pathname;
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     return url.toString();
   }
