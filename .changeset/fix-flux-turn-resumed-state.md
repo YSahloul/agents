@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": patch
+"agents": patch
 ---
 
 Fix Flux STT `TurnResumed` state handling. Two defects in the turn state

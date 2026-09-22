@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": minor
+"agents": minor
 ---
 
 Add `WorkersAIMulawTTS`: a phone-leg TTS provider that streams native 8 kHz μ-law over the Workers AI binding's HTTP path — the one path that actually honors `encoding: "mulaw"` (the WebSocket/realtime path ignores it and always emits linear16, which garbled when passed through as μ-law). This is the proven pattern ported from a production phone agent, so `withVoice`-based phone examples can consume it from the library instead of carrying a local copy.

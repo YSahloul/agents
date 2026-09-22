@@ -1,7 +1,7 @@
 import { createVoiceThink, voiceChannel } from "@cloudflare/think/voice";
 import { Think } from "@cloudflare/think";
 import { routeAgentRequest, type Connection } from "agents";
-import { WorkersAIFluxSTT, type TTSProvider } from "@cloudflare/voice";
+import { WorkersAIFluxSTT, type TTSProvider } from "agents/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
 import { tool, type ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";

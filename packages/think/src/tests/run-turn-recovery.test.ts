@@ -1,11 +1,11 @@
 import { env } from "cloudflare:workers";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
 import type { ThinkRecoveryTestAgent } from "./agents/think-session";
 
 async function freshRecoveryAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
     name
   );
@@ -86,10 +86,12 @@ describe("recovery × runTurn", () => {
       }
     );
 
-    await agent.triggerFiberRecovery();
-    expect(
-      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
-    ).toBe(1);
+    // Assert atomically with the recovery scan. An immediate alarm may consume
+    // the Task after this RPC releases the Durable Object.
+    const transport = await agent.triggerFiberRecoveryWithTransportForTest(
+      "_chatRecoveryContinue"
+    );
+    expect(transport).toEqual({ tasks: 1, schedules: 0 });
     await agent.runScheduledRecoveryContinueForTest();
 
     // Recovery resolved the interrupted turn and left no leaked fiber.

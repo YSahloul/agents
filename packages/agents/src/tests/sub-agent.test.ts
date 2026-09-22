@@ -428,6 +428,49 @@ describe("SubAgent", () => {
     ]);
   });
 
+  it("should queue background work from a sub-agent and execute inside the child", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    // Pushing from the facet routes the item to the root, which owns the
+    // physical alarm; the root row records the facet as its owner.
+    const itemId = await agent.subAgentQueue("queue-child", "hello");
+    const rows = await agent.rootQueueRows();
+    const row = rows.find((r) => r.id === itemId);
+    expect(row?.callback).toBe("queuedCallback");
+    expect(row?.ownerPath).toContain("CounterSubAgent");
+
+    // The item is due immediately; the platform alarm auto-fires and the
+    // root routes the dispatch back into the facet.
+    const deadline = Date.now() + 5_000;
+    let log = await agent.subAgentScheduleLog("queue-child");
+    while (log.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      log = await agent.subAgentScheduleLog("queue-child");
+    }
+    expect(log).toEqual([
+      {
+        value: "hello",
+        agentName: "queue-child",
+        currentAgentName: "queue-child",
+        parentClass: "TestSubAgentParent",
+        scheduleId: itemId,
+        callback: "queuedCallback"
+      }
+    ]);
+    expect(await agent.rootQueueRows()).toEqual([]);
+  });
+
+  it("deleteSubAgent removes the sub-agent's pending queue items from the root", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const { beforeDelete, afterDelete } =
+      await agent.subAgentQueueThenDelete("queue-orphan-child");
+    expect(beforeDelete).toHaveLength(1);
+    expect(afterDelete).toEqual([]);
+  });
+
   it("should keep sub-agent interval schedules recurring and idempotent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
@@ -1515,6 +1558,39 @@ describe("SubAgent", () => {
         "hello from facet"
       );
       expect(error).toBe("");
+    });
+
+    it("routes a fresh-context facet broadcast through the root", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const ws = await connectWS(
+        `/agents/test-sub-agent-parent/${parentName}/sub/broadcast-sub-agent/${childName}`
+      );
+      try {
+        await waitForJsonMessage<{ type: MessageType }>(
+          ws,
+          (data) => data.type === MessageType.CF_AGENT_STATE
+        );
+
+        const expected = {
+          type: "fresh-context-facet-broadcast",
+          value: crypto.randomUUID()
+        };
+        const received = waitForJsonMessage<typeof expected>(
+          ws,
+          (data) => data.type === expected.type && data.value === expected.value
+        );
+
+        const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+        await parent.subAgentRelayBroadcastFromFreshContext(
+          childName,
+          JSON.stringify(expected)
+        );
+
+        await expect(received).resolves.toEqual(expected);
+      } finally {
+        ws.close();
+      }
     });
 
     it("should persist state when setState is called in a sub-agent", async () => {

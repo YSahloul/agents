@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": minor
+"agents": minor
 ---
 
 Remove the speculative eager-end-of-turn pipeline from `withVoice`. The voice

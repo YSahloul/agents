@@ -103,7 +103,7 @@ describe("SignalWire call control", () => {
       "https://example.signalwire.com/api/laml/2010-04-01/Accounts/proj-1/Calls/call-sid-1"
     );
     expect(init?.method).toBe("POST");
-    expect((init?.headers as Record<string, string>).Authorization).toBe(
+    expect(new Headers(init?.headers).get("Authorization")).toBe(
       `Basic ${btoa("proj-1:tok-1")}`
     );
     expect(String(init?.body)).toBe(

@@ -1,4 +1,4 @@
-import { SFUVoiceAudioInput, useVoiceAgent } from "@cloudflare/voice/react";
+import { SFUVoiceAudioInput, useVoiceAgent } from "agents/voice/react";
 import { useAgent, useAgentToolEvents } from "agents/react";
 import type { AgentToolRunState } from "agents/chat";
 import {

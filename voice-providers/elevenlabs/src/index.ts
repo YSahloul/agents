@@ -4,12 +4,12 @@ import type {
   Transcriber,
   TranscriberSession,
   TranscriberSessionOptions
-} from "@cloudflare/voice";
+} from "agents/voice";
 import {
   logVoiceError,
   toVoiceError,
   VoiceProviderError
-} from "@cloudflare/voice/errors";
+} from "agents/voice/errors";
 
 const DEFAULT_STT_MODEL_ID = "scribe_v2_realtime";
 const DEFAULT_STT_AUDIO_FORMAT = "pcm_16000";
@@ -81,7 +81,7 @@ const DEFAULT_OUTPUT_FORMAT = "mp3_44100_128";
  * @example
  * ```typescript
  * import { Agent } from "agents";
- * import { withVoice } from "@cloudflare/voice";
+ * import { withVoice } from "agents/voice";
  * import { ElevenLabsTTS } from "@cloudflare/voice-elevenlabs";
  *
  * const VoiceAgent = withVoice(Agent);
@@ -266,7 +266,6 @@ class ElevenLabsSTTSession implements TranscriberSession {
   #pendingChunks: ArrayBuffer[] = [];
   #pendingBytes = 0;
   #pendingOverflowLogged = false;
-  #audioSendLogged = false;
   #speechStarted = false;
 
   constructor(
@@ -323,13 +322,7 @@ class ElevenLabsSTTSession implements TranscriberSession {
 
   async #connect(): Promise<void> {
     try {
-      const url = this.#connectionUrl();
-      console.log("[VoiceTrace]", {
-        event: "stt_external_connecting",
-        provider: "elevenlabs",
-        endpoint: new URL(url).hostname
-      });
-      const response = await fetch(url, {
+      const response = await fetch(this.#connectionUrl(), {
         headers: {
           Upgrade: "websocket",
           "xi-api-key": this.#providerOptions.apiKey
@@ -378,10 +371,6 @@ class ElevenLabsSTTSession implements TranscriberSession {
       }
 
       this.#ws = ws;
-      console.log("[VoiceTrace]", {
-        event: "stt_external_connected",
-        provider: "elevenlabs"
-      });
       for (const chunk of this.#pendingChunks) {
         this.#sendAudioChunk(chunk);
       }
@@ -497,14 +486,6 @@ class ElevenLabsSTTSession implements TranscriberSession {
             this.#providerOptions.sampleRate ?? DEFAULT_STT_SAMPLE_RATE
         })
       );
-      if (!this.#audioSendLogged) {
-        this.#audioSendLogged = true;
-        console.log("[VoiceTrace]", {
-          event: "stt_external_audio_sent",
-          provider: "elevenlabs",
-          bytes: chunk.byteLength
-        });
-      }
     } catch (error) {
       if (!this.#closed) {
         logVoiceError({
@@ -553,11 +534,6 @@ class ElevenLabsSTTSession implements TranscriberSession {
       this.#speechStarted = false;
       const text = stringProp(data, "text");
       if (text) {
-        console.log("[VoiceTrace]", {
-          event: "stt_external_transcript_received",
-          provider: "elevenlabs",
-          chars: text.length
-        });
         this.#sessionOptions?.onUtterance?.(text);
       }
       return;

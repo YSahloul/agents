@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": minor
+"agents": minor
 ---
 
 Add `WorkersAIGrokTTS` for streaming xAI Grok text-to-speech through the

@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": minor
+"agents": minor
 ---
 
 Add SFU reconnection resilience so media survives brief control-plane drops

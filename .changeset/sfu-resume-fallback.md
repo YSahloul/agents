@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": patch
+"agents": patch
 ---
 
 Fix a real-world regression in the SFU reconnection resilience added

@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": patch
+"agents": patch
 ---
 
 Gate eager end-of-turn drafts until the transcriber confirms the caller's turn.

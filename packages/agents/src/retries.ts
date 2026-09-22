@@ -29,6 +29,18 @@ interface TryNOptions extends RetryOptions {
  * maxAttempts, and validates cross-field constraints after resolving against
  * defaults when provided.
  */
+/** Fill unset per-call retry options from a required set of defaults. */
+export function resolveRetryConfig(
+  retry: RetryOptions | undefined,
+  defaults: Required<RetryOptions>
+): Required<RetryOptions> {
+  return {
+    maxAttempts: retry?.maxAttempts ?? defaults.maxAttempts,
+    baseDelayMs: retry?.baseDelayMs ?? defaults.baseDelayMs,
+    maxDelayMs: retry?.maxDelayMs ?? defaults.maxDelayMs
+  };
+}
+
 export function validateRetryOptions(
   options: RetryOptions,
   defaults?: Required<RetryOptions>
@@ -319,6 +331,21 @@ export function isDurableObjectMemoryLimitReset(error: unknown): boolean {
  * error — re-running yields the same failure). A genuine application error
  * carries none of these signals, so it is never misclassified by this check.
  */
+/**
+ * Whether a failure is the PLATFORM's rather than the application's — any
+ * platform transient (see {@link isPlatformTransientError}, which includes
+ * superseded-isolate resets) or a memory-limit reset. Failed work in this
+ * class must be PRESERVED and deferred, never completed as an application
+ * failure. The two sub-classes defer differently: transients re-run
+ * indefinitely (the platform recovers), while memory-limit deferral is
+ * bounded by the alarm circuit breaker (#1825).
+ */
+export function isPlatformFailure(error: unknown): boolean {
+  return (
+    isPlatformTransientError(error) || isDurableObjectMemoryLimitReset(error)
+  );
+}
+
 export function isPlatformTransientError(error: unknown): boolean {
   for (const e of selfAndCauses(error)) {
     const message = errorMessageOf(e);

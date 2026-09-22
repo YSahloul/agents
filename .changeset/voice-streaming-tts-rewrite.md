@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": minor
+"agents": minor
 ---
 
 Rebuild WebSocket TTS on the upstream `StreamingTTSProvider` shape.

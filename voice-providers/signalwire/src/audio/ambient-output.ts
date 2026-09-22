@@ -75,7 +75,10 @@ export class AmbientOutput {
   }
 
   enqueueMarker(marker: AmbientPlaybackMarker): boolean {
-    if (this.frames === 0 && !this.queue.some((entry) => entry.type === "audio")) {
+    if (
+      this.frames === 0 &&
+      !this.queue.some((entry) => entry.type === "audio")
+    ) {
       return false;
     }
     this.queue.push({ type: "marker", marker });

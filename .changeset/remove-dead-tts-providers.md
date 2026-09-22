@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": minor
+"agents": minor
 ---
 
 Remove the dead TTS providers and the streaming-TTS abstraction they were the

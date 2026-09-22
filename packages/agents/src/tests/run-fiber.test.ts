@@ -1,3 +1,4 @@
+import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
@@ -45,6 +46,21 @@ describe("runFiber", () => {
 
       const log = (await agent.getExecutionLog()) as unknown as string[];
       expect(log).toContain("executed:hello");
+    });
+
+    it("preserves a successful result when fiber cleanup fails", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "run-cleanup-failure"
+      );
+
+      await expect(agent.runWithFailingCleanup("completed")).resolves.toBe(
+        "completed"
+      );
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(1);
+
+      await agent.triggerRecoveryCheck();
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
     });
 
     it("should delete the fiber row on completion", async () => {
@@ -215,16 +231,15 @@ describe("runFiber", () => {
     it("restores MCP connections before fiber recovery runs", async () => {
       // Unique name: DO storage persists across test runs, and a leftover
       // server row would make the ordering assertion vacuous.
-      const agent = await getAgentByName(
-        env.TestRunFiberAgent,
-        `recovery-mcp-ordering-${crypto.randomUUID()}`
-      );
+      const name = `recovery-mcp-ordering-${crypto.randomUUID()}`;
+      let agent = await getAgentByName(env.TestRunFiberAgent, name);
 
-      // Simulate pre-eviction state: a stored MCP server and an interrupted
-      // fiber, then re-run the wake sequence the wrapped onStart performs.
+      // Simulate pre-eviction state, then force a real reconstruction. The
+      // lifecycle restores MCP before Agent fiber recovery runs.
       await agent.seedMcpServerRow("mcp-seeded");
       await agent.insertInterruptedFiber("fiber-mcp", "mcp-ordering");
-      await agent.rerunWakeSequence();
+      await evictDurableObject(agent);
+      agent = await getAgentByName(env.TestRunFiberAgent, name);
 
       const recovered =
         (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];
@@ -405,7 +420,7 @@ describe("runFiber", () => {
   // ── Recovery follow-up alarm (re-arm + backoff) ───────────────
   //
   // Fast, deterministic coverage of the alarm-scheduling behavior that backs
-  // multi-pass fiber recovery. These drive `_checkRunFibers` + `_scheduleNextAlarm`
+  // multi-pass fiber recovery. These drive `_checkRunFibers` + `_syncHostJobs`
   // directly (no process kill / timers) and inspect the physical alarm, so the
   // starvation re-arm and the exponential backoff are guarded on every PR rather
   // than only by the nightly e2e suite.
@@ -419,7 +434,7 @@ describe("runFiber", () => {
 
       // No keepAlive lease, no schedules, no facet runs: the ONLY reason to arm
       // an alarm here is the pending (retained) recovery row. Before the
-      // starvation fix `_scheduleNextAlarm` left this null and the orphan
+      // starvation fix `_syncHostJobs` left this null and the orphan
       // starved.
       await agent.insertInterruptedFiber(
         "poison-1",

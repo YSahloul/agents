@@ -17,9 +17,9 @@ import {
   type SFUConfig,
   type VoiceCallStartContext,
   type VoiceTurnContext
-} from "@cloudflare/voice";
+} from "agents/voice";
 import { createWorkersAI } from "workers-ai-provider";
-import { createCompactFunction } from "agents/experimental/memory/utils";
+import { createCompactFunction } from "agents/sessions";
 import type { ToolSet } from "ai";
 import { generateText, hasToolCall, tool } from "ai";
 import { z } from "zod";
@@ -203,7 +203,7 @@ export class MyThinkAgent extends VoiceThink {
             generateText({ model: this.resolveModel(), prompt }).then(
               (r) => r.text
             ),
-          tailTokenBudget: 8_000
+          keepRecentTokens: 8_000
         })
       )
       .compactAfter(20_000);

@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": patch
+"agents": patch
 "@cloudflare/voice-signalwire": patch
 ---
 

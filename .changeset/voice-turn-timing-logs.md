@@ -1,6 +1,6 @@
 ---
 "@cloudflare/voice-signalwire": patch
-"@cloudflare/voice": patch
+"agents": patch
 ---
 
 Make a voice call readable in the logs.

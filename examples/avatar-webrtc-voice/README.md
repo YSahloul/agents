@@ -36,7 +36,7 @@ import {
   mp3ToPcm16,
   WorkersAIFluxSTT,
   WorkersAIGrokTTS
-} from "@cloudflare/voice";
+} from "agents/voice";
 
 const VoiceThink = createSFUVoiceThink<Env>();
 

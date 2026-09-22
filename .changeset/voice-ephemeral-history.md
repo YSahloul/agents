@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": minor
+"agents": minor
 ---
 
 Add configurable Voice conversation persistence while keeping Durable Object SQLite history as the default.

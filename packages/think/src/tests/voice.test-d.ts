@@ -4,7 +4,7 @@ import type {
   Transcriber,
   TTSProvider,
   VoiceTurnContext
-} from "@cloudflare/voice";
+} from "agents/voice";
 import {
   createSFUVoiceThink,
   createVoiceThink,

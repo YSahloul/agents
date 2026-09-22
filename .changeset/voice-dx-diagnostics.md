@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": minor
+"agents": minor
 "@cloudflare/voice-assemblyai": minor
 "@cloudflare/voice-elevenlabs": minor
 "@cloudflare/voice-deepgram": minor

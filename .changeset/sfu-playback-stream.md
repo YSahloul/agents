@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": minor
+"agents": minor
 ---
 
 Add `onPlaybackStream` and `playbackDelayMs` to `SFUVoiceAudioInputOptions`.

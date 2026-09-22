@@ -9,7 +9,7 @@ import type {
   NormalizedChannelDefinition
 } from "./channels";
 import { Think } from "./think";
-import { withSFUVoiceTransport, withVoice } from "@cloudflare/voice";
+import { withSFUVoiceTransport, withVoice } from "agents/voice";
 import type {
   SFUConfig,
   StreamingTTSProvider,
@@ -19,7 +19,7 @@ import type {
   VoiceAgentOptions,
   VoiceTurnContext,
   TTSProvider
-} from "@cloudflare/voice";
+} from "agents/voice";
 import type { UIMessage } from "ai";
 export type VoiceChannelOptions = Omit<
   ChannelDefinition,

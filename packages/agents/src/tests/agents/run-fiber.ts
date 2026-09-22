@@ -57,6 +57,23 @@ export class TestRunFiberAgent extends Agent {
     });
   }
 
+  async runWithFailingCleanup(value: string): Promise<string> {
+    this.sql`
+      CREATE TRIGGER fail_run_fiber_cleanup
+      BEFORE DELETE ON cf_agents_runs
+      WHEN OLD.name = 'cleanup-failure'
+      BEGIN
+        SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
+      END
+    `;
+
+    try {
+      return await this.runFiber("cleanup-failure", async () => value);
+    } finally {
+      this.sql`DROP TRIGGER fail_run_fiber_cleanup`;
+    }
+  }
+
   async runWithCheckpoint(steps: string[]): Promise<string[]> {
     return this.runFiber("checkpoint", async (ctx) => {
       const completed: string[] = [];
@@ -572,11 +589,6 @@ export class TestRunFiberAgent extends Agent {
     this.mcp._isRestored = false;
   }
 
-  /** Re-run the wrapped wake sequence: MCP restore → fiber recovery → onStart. */
-  async rerunWakeSequence(): Promise<void> {
-    await this.onStart();
-  }
-
   async getRecoveryMcpConnections(): Promise<Record<string, string[]>> {
     return this.recoveryMcpConnections;
   }
@@ -678,17 +690,17 @@ export class TestRunFiberAgent extends Agent {
 
   /**
    * Run one housekeeping+reschedule cycle in the same order as `alarm()`
-   * (`_checkRunFibers` then `_scheduleNextAlarm`) and return the resulting
+   * (`_checkRunFibers` then `_syncHostJobs`) and return the resulting
    * armed alarm time (epoch ms) or null. Lets tests drive multi-pass recovery
    * deterministically without spawning a real process / waiting on timers.
    */
   async simulateAlarmCycle(): Promise<number | null> {
     const self = this as unknown as {
       _checkRunFibers(): Promise<void>;
-      _scheduleNextAlarm(): Promise<void>;
+      _syncHostJobs(): Promise<void>;
     };
     await self._checkRunFibers();
-    await self._scheduleNextAlarm();
+    await self._syncHostJobs();
     return this.ctx.storage.getAlarm();
   }
 }

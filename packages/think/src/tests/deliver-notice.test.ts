@@ -1,17 +1,17 @@
 import { env } from "cloudflare:workers";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
 import type { ThinkNoticeSurfaceTestAgent, ThinkTestAgent } from "./agents";
 async function freshAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
     name
   );
 }
 
 async function freshCustomAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkNoticeSurfaceTestAgent as unknown as DurableObjectNamespace<ThinkNoticeSurfaceTestAgent>,
     name
   );

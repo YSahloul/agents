@@ -9,7 +9,7 @@ import type {
   VoicePlaybackMarkerMessage,
   VoiceServerAudioTransport,
   VoiceTurnContext
-} from "@cloudflare/voice";
+} from "agents/voice";
 import { Think } from "../../think";
 
 class TestTTS implements TTSProvider {

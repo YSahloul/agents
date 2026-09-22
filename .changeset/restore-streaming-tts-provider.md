@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": minor
+"agents": minor
 ---
 
 Restore the upstream `StreamingTTSProvider` surface that an earlier removal

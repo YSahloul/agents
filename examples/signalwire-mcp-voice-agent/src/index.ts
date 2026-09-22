@@ -5,7 +5,7 @@ import {
   WorkersAIFluxSTT,
   type TTSProvider,
   type VoiceTurnContext
-} from "@cloudflare/voice";
+} from "agents/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
 import { McpServer } from "@modelcontextprotocol/server";
 import { isStepCount, streamText } from "ai";

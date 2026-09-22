@@ -18,7 +18,7 @@ protocol and negotiates outbound audio from the configured TTS provider.
 ## Install
 
 ```bash
-npm install @cloudflare/voice-plivo
+npm install agents @cloudflare/voice-plivo
 ```
 
 ## Usage
@@ -29,7 +29,7 @@ Two endpoints are needed — `/answer` (Plivo fetches this when a call comes in)
 
 ```typescript
 import { Agent, routeAgentRequest } from "agents";
-import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
+import { withVoice, type VoiceTurnContext } from "agents/voice";
 import { PlivoAdapter } from "@cloudflare/voice-plivo";
 
 const VoiceAgent = withVoice(Agent);
@@ -110,7 +110,7 @@ Configure the format on the provider; the adapter needs no duplicate audio
 option. For a custom PCM provider, declare its output:
 
 ```typescript
-import { type TTSProvider } from "@cloudflare/voice";
+import { type TTSProvider } from "agents/voice";
 
 class PlivoPCMTTS implements TTSProvider {
   constructor(private ai: Ai) {}
@@ -172,7 +172,7 @@ runtime, so it needs no Plivo secrets.
 
 The same `VoiceAgent` instance can handle:
 
-- **Web voice** via the `@cloudflare/voice` browser client
+- **Web voice** via the `agents/voice` browser client
 - **Phone calls** via this Plivo adapter
 - **Text chat** via `sendText()`
 - **Email** via `routeAgentEmail()`

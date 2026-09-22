@@ -18,7 +18,7 @@ protocol and negotiates outbound audio from the configured TTS provider.
 ## Install
 
 ```bash
-npm install @cloudflare/voice-twilio
+npm install agents @cloudflare/voice-twilio
 ```
 
 ## Usage
@@ -27,7 +27,7 @@ npm install @cloudflare/voice-twilio
 
 ```typescript
 import { Agent, routeAgentRequest } from "agents";
-import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
+import { withVoice, type VoiceTurnContext } from "agents/voice";
 import { TwilioAdapter } from "@cloudflare/voice-twilio";
 
 const VoiceAgent = withVoice(Agent);

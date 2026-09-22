@@ -15,7 +15,7 @@
  *
  * @example
  * ```typescript
- * import { withVoice } from "@cloudflare/voice";
+ * import { withVoice } from "agents/voice";
  * import { TwilioAdapter } from "@cloudflare/voice-twilio";
  *
  * class MyAgent extends VoiceAgent<Env> {
@@ -34,7 +34,7 @@
  * ```
  */
 
-import { logVoiceError } from "@cloudflare/voice/errors";
+import { logVoiceError, toVoiceError } from "agents/voice/errors";
 
 // --- Audio conversion utilities ---
 
@@ -135,6 +135,14 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+function meanSquaredEnergy(samples: Int16Array): number {
+  if (samples.length === 0) return 0;
+
+  let sum = 0;
+  for (const sample of samples) sum += sample * sample;
+  return sum / samples.length;
+}
+
 // --- Twilio protocol types ---
 
 interface TwilioStartMessage {
@@ -166,6 +174,10 @@ interface TwilioMediaMessage {
 }
 
 // --- Adapter ---
+
+const SPEECH_ENERGY_THRESHOLD = 250_000;
+const SPEECH_DEBOUNCE_FRAMES = 3;
+const PLAYBACK_GRACE_MS = 1000;
 
 export interface TwilioAdapterOptions {
   /**
@@ -225,6 +237,9 @@ export class TwilioAdapter {
       | { format: "pcm16"; sampleRate: number }
       | { format: "mulaw"; sampleRate: 8000 }
       | null = { format: "pcm16", sampleRate: 16000 };
+    let audioGated = false;
+    let estimatedPlaybackEndAt = 0;
+    let loudFrames = 0;
 
     const rejectAgentAudio = (format: unknown, sampleRate: unknown) => {
       agentAudio = null;
@@ -233,6 +248,13 @@ export class TwilioAdapter {
       );
       agentSocket?.close(1003, "Unsupported agent audio format");
       serverSocket.close(1003, "Unsupported agent audio format");
+    };
+
+    const sendClear = () => {
+      estimatedPlaybackEndAt = 0;
+      if (serverSocket.readyState === WebSocket.OPEN && streamSid) {
+        serverSocket.send(JSON.stringify({ event: "clear", streamSid }));
+      }
     };
 
     // Connect to the VoiceAgent DO
@@ -254,7 +276,6 @@ export class TwilioAdapter {
       // Create a WebSocket connection to the agent
       const agentUrl = new URL(request.url);
       agentUrl.pathname = `/agents/${agentName.toLowerCase()}/${instanceId}`;
-      agentUrl.protocol = agentUrl.protocol.replace("http", "ws");
 
       const agentResp = await stub.fetch(
         new Request(agentUrl.toString(), {
@@ -273,18 +294,22 @@ export class TwilioAdapter {
         return;
       }
 
+      ws.binaryType = "arraybuffer";
       ws.accept();
       agentSocket = ws;
 
-      // Forward agent messages back to Twilio
-      ws.addEventListener("message", (event) => {
+      // Forward agent messages back to Twilio in the order they arrived.
+      // Blob conversion is asynchronous, so each message must wait for all
+      // earlier audio and control messages to finish processing.
+      let agentMessageQueue = Promise.resolve();
+      const handleAgentMessage = async (data: unknown) => {
         if (!streamSid) return;
 
-        if (typeof event.data === "string") {
+        if (typeof data === "string") {
           // JSON messages from agent — we can use Twilio marks to track them.
           // Forward as a mark so the Twilio side can correlate events.
           try {
-            const msg = JSON.parse(event.data) as Record<string, unknown>;
+            const msg = JSON.parse(data) as Record<string, unknown>;
             if (msg.type === "audio_config") {
               const format = msg.format;
               const sampleRate =
@@ -304,6 +329,23 @@ export class TwilioAdapter {
               }
               return;
             }
+
+            if (msg.type === "playback_interrupt") {
+              if (!audioGated) sendClear();
+              audioGated = false;
+              loudFrames = 0;
+              return;
+            }
+
+            if (
+              msg.type === "status" &&
+              (msg.status === "listening" ||
+                msg.status === "thinking" ||
+                msg.status === "speaking")
+            ) {
+              audioGated = false;
+            }
+
             if (
               serverSocket.readyState === WebSocket.OPEN &&
               (msg.type === "transcript" ||
@@ -322,16 +364,21 @@ export class TwilioAdapter {
             // ignore non-JSON
           }
         } else if (
-          event.data instanceof ArrayBuffer &&
+          (data instanceof ArrayBuffer || data instanceof Blob) &&
           agentAudio &&
           serverSocket.readyState === WebSocket.OPEN
         ) {
+          const audio = data instanceof Blob ? await data.arrayBuffer() : data;
+          if (audioGated) return;
+
           let payload: string;
+          let durationMs: number;
           if (agentAudio.format === "mulaw") {
-            payload = arrayBufferToBase64(event.data);
+            payload = arrayBufferToBase64(audio);
+            durationMs = (audio.byteLength / 8000) * 1000;
           } else {
             const pcm8k = resamplePCM(
-              new Int16Array(event.data),
+              new Int16Array(audio),
               agentAudio.sampleRate,
               8000
             );
@@ -340,8 +387,13 @@ export class TwilioAdapter {
               mulawBytes[i] = encodeMulaw(pcm8k[i]);
             }
             payload = arrayBufferToBase64(mulawBytes.buffer as ArrayBuffer);
+            durationMs =
+              (audio.byteLength / (agentAudio.sampleRate * 2)) * 1000;
           }
 
+          const now = Date.now();
+          estimatedPlaybackEndAt =
+            Math.max(now, estimatedPlaybackEndAt) + durationMs;
           serverSocket.send(
             JSON.stringify({
               event: "media",
@@ -350,6 +402,24 @@ export class TwilioAdapter {
             })
           );
         }
+      };
+
+      ws.addEventListener("message", (event) => {
+        const data: unknown = event.data;
+        agentMessageQueue = agentMessageQueue
+          .then(() => handleAgentMessage(data))
+          .catch((error: unknown) => {
+            logVoiceError({
+              component: "TwilioAdapter",
+              stage: "message",
+              message: "Failed to process VoiceAgent message",
+              error: toVoiceError(
+                error,
+                "Unknown VoiceAgent message processing error"
+              )
+            });
+          });
+        return agentMessageQueue;
       });
 
       ws.addEventListener("close", () => {});
@@ -394,6 +464,25 @@ export class TwilioAdapter {
           const pcm8k = decodeMulawToPCM(mulawBytes);
           const pcm16k = resamplePCM(pcm8k, 8000, 16000);
           const pcmBuffer = int16ToArrayBuffer(pcm16k);
+
+          loudFrames =
+            meanSquaredEnergy(pcm16k) > SPEECH_ENERGY_THRESHOLD
+              ? loudFrames + 1
+              : 0;
+          const agentSpeaking =
+            Date.now() < estimatedPlaybackEndAt + PLAYBACK_GRACE_MS;
+          if (
+            !audioGated &&
+            agentSpeaking &&
+            loudFrames >= SPEECH_DEBOUNCE_FRAMES
+          ) {
+            audioGated = true;
+            loudFrames = 0;
+            sendClear();
+            if (agentSocket?.readyState === WebSocket.OPEN) {
+              agentSocket.send(JSON.stringify({ type: "interrupt" }));
+            }
+          }
 
           if (agentSocket?.readyState === WebSocket.OPEN) {
             agentSocket.send(pcmBuffer);

@@ -22,7 +22,7 @@ import { AmbientOutput } from "./audio/ambient-output.js";
 import type {
   VoicePlaybackMarkerAckMessage,
   VoicePlaybackMarkerMessage
-} from "@cloudflare/voice";
+} from "agents/voice";
 import type {
   SignalWireDtmfMessage,
   SignalWireMarkMessage,

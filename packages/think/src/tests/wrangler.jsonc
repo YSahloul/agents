@@ -12,6 +12,14 @@
   "durable_objects": {
     "bindings": [
       {
+        "class_name": "ConnectionStateParent",
+        "name": "ConnectionStateParent"
+      },
+      {
+        "class_name": "ConnectionStateThink",
+        "name": "ConnectionStateThink"
+      },
+      {
         "class_name": "TestAssistantToolsAgent",
         "name": "TestAssistantToolsAgent"
       },
@@ -164,6 +172,14 @@
         "name": "ThinkNoticeSurfaceTestAgent"
       },
       {
+        "class_name": "ThinkPointerHydrationAgent",
+        "name": "ThinkPointerHydrationAgent"
+      },
+      {
+        "class_name": "ThinkLegacySessionApiAgent",
+        "name": "ThinkLegacySessionApiAgent"
+      },
+      {
         "class_name": "BrowserToolsHost",
         "name": "BrowserToolsHost"
       },
@@ -181,6 +197,8 @@
   "migrations": [
     {
       "new_sqlite_classes": [
+        "ConnectionStateParent",
+        "ConnectionStateThink",
         "TestAssistantToolsAgent",
         "TestAssistantAgentAgent",
         "BareAssistantAgent",
@@ -219,6 +237,8 @@
         "ThinkMediaEvictionAutoAgent",
         "ThinkVoiceTestAgent",
         "ThinkNoticeSurfaceTestAgent",
+        "ThinkPointerHydrationAgent",
+        "ThinkLegacySessionApiAgent",
         "BrowserToolsHost"
       ],
       "tag": "v1"

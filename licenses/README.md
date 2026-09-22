@@ -20,6 +20,7 @@ This directory contains the full license texts for third-party dependencies.
 - `apache-2.0-typescript.txt` - TypeScript (Apache 2.0)
 - `apache-2.0-minimp3-wasm.txt` - minimp3-wasm (Apache 2.0)
 - `bsd-pipecat-examples.txt` - Pipecat Examples robot animation (BSD 2-Clause)
+- `isc-partyserver.txt` - PartyServer (ISC)
 
 ## Adding New Licenses
 

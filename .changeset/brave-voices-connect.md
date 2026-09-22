@@ -1,5 +1,5 @@
 ---
-"@cloudflare/voice": minor
+"agents": minor
 ---
 
 Add Fitment-style real-time voice agents with Flux speculative turn events,

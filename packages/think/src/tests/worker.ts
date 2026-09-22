@@ -3,6 +3,10 @@ import { routeAgentRequest } from "agents";
 import { createBrowserRuntime, createBrowserTools } from "../tools/browser";
 
 export { HostBridgeLoopback } from "../extensions";
+export {
+  ConnectionStateParent,
+  ConnectionStateThink
+} from "./agents/connection-state";
 
 // Facet class behind tools built on createCodemodeRuntime (execute tool).
 export { CodemodeRuntime } from "@cloudflare/codemode";
@@ -45,7 +49,9 @@ export {
   ThinkMediaEvictionAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkVoiceTestAgent,
-  ThinkNoticeSurfaceTestAgent
+  ThinkNoticeSurfaceTestAgent,
+  ThinkPointerHydrationAgent,
+  ThinkLegacySessionApiAgent
 } from "./agents";
 
 import type {
@@ -86,7 +92,9 @@ import type {
   ThinkMediaEvictionAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkVoiceTestAgent,
-  ThinkNoticeSurfaceTestAgent
+  ThinkNoticeSurfaceTestAgent,
+  ThinkPointerHydrationAgent,
+  ThinkLegacySessionApiAgent
 } from "./agents";
 
 type BrowserRunTestBinding = Fetcher & {
@@ -232,6 +240,8 @@ export type Env = {
   ThinkMediaEvictionAutoAgent: DurableObjectNamespace<ThinkMediaEvictionAutoAgent>;
   ThinkVoiceTestAgent: DurableObjectNamespace<ThinkVoiceTestAgent>;
   ThinkNoticeSurfaceTestAgent: DurableObjectNamespace<ThinkNoticeSurfaceTestAgent>;
+  ThinkPointerHydrationAgent: DurableObjectNamespace<ThinkPointerHydrationAgent>;
+  ThinkLegacySessionApiAgent: DurableObjectNamespace<ThinkLegacySessionApiAgent>;
   BrowserToolsHost: DurableObjectNamespace<BrowserToolsHost>;
   LOADER: WorkerLoader;
 };

@@ -4,7 +4,7 @@ import {
   WorkersAIFluxSTT,
   type TTSProvider,
   type VoiceTurnContext
-} from "@cloudflare/voice";
+} from "agents/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
 import { streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";

@@ -11,7 +11,7 @@ Caller ← SignalWire PCMU/8 kHz ← SignalWireAdapter ← negotiated TTS audio 
 
 ```ts
 import { Agent, routeAgentRequest } from "agents";
-import { withVoice, type TTSProvider } from "@cloudflare/voice";
+import { withVoice, type TTSProvider } from "agents/voice";
 import { SignalWireAdapter } from "@cloudflare/voice-signalwire";
 
 // WorkersAITTS defaults to MP3, which the adapter's mulaw encoder can't

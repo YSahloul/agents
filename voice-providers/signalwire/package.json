@@ -12,7 +12,7 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "peerDependencies": {
-    "@cloudflare/voice": ">=0.3.3 <1.0.0"
+    "agents": ">=0.24.0 <1.0.0"
   },
   "exports": {
     ".": {
@@ -46,6 +46,7 @@
     "access": "public"
   },
   "devDependencies": {
+    "agents": "workspace:*",
     "vitest": "*"
   }
 }

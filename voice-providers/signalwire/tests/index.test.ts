@@ -965,7 +965,9 @@ describe("continuous ambient output", () => {
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(20);
     expect(
-      harness.serverSocket.jsonSent.filter((message) => message.event === "media")
+      harness.serverSocket.jsonSent.filter(
+        (message) => message.event === "media"
+      )
     ).toHaveLength(1);
 
     harness.serverSocket.emit("message", {
@@ -973,7 +975,9 @@ describe("continuous ambient output", () => {
     });
     await vi.advanceTimersByTimeAsync(40);
     expect(
-      harness.serverSocket.jsonSent.filter((message) => message.event === "media")
+      harness.serverSocket.jsonSent.filter(
+        (message) => message.event === "media"
+      )
     ).toHaveLength(1);
   });
 });

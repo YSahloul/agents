@@ -520,13 +520,9 @@ their cleanup and skipped continuations return immediately.
 
 #### Overriding the clear handler
 
-The SDK's built-in `CF_AGENT_CHAT_CLEAR` handler calls `resetTurnState()`
-automatically. If your `onMessage` override intercepts `CF_AGENT_CHAT_CLEAR`
-and returns before the SDK sees the message — for example, to scope the delete
-to a specific workflow — the built-in handler never runs. The active stream
-continues and queued continuations persist into the newly-cleared conversation.
+The SDK's built-in `CF_AGENT_CHAT_CLEAR` handler calls `resetTurnState()` and clears the default Sessions handle. If an `onMessage` override intercepts this frame and returns early, the built-in handler cannot stop the active stream or clear history.
 
-Call `this.resetTurnState()` before performing your scoped delete:
+Perform authorization or logging, then pass the frame to the original handler:
 
 ```typescript
 import { MessageType } from "@cloudflare/ai-chat/types";
@@ -536,18 +532,15 @@ this.onMessage = async (connection, message) => {
   if (typeof message === "string") {
     const data = JSON.parse(message);
     if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
-      this.resetTurnState();
-      this.sql`
-        DELETE FROM cf_ai_chat_agent_messages
-        WHERE workflow_id = ${this.workflowId}
-      `;
-      await this.saveMessages([]);
-      return;
+      await this.authorizeClear(connection);
+      console.log("clearing conversation");
     }
   }
   return _onMessage(connection, message);
 };
 ```
+
+Do not write directly to Sessions tables. Use `this.sessions.session().clearMessages()` when implementing a separate server-side history operation outside the chat protocol.
 
 ### Lifecycle Hooks
 
@@ -590,17 +583,11 @@ If you do not pass `abortSignal` to `streamText`, the LLM call will continue run
 
 ### Stream Recovery
 
-When a Durable Object is evicted mid-stream (code update, inactivity timeout, resource limit), the LLM connection is severed permanently and the in-memory streaming state is lost. `chatRecovery` wraps each chat turn in a [`runFiber()`](./durable-execution.md), providing automatic `keepAlive` during streaming and a recovery hook on restart.
+When a Durable Object is evicted mid-stream (code update, inactivity timeout, resource limit), the LLM connection is severed permanently and the in-memory streaming state is lost. Durable recovery wraps every `AIChatAgent` and `Think` chat turn in a [`runFiber()`](./durable-execution.md), providing automatic `keepAlive` during streaming and a recovery hook on restart.
 
-```typescript
-export class ChatAgent extends AIChatAgent {
-  override chatRecovery = true;
-}
-```
+If the agent is evicted mid-stream, the fiber row survives in SQLite. On the next activation, the framework detects the interrupted fiber, reconstructs the partial response from buffered stream chunks, and calls `onChatRecovery`.
 
-When enabled, every `onChatMessage` call runs inside a fiber. If the agent is evicted mid-stream, the fiber row survives in SQLite. On the next activation, the framework detects the interrupted fiber, reconstructs the partial response from buffered stream chunks, and calls `onChatRecovery`.
-
-`AIChatAgent` defaults `chatRecovery` to `false` so existing chat agents only get client reconnect/resumable-stream behavior. `Think` defaults it to `true`.
+Durable recovery is always enabled. Use `chatRecovery` only to tune its budgets and terminal behavior.
 
 > **Assign `chatRecovery` as a class field or in the constructor — never in `onStart()`.** On every wake the SDK evaluates recovery budgets (and may seal an interrupted turn, firing `onExhausted`) _before_ your `onStart()` body runs. A config produced inside `onStart()` is therefore read as the built-in defaults at the moment recovery decides, so your `maxRecoveryWork` / `shouldKeepRecovering` / `onExhausted` silently never apply to the recovery that matters. The SDK logs a one-time warning if it detects `chatRecovery` being assigned during `onStart()`.
 
@@ -610,8 +597,6 @@ Override to implement provider-specific recovery. The default behavior persists 
 
 ```typescript
 export class ChatAgent extends AIChatAgent {
-  override chatRecovery = true;
-
   override async onChatRecovery(
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
@@ -659,7 +644,16 @@ Settled work is never dropped: `persist: false` only suppresses persistence of a
 
 When recovery happens before any stream chunks were written, there is no partial assistant message to continue. If the latest persisted message is still the unanswered user message from the interrupted turn, the framework retries that turn automatically unless `continue` is `false`.
 
-`chatRecovery` can also be configured with budgets and terminal behavior:
+#### Controlling automatic continuation
+
+Durable bookkeeping stays enabled even when automatic continuation is not appropriate:
+
+- **Retries or side effects are unsafe:** override `onChatRecovery()` and return `{ continue: false }`. Persist idempotency keys or completion records before external side effects so a recovered turn can tell whether work already happened.
+- **Cancellation must survive eviction:** an `AbortSignal` only cancels the current in-memory turn. Also persist cancellation intent in agent state or SQL, read it in `onChatRecovery()`, and return `{ continue: false }` when cancellation was requested.
+- **Cost must be bounded:** set `maxAttempts`, `noProgressTimeoutMs`, `maxRecoveryWork`, and `maxOomRetries`. Use `shouldKeepRecovering` with durable spend data to stop later attempts. The predicate is not bound to the agent instance, so read spend from a store keyed by `ctx.recoveryRootRequestId`.
+- **A provider can resume without a new model call:** use `this.stash()` to save its response ID, retrieve that response in `onChatRecovery()`, and return `{ persist: false, continue: false }`.
+
+`chatRecovery` can be configured with budgets and terminal behavior:
 
 ```typescript
 override chatRecovery = {
