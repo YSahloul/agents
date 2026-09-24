@@ -13,5 +13,5 @@ export function isEchoOf(transcript: string, assistantText: string): boolean {
 }
 
 export function countTranscriptWords(transcript?: string): number {
-  return transcript?.trim() ? transcript.trim().split(/\s+/).length : 0;
+  return transcript?.match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
 }

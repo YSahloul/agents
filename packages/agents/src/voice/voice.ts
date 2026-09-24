@@ -267,6 +267,20 @@ export interface VoiceAgentOptions {
    * @default 0
    */
   minInterruptWords?: number;
+  /**
+   * Override transcript-based barge-in decisions. Return `true` to interrupt
+   * immediately, `false` to keep listening without interrupting, or
+   * `undefined` to use `minInterruptWords`.
+   *
+   * A non-interrupting decision is re-evaluated as interim speech grows. If
+   * the final utterance remains non-interrupting while playback is active, it
+   * is treated as a backchannel and is not sent as a new turn.
+   */
+  shouldInterrupt?: (context: {
+    transcript: string;
+    trigger: "onSpeechStart" | "onSpeechUpdate";
+    wordCount: number;
+  }) => boolean | undefined;
   /** Optional diagnostic output. Diagnostic event names and metadata are not stable API. */
   diagnostics?: VoiceDiagnosticsOptions;
 }
@@ -476,7 +490,7 @@ export function withVoice<TBase extends AgentLike>(
     #callStartInputSuppressed = new Set<string>();
     // Client-captured microphone energy for the current STT turn.
     #clientSpeechEnergy = new Map<string, ClientSpeechEnergy>();
-    // Connections waiting for transcript growth to meet minInterruptWords.
+    // Connections waiting for more transcript or a policy decision.
     #pendingBargeInConnections = new Set<string>();
 
     // Current async start_call identity per connection, used to ignore stale readiness.
@@ -1319,12 +1333,7 @@ export function withVoice<TBase extends AgentLike>(
             const echoed =
               opt("filterEchoedTranscripts", false) &&
               this.#isEchoTranscript(connection.id, transcript);
-            if (
-              echoed ||
-              countTranscriptWords(transcript) < opt("minInterruptWords", 0)
-            ) {
-              return;
-            }
+            if (echoed) return;
             this.#handleBargeIn(connection, "onSpeechUpdate", transcript);
           },
           onEagerUtterance: (transcript: string) => {
@@ -1663,8 +1672,21 @@ export function withVoice<TBase extends AgentLike>(
         return;
       }
 
+      const wordCount = countTranscriptWords(transcript);
+      const policyDecision = opt(
+        "shouldInterrupt",
+        undefined
+      )?.({
+        transcript: transcript ?? "",
+        trigger,
+        wordCount
+      });
+      const interruptDecision = policyDecision;
       const minWords = opt("minInterruptWords", 0);
-      if (minWords > 0 && countTranscriptWords(transcript) < minWords) {
+      if (
+        interruptDecision !== true &&
+        (interruptDecision === false || (minWords > 0 && wordCount < minWords))
+      ) {
         this.#pendingBargeInConnections.add(connection.id);
         console.log("[VoiceTrace]", {
           event: "interrupt_trigger",
@@ -1673,7 +1695,10 @@ export function withVoice<TBase extends AgentLike>(
           transcript: transcript ?? null,
           activePipeline,
           pendingPlayback,
-          action: "below_min_words"
+          action:
+            interruptDecision === false
+              ? "deferred_by_policy"
+              : "below_min_words"
         });
         return;
       }

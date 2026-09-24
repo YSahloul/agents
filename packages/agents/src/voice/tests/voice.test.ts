@@ -10,6 +10,7 @@ import { createExecutionContext, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import worker from "./worker";
 import type { TestVoiceAgent } from "./agents/voice";
+import { countTranscriptWords } from "../voice-interruption";
 
 // --- Helpers ---
 async function connectWS(path: string) {
@@ -3325,7 +3326,7 @@ describe("VoiceAgent — interrupt", () => {
         abortCount: 0
       });
 
-      sendJSON(ws, { type: "_emit_speech_start", text: "hold on" });
+      sendJSON(ws, { type: "_emit_speech_start", text: "keep going" });
       await waitForMicrotasks();
       expect(
         recording.messages.filter(
@@ -3335,18 +3336,18 @@ describe("VoiceAgent — interrupt", () => {
       expect((await waitForInterruptCount(ws, 0)).interrupt).toBe(0);
 
       const playbackInterrupt = waitForType(ws, "playback_interrupt");
-      sendJSON(ws, { type: "_emit_speech_update", text: "hold on now" });
+      sendJSON(ws, { type: "_emit_speech_update", text: "keep going now" });
       await playbackInterrupt;
       expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
 
-      sendJSON(ws, { type: "_emit_eager", text: "hold on now" });
-      sendJSON(ws, { type: "_emit_end", text: "hold on now" });
+      sendJSON(ws, { type: "_emit_eager", text: "keep going now" });
+      sendJSON(ws, { type: "_emit_end", text: "keep going now" });
       await waitForMicrotasks();
 
       expect(
         await waitUntilTurnState(ws, (state) => state.transcripts.length === 2)
       ).toEqual({
-        transcripts: ["long response", "hold on now"],
+        transcripts: ["long response", "keep going now"],
         abortCount: 1
       });
       expect(
@@ -3359,6 +3360,93 @@ describe("VoiceAgent — interrupt", () => {
       recording.stop();
       ws.close();
     }
+  });
+
+  it("allows application policy to interrupt before the word threshold", async () => {
+    const { ws } = await connectWS(uniqueMinInterruptPath());
+    try {
+      await waitForStatus(ws, "idle");
+      await startCall(ws);
+
+      sendJSON(ws, { type: "text_message", text: "long response" });
+      await waitForStatus(ws, "thinking");
+      await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
+
+      const playbackInterrupt = waitForType(ws, "playback_interrupt");
+      sendJSON(ws, { type: "_emit_speech_start", text: "hold on" });
+      await playbackInterrupt;
+      expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("keeps an application-triggered interruption as a conversation turn", async () => {
+    const { ws } = await connectWS(uniqueMinInterruptPath());
+    try {
+      await waitForStatus(ws, "idle");
+      await startCall(ws);
+
+      sendJSON(ws, { type: "text_message", text: "long response" });
+      await waitForStatus(ws, "thinking");
+      await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
+
+      const playbackInterrupt = waitForType(ws, "playback_interrupt");
+      sendJSON(ws, { type: "_emit_speech_start", text: "stop" });
+      await playbackInterrupt;
+      sendJSON(ws, { type: "_emit_end", text: "stop" });
+
+      expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
+      expect(
+        await waitUntilTurnState(ws, (state) => state.transcripts.length === 2)
+      ).toEqual({
+        transcripts: ["long response", "stop"],
+        abortCount: 1
+      });
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("allows application policy to keep a backchannel from interrupting", async () => {
+    const { ws } = await connectWS(uniqueMinInterruptPath());
+    const recording = recordSocket(ws);
+    try {
+      await waitForStatus(ws, "idle");
+      await startCall(ws);
+
+      sendJSON(ws, { type: "text_message", text: "long response" });
+      await waitForStatus(ws, "thinking");
+      await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
+
+      sendJSON(ws, {
+        type: "_emit_speech_start",
+        text: "okay I understand"
+      });
+      sendJSON(ws, { type: "_emit_end", text: "okay I understand" });
+      await waitForMicrotasks();
+
+      expect(
+        recording.messages.filter(
+          (message) => message.type === "playback_interrupt"
+        )
+      ).toHaveLength(0);
+      expect((await waitForInterruptCount(ws, 0)).interrupt).toBe(0);
+      expect(
+        await waitUntilTurnState(ws, (state) => state.transcripts.length === 1)
+      ).toEqual({
+        transcripts: ["long response"],
+        abortCount: 0
+      });
+    } finally {
+      recording.stop();
+      ws.close();
+    }
+  });
+
+  it("counts lexical words instead of punctuation tokens", () => {
+    expect(countTranscriptWords("This -- Aren")).toBe(2);
+    expect(countTranscriptWords("hold on")).toBe(2);
   });
 });
 
@@ -4194,7 +4282,7 @@ describe("VoiceAgent — server audio transport", () => {
       });
       await expect(getPlaybackText(ws)).resolves.toBe("Echo: First sentence.");
 
-      sendJSON(ws, { type: "_emit_speech_start", text: "hold on" });
+      sendJSON(ws, { type: "_emit_speech_start", text: "keep going" });
       await waitForMicrotasks();
       expect(
         recording.messages.filter(
@@ -4203,14 +4291,14 @@ describe("VoiceAgent — server audio transport", () => {
       ).toHaveLength(0);
 
       const playbackInterrupt = waitForType(ws, "playback_interrupt");
-      sendJSON(ws, { type: "_emit_speech_update", text: "hold on now" });
+      sendJSON(ws, { type: "_emit_speech_update", text: "keep going now" });
       await playbackInterrupt;
       expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
       expect(log).toHaveBeenCalledWith("[VoiceTrace]", {
         event: "interrupt_trigger",
         connectionId: expect.any(String),
         trigger: "onSpeechUpdate",
-        transcript: "hold on now",
+        transcript: "keep going now",
         activePipeline: false,
         pendingPlayback: true,
         action: "interrupt"

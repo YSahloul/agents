@@ -618,7 +618,21 @@ const Pcm24kVoiceBase = withVoice(Agent, {
 const PersistentVoiceBase = withVoice(Agent);
 const MinInterruptVoiceBase = withVoice(Agent, {
   filterEchoedTranscripts: true,
-  minInterruptWords: 3
+  minInterruptWords: 3,
+  shouldInterrupt: ({ transcript }) => {
+    const normalized =
+      transcript
+        .toLowerCase()
+        .match(/[\p{L}\p{N}]+/gu)
+        ?.join(" ") ?? "";
+    if (normalized === "stop" || normalized.startsWith("hold on")) {
+      return true;
+    }
+    if (normalized === "okay" || normalized === "okay i understand") {
+      return false;
+    }
+    return undefined;
+  }
 });
 
 /**
