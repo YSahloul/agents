@@ -324,7 +324,8 @@ export function createVoiceThink<
         mode: "stream",
         callback,
         signal: context.signal,
-        metadata
+        metadata,
+        rollbackMessagesOnAbort: true
       })
         .catch((error: unknown) => callback.fail(error))
         .finally(() => {

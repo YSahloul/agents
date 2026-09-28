@@ -37,6 +37,12 @@ describe("Think voice adapter", () => {
     );
     expect(await agent.getVoiceSqlTables()).toEqual([]);
   });
+  it("rolls back a rejected eager voice transcript", async () => {
+    const agent = await freshAgent(`voice-eager-abort-${crypto.randomUUID()}`);
+    await agent.runAbortedVoiceOnTurnForTest("discarded eager transcript");
+
+    expect(await agent.getStoredMessages()).toEqual([]);
+  });
 
   it("stamps connection metadata once for an inherited voice turn", async () => {
     const agent = await freshAgent(`voice-metadata-${crypto.randomUUID()}`);

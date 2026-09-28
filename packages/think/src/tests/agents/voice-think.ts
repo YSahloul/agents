@@ -207,6 +207,19 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     }
     return text;
   }
+  async runAbortedVoiceOnTurnForTest(input: string): Promise<void> {
+    const controller = new AbortController();
+    controller.abort("eager transcript rejected");
+    await this.onTurn(input, {
+      connection: {
+        id: "aborted-voice-test",
+        uri: "https://example.com/voice"
+      } as Connection,
+      messages: [],
+      signal: controller.signal
+    });
+    await scheduler.wait(25);
+  }
 
   async getVoiceMetadataCallsForTest(): Promise<number> {
     return this._voiceMetadataCalls;

@@ -1243,6 +1243,11 @@ export interface StreamableResult {
 export interface ChatOptions {
   signal?: AbortSignal;
   /**
+   * Remove this turn's user and assistant messages when its signal aborts.
+   * Voice eager-end-of-turn uses this so rejected hypotheses stay provisional.
+   */
+  rollbackMessagesOnAbort?: boolean;
+  /**
    * Client-defined tool schemas to expose to the model for this turn, mirroring
    * the `clientTools` carried over the WebSocket chat protocol. Use this when a
    * parent agent delegates to a Think sub-agent over RPC but the sub-agent still
@@ -1325,6 +1330,7 @@ export interface RunTurnStream extends RunTurnBase {
   onClientToolCall?: ClientToolExecutor;
   signal?: AbortSignal;
   metadata?: Record<string, unknown>;
+  rollbackMessagesOnAbort?: boolean;
 }
 
 export type RunTurnOptions = RunTurnWait | RunTurnSubmit | RunTurnStream;
@@ -8107,12 +8113,12 @@ export class Think<
             typeof userMessage === "function"
               ? await userMessage(this.messages)
               : this._normalizeChatMessages(userMessage);
-
-          for (const msg of this._stampChannel(
+          const turnMessages = this._stampChannel(
             resolved,
             options?.channel,
             options?.metadata
-          )) {
+          );
+          for (const msg of turnMessages) {
             await this._appendMessageToHistory(msg);
           }
           this._broadcastMessages();
@@ -8197,6 +8203,19 @@ export class Think<
           };
 
           await this._runChatRecoveryFiber(requestId, false, chatBody);
+          if (options?.rollbackMessagesOnAbort && abortSignal?.aborted) {
+            const history = await this.session.getHistory();
+            const firstTurnMessage = history.findIndex((message) =>
+              turnMessages.some((turnMessage) => turnMessage.id === message.id)
+            );
+            if (firstTurnMessage !== -1) {
+              await this.session.deleteMessages(
+                history.slice(firstTurnMessage).map((message) => message.id)
+              );
+              await this._syncMessages();
+              this._broadcastMessages();
+            }
+          }
         }
       });
     } finally {
@@ -8441,7 +8460,8 @@ export class Think<
       clientTools: options.clientTools,
       onClientToolCall: options.onClientToolCall,
       channel: options.channel,
-      metadata: options.metadata
+      metadata: options.metadata,
+      rollbackMessagesOnAbort: options.rollbackMessagesOnAbort
     });
   }
 
