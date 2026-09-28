@@ -616,18 +616,14 @@ const Pcm24kVoiceBase = withVoice(Agent, {
   sampleRate: 24000
 });
 const PersistentVoiceBase = withVoice(Agent);
-const MinInterruptVoiceBase = withVoice(Agent, {
+const InterruptPolicyVoiceBase = withVoice(Agent, {
   filterEchoedTranscripts: true,
-  minInterruptWords: 3,
   shouldInterrupt: ({ transcript }) => {
     const normalized =
       transcript
         .toLowerCase()
         .match(/[\p{L}\p{N}]+/gu)
         ?.join(" ") ?? "";
-    if (normalized === "stop" || normalized.startsWith("hold on")) {
-      return true;
-    }
     if (normalized === "okay" || normalized === "okay i understand") {
       return false;
     }
@@ -1476,11 +1472,11 @@ export class TestPcm24kVoiceAgent extends Pcm24kVoiceBase {
 }
 
 /**
- * Test VoiceAgent configured with `minInterruptWords: 3`. Holds its
- * pipeline open until the abort signal fires, so tests can verify short
- * transcripts are ignored while longer ones interrupt.
+ * Test VoiceAgent with an application-defined interruption policy. Holds its
+ * pipeline open until the abort signal fires so tests can verify backchannels
+ * are ignored while substantive utterances interrupt.
  */
-export class TestMinInterruptVoiceAgent extends MinInterruptVoiceBase {
+export class TestInterruptPolicyVoiceAgent extends InterruptPolicyVoiceBase {
   transcriber = new TestTranscriber();
   tts = new TestTTS();
 

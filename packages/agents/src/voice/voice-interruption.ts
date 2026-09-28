@@ -11,7 +11,3 @@ export function isEchoOf(transcript: string, assistantText: string): boolean {
   const hits = heard.filter((word) => assistantWords.has(word)).length;
   return hits >= 4 && hits / heard.length >= 0.6;
 }
-
-export function countTranscriptWords(transcript?: string): number {
-  return transcript?.match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
-}

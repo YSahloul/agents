@@ -21,7 +21,7 @@ const options = {
   channel: "phone",
   filterEchoedTranscripts: true,
   listenDuringCallStart: false,
-  minInterruptWords: 3
+  shouldInterrupt: ({ transcript }) => transcript !== "okay"
 } satisfies CreateVoiceThinkOptions;
 const VoiceThink = createVoiceThink<TestEnv>(options);
 

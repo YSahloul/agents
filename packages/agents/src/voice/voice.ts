@@ -30,8 +30,8 @@
  *
  * Fork extensions are Flux eager/speculative turns, assistant-echo rejection,
  * call-start input suppression, server audio transports, and playback markers.
- * Rejected echo or short-fragment STT events must not replace the active
- * pipeline. Accepted barge-in emits `playback_interrupt`; carrier clearing
+ * Rejected echo or application-classified backchannel events must not replace
+ * the active pipeline. Accepted barge-in emits `playback_interrupt`; carrier clearing
  * remains the audio transport adapter's responsibility.
  *
  * @experimental This API is not yet stable and may change.
@@ -46,7 +46,7 @@ import {
   type ModelDiagnosticTracker,
   type TurnDiagnostics
 } from "./diagnostics";
-import { countTranscriptWords, isEchoOf } from "./voice-interruption";
+import { isEchoOf } from "./voice-interruption";
 import {
   iterateTextEvents,
   type TextSource,
@@ -258,28 +258,17 @@ export interface VoiceAgentOptions {
    */
   listenDuringCallStart?: boolean;
   /**
-   * Minimum words the transcript must contain before a barge-in is allowed
-   * to interrupt active playback. Suppresses single-word backchannels
-   * ("yeah", "okay") and short echo fragments from cutting off the
-   * assistant mid-sentence. Applies to `onSpeechStart` and a pending
-   * `onSpeechUpdate` -- client-side `audio_level` interrupts carry no
-   * transcript and are never gated by this option. `0` disables the gate.
-   * @default 0
-   */
-  minInterruptWords?: number;
-  /**
-   * Override transcript-based barge-in decisions. Return `true` to interrupt
-   * immediately, `false` to keep listening without interrupting, or
-   * `undefined` to use `minInterruptWords`.
+   * Override transcript-based barge-in decisions. Return `false` to keep
+   * listening without interrupting. Return `true` or `undefined` to interrupt.
    *
-   * A non-interrupting decision is re-evaluated as interim speech grows. If
-   * the final utterance remains non-interrupting while playback is active, it
-   * is treated as a backchannel and is not sent as a new turn.
+   * A non-interrupting decision is re-evaluated as interim speech grows and
+   * once more for the final utterance. If the final decision remains `false`
+   * while playback is active, the utterance is treated as a backchannel and
+   * is not sent as a new turn.
    */
   shouldInterrupt?: (context: {
     transcript: string;
-    trigger: "onSpeechStart" | "onSpeechUpdate";
-    wordCount: number;
+    trigger: "onSpeechStart" | "onSpeechUpdate" | "onUtterance";
   }) => boolean | undefined;
   /** Optional diagnostic output. Diagnostic event names and metadata are not stable API. */
   diagnostics?: VoiceDiagnosticsOptions;
@@ -1441,6 +1430,12 @@ export function withVoice<TBase extends AgentLike>(
               type: "transcript_interim",
               text: ""
             });
+            if (
+              this.#pendingBargeInConnections.has(connection.id) &&
+              this.#hasInterruptibleOutput(connection.id)
+            ) {
+              this.#handleBargeIn(connection, "onUtterance", transcript);
+            }
             const pendingBargeIn = this.#pendingBargeInConnections.delete(
               connection.id
             );
@@ -1701,7 +1696,7 @@ export function withVoice<TBase extends AgentLike>(
 
     #handleBargeIn(
       connection: Connection,
-      trigger: "onSpeechStart" | "onSpeechUpdate",
+      trigger: "onSpeechStart" | "onSpeechUpdate" | "onUtterance",
       transcript?: string
     ): void {
       const activePipeline = this.#cm.hasActivePipeline(connection.id);
@@ -1719,18 +1714,11 @@ export function withVoice<TBase extends AgentLike>(
         return;
       }
 
-      const wordCount = countTranscriptWords(transcript);
-      const policyDecision = opts.shouldInterrupt?.({
+      const interruptDecision = opts.shouldInterrupt?.({
         transcript: transcript ?? "",
-        trigger,
-        wordCount
+        trigger
       });
-      const interruptDecision = policyDecision;
-      const minWords = opt("minInterruptWords", 0);
-      if (
-        interruptDecision !== true &&
-        (interruptDecision === false || (minWords > 0 && wordCount < minWords))
-      ) {
+      if (interruptDecision === false) {
         this.#pendingBargeInConnections.add(connection.id);
         console.log("[VoiceTrace]", {
           event: "interrupt_trigger",
@@ -1739,10 +1727,7 @@ export function withVoice<TBase extends AgentLike>(
           transcript: transcript ?? null,
           activePipeline,
           pendingPlayback,
-          action:
-            interruptDecision === false
-              ? "deferred_by_policy"
-              : "below_min_words"
+          action: "deferred_by_policy"
         });
         return;
       }

@@ -14,6 +14,5 @@ Add bidirectional model-text streaming so Grok can emit audio before the model
 response completes.
 Bound long model sentences into speech-ready phrases so streaming providers
 start synthesizing before the sentence finishes generating.
-Add `minInterruptWords` to `withVoice()` -- suppress barge-in for
-transcripts under the word count, matching Pipecat's/LiveKit's `min_words`
-turn-detection option.
+Add `shouldInterrupt` to `withVoice()` so applications can classify transcript
+meaning and suppress known backchannels without discarding short commands.
