@@ -82,6 +82,27 @@ export class MyAgent extends VoiceAgent<Env> {
 | `modelId`      | `"eleven_flash_v2_5"`             | Model ID. `eleven_flash_v2_5` has the lowest latency.                                          |
 | `outputFormat` | `"mp3_44100_128"`                 | Audio output format.                                                                           |
 
+### Eleven v4
+
+`eleven_v4` and `eleven_v4_turbo` automatically use ElevenLabs' Text to
+Dialogue WebSocket. Direct Voice connections send model text deltas as one
+dialogue turn. Playback-marker phone transports open the same WebSocket for
+each speech-ready chunk so interrupted audio remains tracked accurately.
+Inline direction such as `[reassuring]` is optional.
+
+For a low-latency SignalWire call, request its native wire format:
+
+```typescript
+tts = new ElevenLabsTTS({
+  apiKey: this.env.ELEVENLABS_API_KEY,
+  voiceId: "your-voice-id",
+  modelId: "eleven_v4_turbo",
+  outputFormat: "ulaw_8000"
+});
+```
+
+SignalWire forwards the generated μ-law/8 kHz audio without conversion.
+
 ### Phone adapters
 
 SignalWire, Plivo, and Twilio require raw telephony-compatible audio. Select

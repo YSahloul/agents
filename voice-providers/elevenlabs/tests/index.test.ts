@@ -17,6 +17,10 @@ function connectWith(ws = new MockWebSocket()) {
   return { fetchMock, ws };
 }
 
+function sentJSON(ws: MockWebSocket): Array<Record<string, unknown>> {
+  return ws.send.mock.calls.map(([message]) => JSON.parse(String(message)));
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -35,6 +39,144 @@ it.each([
     expect(provider.sampleRate).toBe(sampleRate);
   }
 );
+
+it("streams Eleven v4 dialogue over one WebSocket", async () => {
+  const { fetchMock, ws } = connectWith();
+  const provider = new ElevenLabsTTS({
+    apiKey: "test-key",
+    voiceId: "voice-1",
+    modelId: "eleven_v4_turbo",
+    outputFormat: "ulaw_8000"
+  });
+  const stream = provider.synthesizeTextStream?.(
+    new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue("[reassuring] I found ");
+        controller.enqueue("the duplicate charge.");
+        controller.close();
+      }
+    })
+  );
+  expect(stream).toBeDefined();
+
+  const firstChunk = stream!.next();
+  await flush();
+
+  expect(fetchMock).toHaveBeenCalledWith(
+    expect.objectContaining({
+      pathname: "/v1/text-to-dialogue/stream-input",
+      search: "?model_id=eleven_v4_turbo&output_format=ulaw_8000"
+    }),
+    {
+      headers: {
+        Upgrade: "websocket",
+        "xi-api-key": "test-key"
+      },
+      signal: undefined
+    }
+  );
+  expect(sentJSON(ws)).toEqual([
+    { voices: ["voice-1"] },
+    {
+      inputs: [
+        {
+          text: "[reassuring] I found ",
+          voice_id: "voice-1",
+          new_turn: false
+        }
+      ]
+    },
+    {
+      inputs: [
+        {
+          text: "the duplicate charge.",
+          voice_id: "voice-1",
+          new_turn: false
+        }
+      ]
+    },
+    { close_socket: true }
+  ]);
+
+  ws.dispatchEvent(
+    new MessageEvent("message", {
+      data: JSON.stringify({ audio: btoa("\x01\x02\xff") })
+    })
+  );
+  await expect(firstChunk).resolves.toEqual({
+    done: false,
+    value: new Uint8Array([1, 2, 255]).buffer
+  });
+
+  const completion = stream!.next();
+  ws.dispatchEvent(
+    new MessageEvent("message", {
+      data: JSON.stringify({ is_final: true })
+    })
+  );
+  await expect(completion).resolves.toEqual({
+    done: true,
+    value: undefined
+  });
+  expect(ws.close).toHaveBeenCalled();
+});
+
+it("uses dialogue streaming for complete Eleven v4 text", async () => {
+  const { ws } = connectWith();
+  const provider = new ElevenLabsTTS({
+    apiKey: "test-key",
+    voiceId: "voice-1",
+    modelId: "eleven_v4"
+  });
+  const stream = provider.synthesizeStream("One complete line.");
+
+  const firstChunk = stream.next();
+  await flush();
+  expect(sentJSON(ws)).toEqual([
+    { voices: ["voice-1"] },
+    {
+      inputs: [
+        {
+          text: "One complete line.",
+          voice_id: "voice-1",
+          new_turn: false
+        }
+      ]
+    },
+    { close_socket: true }
+  ]);
+
+  ws.dispatchEvent(
+    new MessageEvent("message", {
+      data: JSON.stringify({ audio: btoa("audio"), is_final: true })
+    })
+  );
+  await expect(firstChunk).resolves.toEqual({
+    done: false,
+    value: new TextEncoder().encode("audio").buffer
+  });
+  await expect(stream.next()).resolves.toEqual({
+    done: true,
+    value: undefined
+  });
+});
+
+it("closes Eleven v4 dialogue generation when aborted", async () => {
+  const { ws } = connectWith();
+  const provider = new ElevenLabsTTS({
+    apiKey: "test-key",
+    modelId: "eleven_v4_turbo"
+  });
+  const abort = new AbortController();
+  const stream = provider.synthesizeStream("Stop speaking.", abort.signal);
+  const pending = stream.next();
+  await flush();
+
+  abort.abort();
+
+  await expect(pending).resolves.toEqual({ done: true, value: undefined });
+  expect(ws.close).toHaveBeenCalled();
+});
 
 it("rejects readiness when closed while the connection is pending", async () => {
   vi.stubGlobal(
