@@ -48,8 +48,8 @@
         "name": "TestStreamingTtsVoiceAgent"
       },
       {
-        "class_name": "TestInterruptPolicyVoiceAgent",
-        "name": "TestInterruptPolicyVoiceAgent"
+        "class_name": "TestInterruptVoiceAgent",
+        "name": "TestInterruptVoiceAgent"
       },
       {
         "class_name": "TestVoiceInputAgent",
@@ -90,7 +90,7 @@
         "TestAiSdkTextStreamVoiceAgent",
         "TestPcm24kVoiceAgent",
         "TestStreamingTtsVoiceAgent",
-        "TestInterruptPolicyVoiceAgent",
+        "TestInterruptVoiceAgent",
         "TestVoiceInputAgent",
         "TestDiagnosticVoiceInputAgent",
         "TestRejectCallVoiceInputAgent",

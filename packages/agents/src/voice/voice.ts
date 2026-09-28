@@ -24,15 +24,15 @@
  *
  * Event map and ownership:
  * - `#handleStartCall` and `#handleEndCall` own call lifecycle.
- * - `#handleInterrupt` and `#handleBargeIn` decide interruption policy.
+ * - `#handleInterrupt` and `#handleBargeIn` own interruption handling.
  * - `#runPipeline` and `#streamResponse` own turn and response processing.
  * - `AudioConnectionManager` alone owns the active pipeline AbortController.
  *
  * Fork extensions are Flux eager/speculative turns, assistant-echo rejection,
  * call-start input suppression, server audio transports, and playback markers.
- * Rejected echo or application-classified backchannel events must not replace
- * the active pipeline. Accepted barge-in emits `playback_interrupt`; carrier clearing
- * remains the audio transport adapter's responsibility.
+ * Rejected echo events must not replace the active pipeline. Accepted barge-in
+ * emits `playback_interrupt`; carrier clearing remains the audio transport
+ * adapter's responsibility.
  *
  * @experimental This API is not yet stable and may change.
  */
@@ -257,19 +257,6 @@ export interface VoiceAgentOptions {
    * STT. The opening hook is not interruptible while disabled. @default true
    */
   listenDuringCallStart?: boolean;
-  /**
-   * Override transcript-based barge-in decisions. Return `false` to keep
-   * listening without interrupting. Return `true` or `undefined` to interrupt.
-   *
-   * A non-interrupting decision is re-evaluated as interim speech grows and
-   * once more for the final utterance. If the final decision remains `false`
-   * while playback is active, the utterance is treated as a backchannel and
-   * is not sent as a new turn.
-   */
-  shouldInterrupt?: (context: {
-    transcript: string;
-    trigger: "onSpeechStart" | "onSpeechUpdate" | "onUtterance";
-  }) => boolean | undefined;
   /** Optional diagnostic output. Diagnostic event names and metadata are not stable API. */
   diagnostics?: VoiceDiagnosticsOptions;
 }
@@ -479,8 +466,6 @@ export function withVoice<TBase extends AgentLike>(
     #callStartInputSuppressed = new Set<string>();
     // Client-captured microphone energy for the current STT turn.
     #clientSpeechEnergy = new Map<string, ClientSpeechEnergy>();
-    // Connections waiting for more transcript or a policy decision.
-    #pendingBargeInConnections = new Set<string>();
 
     // Current async start_call identity per connection, used to ignore stale readiness.
     #startupTokens = new Map<string, symbol>();
@@ -571,7 +556,6 @@ export function withVoice<TBase extends AgentLike>(
         this.#clientPlaybackMarkers.delete(connection.id);
         this.#playbackTurnSignals.delete(connection.id);
         this.#clientSpeechEnergy.delete(connection.id);
-        this.#pendingBargeInConnections.delete(connection.id);
         this.#callTokens.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
         this.#cm.cleanup(connection.id);
@@ -1360,15 +1344,6 @@ export function withVoice<TBase extends AgentLike>(
             if (echoed) return;
             this.#handleBargeIn(connection, "onSpeechStart", transcript);
           },
-          onSpeechUpdate: (transcript: string) => {
-            if (this.#callTokens.get(connection.id) !== startupToken) return;
-            if (!this.#pendingBargeInConnections.has(connection.id)) return;
-            const echoed =
-              opt("filterEchoedTranscripts", false) &&
-              this.#isEchoTranscript(connection.id, transcript);
-            if (echoed) return;
-            this.#handleBargeIn(connection, "onSpeechUpdate", transcript);
-          },
           onEagerUtterance: (transcript: string) => {
             if (this.#callTokens.get(connection.id) !== startupToken) return;
             const echoed =
@@ -1384,12 +1359,6 @@ export function withVoice<TBase extends AgentLike>(
               clientThreshold: energy?.threshold ?? null
             });
             if (echoed) return;
-            if (
-              this.#pendingBargeInConnections.has(connection.id) &&
-              this.#hasInterruptibleOutput(connection.id)
-            ) {
-              return;
-            }
             const turn = this.#takeInputTurn(connection);
             turn.finalInput(transcript.length);
             this.#startSpeculativeTurn(connection, transcript, turn);
@@ -1430,19 +1399,6 @@ export function withVoice<TBase extends AgentLike>(
               type: "transcript_interim",
               text: ""
             });
-            if (
-              this.#pendingBargeInConnections.has(connection.id) &&
-              this.#hasInterruptibleOutput(connection.id)
-            ) {
-              this.#handleBargeIn(connection, "onUtterance", transcript);
-            }
-            const pendingBargeIn = this.#pendingBargeInConnections.delete(
-              connection.id
-            );
-            if (pendingBargeIn && this.#hasInterruptibleOutput(connection.id)) {
-              turn?.finish("skipped");
-              return;
-            }
             if (
               turn &&
               opt("filterEchoedTranscripts", false) &&
@@ -1640,7 +1596,6 @@ export function withVoice<TBase extends AgentLike>(
       this.#callTokens.delete(connection.id);
       this.#abortInputTurn(connection, "call_ended");
       this.#clientSpeechEnergy.delete(connection.id);
-      this.#pendingBargeInConnections.delete(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "end_call");
       this.#cm.cleanup(connection.id);
       try {
@@ -1653,7 +1608,7 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
-    // --- Interruption policy ---
+    // --- Interruption handling ---
 
     async #handleInterrupt(
       connection: Connection,
@@ -1677,7 +1632,6 @@ export function withVoice<TBase extends AgentLike>(
         "client_interrupt"
       );
       this.#clearClientPlaybackMarkers(connection.id);
-      this.#pendingBargeInConnections.delete(connection.id);
       this.#cm.abortPipeline(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "interrupt");
       this.#cm.clearAudioBuffer(connection.id);
@@ -1696,7 +1650,7 @@ export function withVoice<TBase extends AgentLike>(
 
     #handleBargeIn(
       connection: Connection,
-      trigger: "onSpeechStart" | "onSpeechUpdate" | "onUtterance",
+      trigger: "onSpeechStart",
       transcript?: string
     ): void {
       const activePipeline = this.#cm.hasActivePipeline(connection.id);
@@ -1714,25 +1668,6 @@ export function withVoice<TBase extends AgentLike>(
         return;
       }
 
-      const interruptDecision = opts.shouldInterrupt?.({
-        transcript: transcript ?? "",
-        trigger
-      });
-      if (interruptDecision === false) {
-        this.#pendingBargeInConnections.add(connection.id);
-        console.log("[VoiceTrace]", {
-          event: "interrupt_trigger",
-          connectionId: connection.id,
-          trigger,
-          transcript: transcript ?? null,
-          activePipeline,
-          pendingPlayback,
-          action: "deferred_by_policy"
-        });
-        return;
-      }
-
-      this.#pendingBargeInConnections.delete(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "speech_start");
       this.#clearClientPlaybackMarkers(connection.id);
       this.#requestActiveTurnAbort(

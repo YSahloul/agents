@@ -616,19 +616,8 @@ const Pcm24kVoiceBase = withVoice(Agent, {
   sampleRate: 24000
 });
 const PersistentVoiceBase = withVoice(Agent);
-const InterruptPolicyVoiceBase = withVoice(Agent, {
-  filterEchoedTranscripts: true,
-  shouldInterrupt: ({ transcript }) => {
-    const normalized =
-      transcript
-        .toLowerCase()
-        .match(/[\p{L}\p{N}]+/gu)
-        ?.join(" ") ?? "";
-    if (normalized === "okay" || normalized === "okay i understand") {
-      return false;
-    }
-    return undefined;
-  }
+const InterruptVoiceBase = withVoice(Agent, {
+  filterEchoedTranscripts: true
 });
 
 /**
@@ -1472,11 +1461,9 @@ export class TestPcm24kVoiceAgent extends Pcm24kVoiceBase {
 }
 
 /**
- * Test VoiceAgent with an application-defined interruption policy. Holds its
- * pipeline open until the abort signal fires so tests can verify backchannels
- * are ignored while substantive utterances interrupt.
+ * Test VoiceAgent that holds its pipeline open until the abort signal fires.
  */
-export class TestInterruptPolicyVoiceAgent extends InterruptPolicyVoiceBase {
+export class TestInterruptVoiceAgent extends InterruptVoiceBase {
   transcriber = new TestTranscriber();
   tts = new TestTTS();
 

@@ -20,8 +20,7 @@ declare const tts: TTSProvider & Partial<StreamingTTSProvider>;
 const options = {
   channel: "phone",
   filterEchoedTranscripts: true,
-  listenDuringCallStart: false,
-  shouldInterrupt: ({ transcript }) => transcript !== "okay"
+  listenDuringCallStart: false
 } satisfies CreateVoiceThinkOptions;
 const VoiceThink = createVoiceThink<TestEnv>(options);
 
