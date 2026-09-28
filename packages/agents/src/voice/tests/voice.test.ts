@@ -127,6 +127,17 @@ async function getPlaybackText(ws: WebSocket): Promise<string | null> {
   return message.text;
 }
 
+async function getHistory(
+  ws: WebSocket
+): Promise<Array<{ role: string; content: string }>> {
+  const response = waitForType(ws, "_history");
+  sendJSON(ws, { type: "_get_history" });
+  const message = (await response) as {
+    messages: Array<{ role: string; content: string }>;
+  };
+  return message.messages;
+}
+
 async function setTranscriberMode(
   ws: WebSocket,
   value:
@@ -4105,6 +4116,63 @@ describe("VoiceAgent — server audio transport", () => {
     });
     ws.close();
   });
+
+  it.each(["string", "stream"] as const)(
+    "keeps played phrases in history for %s responses",
+    async (responseMode) => {
+      const { ws } = await connectWS(uniquePath());
+      await waitForStatus(ws, "idle");
+      sendJSON(ws, {
+        type: "_set_turn_response_mode",
+        value: responseMode
+      });
+      await waitForAck(ws, "_set_turn_response_mode");
+      sendJSON(ws, {
+        type: "start_call",
+        playback_markers: true,
+        playback_marker_acks: true
+      });
+      await waitForStatus(ws, "listening");
+
+      const markerPromise = waitForMessageMatching(
+        ws,
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          (message as Record<string, unknown>).type === "playback_marker"
+      );
+      const input =
+        "The caller heard this opening phrase, but not the rest of this sentence";
+      sendJSON(ws, { type: "text_message", text: input });
+      const marker = (await markerPromise) as Record<string, unknown>;
+      expect(marker).toMatchObject({
+        sequence: 1,
+        text: "Echo: The caller heard this opening phrase,"
+      });
+
+      sendJSON(ws, {
+        type: "playback_marker_ack",
+        playbackId: marker.playbackId,
+        sequence: marker.sequence
+      });
+      await expect(getPlaybackText(ws)).resolves.toBe(
+        "Echo: The caller heard this opening phrase,"
+      );
+
+      const interrupted = waitForStatus(ws, "listening");
+      sendJSON(ws, { type: "interrupt" });
+      await interrupted;
+      await waitForMicrotasks();
+      await expect(getHistory(ws)).resolves.toEqual([
+        { role: "user", content: input },
+        {
+          role: "assistant",
+          content: "Echo: The caller heard this opening phrase,"
+        }
+      ]);
+      ws.close();
+    }
+  );
 
   it("orders opted-in playback markers after binary sentence audio", async () => {
     const { ws } = await connectWS(uniquePath());

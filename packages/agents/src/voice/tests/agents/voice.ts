@@ -1051,6 +1051,14 @@ export class TestVoiceAgent extends VoiceBase {
             })
           );
           break;
+        case "_get_history":
+          connection.send(
+            JSON.stringify({
+              type: "_history",
+              messages: this.getConversationHistory(Number.MAX_SAFE_INTEGER)
+            })
+          );
+          break;
         case "_get_message_count":
           connection.send(
             JSON.stringify({

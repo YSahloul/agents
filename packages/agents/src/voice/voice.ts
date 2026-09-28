@@ -499,6 +499,8 @@ export function withVoice<TBase extends AgentLike>(
     #playbackMarkerConnections = new Set<string>();
     // Carrier-acknowledged marker text for clients that support acknowledgements.
     #clientPlaybackMarkers = new Map<string, ClientPlaybackMarkerState>();
+    // Response currently owning playback markers for each connection.
+    #playbackTurnSignals = new Map<string, AbortSignal>();
     // Persists after readiness so callbacks from replaced sessions cannot affect a newer call.
     #callTokens = new Map<string, symbol>();
     #turnSequence = 0;
@@ -578,6 +580,7 @@ export function withVoice<TBase extends AgentLike>(
         this.#callStartInputSuppressed.delete(connection.id);
         this.#playbackMarkerConnections.delete(connection.id);
         this.#clientPlaybackMarkers.delete(connection.id);
+        this.#playbackTurnSignals.delete(connection.id);
         this.#clientSpeechEnergy.delete(connection.id);
         this.#pendingBargeInConnections.delete(connection.id);
         this.#callTokens.delete(connection.id);
@@ -904,6 +907,47 @@ export function withVoice<TBase extends AgentLike>(
         role: row.role,
         content: row.text
       }));
+    }
+
+    #reconcileInterruptedAssistant(
+      connectionId: string,
+      signal?: AbortSignal
+    ): void {
+      const playbackSignal = this.#playbackTurnSignals.get(connectionId);
+      if (!playbackSignal || (signal && playbackSignal !== signal)) return;
+      this.#playbackTurnSignals.delete(connectionId);
+
+      const text = this.getPlaybackText(connectionId)?.trim();
+      if (text === undefined) return;
+
+      if (!opt("persistMessages", true)) {
+        const latest = this.#conversationHistory.at(-1);
+        if (latest?.role === "assistant") {
+          if (text) latest.content = text;
+          else this.#conversationHistory.pop();
+        } else if (text) {
+          this.saveMessage("assistant", text);
+        }
+        return;
+      }
+
+      this.#ensureMessageSchema();
+      const latest = this.sql<{ id: number; role: VoiceRole }>`
+        SELECT id, role FROM cf_voice_messages
+        ORDER BY id DESC LIMIT 1
+      `[0];
+      if (latest?.role === "assistant") {
+        if (text) {
+          this.sql`
+            UPDATE cf_voice_messages SET text = ${text}
+            WHERE id = ${latest.id}
+          `;
+        } else {
+          this.sql`DELETE FROM cf_voice_messages WHERE id = ${latest.id}`;
+        }
+      } else if (text) {
+        this.saveMessage("assistant", text);
+      }
     }
 
     // --- Audio transport helpers ---
@@ -1648,6 +1692,9 @@ export function withVoice<TBase extends AgentLike>(
           .get(connection.id)
           ?.interrupt(connection.id);
       } finally {
+        if (!activePipeline && pendingPlayback) {
+          this.#reconcileInterruptedAssistant(connection.id);
+        }
         await this.onInterrupt(connection);
       }
     }
@@ -1673,10 +1720,7 @@ export function withVoice<TBase extends AgentLike>(
       }
 
       const wordCount = countTranscriptWords(transcript);
-      const policyDecision = opt(
-        "shouldInterrupt",
-        undefined
-      )?.({
+      const policyDecision = opts.shouldInterrupt?.({
         transcript: transcript ?? "",
         trigger,
         wordCount
@@ -1729,6 +1773,9 @@ export function withVoice<TBase extends AgentLike>(
             .get(connection.id)
             ?.interrupt(connection.id);
         } finally {
+          if (!activePipeline && pendingPlayback) {
+            this.#reconcileInterruptedAssistant(connection.id);
+          }
           await this.onInterrupt(connection);
         }
       });
@@ -2031,6 +2078,7 @@ export function withVoice<TBase extends AgentLike>(
           turnOutcome = "aborted";
           active.model?.abort();
           turn.emit("turn.aborted");
+          this.#reconcileInterruptedAssistant(connection.id, signal);
         }
         turn.finish(turnOutcome);
         this.#cm.clearPipelineAbort(connection.id, signal);
@@ -2242,6 +2290,7 @@ export function withVoice<TBase extends AgentLike>(
           turnOutcome = "aborted";
           active.model?.abort();
           turn.emit("turn.aborted");
+          this.#reconcileInterruptedAssistant(connection.id, signal);
         }
         turn.finish(turnOutcome);
         this.#cm.clearPipelineAbort(connection.id, signal);
@@ -2275,6 +2324,30 @@ export function withVoice<TBase extends AgentLike>(
         this.#audioTransports.get(connection.id)
       );
       markedTransport?.resetPlaybackText(connection.id);
+      const tracksPlayback =
+        markedTransport !== null ||
+        this.#playbackMarkerConnections.has(connection.id);
+      if (tracksPlayback) {
+        this.#playbackTurnSignals.set(connection.id, signal);
+      } else {
+        this.#playbackTurnSignals.delete(connection.id);
+      }
+
+      if (typeof response === "string" && tracksPlayback) {
+        try {
+          return await this.#streamingTTSPipeline(
+            connection,
+            iterateTextEvents(response),
+            pipelineStart,
+            signal,
+            turn,
+            model,
+            markedTransport
+          );
+        } finally {
+          turn.finishTts();
+        }
+      }
 
       if (typeof response === "string") {
         this.#activeAssistantText.set(connection.id, {
@@ -2554,8 +2627,11 @@ export function withVoice<TBase extends AgentLike>(
       finishReason?: VoiceModelFinishReason;
     }> {
       const tts = this.#requireTTS();
+      const tracksPlayback =
+        markedTransport !== null ||
+        this.#playbackMarkerConnections.has(connection.id);
       const chunker = new SentenceChunker(
-        typeof tts.synthesizeStream === "function"
+        tracksPlayback || typeof tts.synthesizeStream === "function"
           ? STREAMING_TTS_MAX_CHARS
           : Number.POSITIVE_INFINITY
       );

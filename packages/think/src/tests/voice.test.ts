@@ -110,15 +110,17 @@ describe("Think voice adapter", () => {
     expect(nextPrompt).not.toContain("Discarded ending.");
   });
 
-  it("persists carrier-acknowledged speech through client playback markers", async () => {
+  it("persists a carrier-acknowledged partial sentence", async () => {
     const agent = await freshAgent(
       `voice-client-marker-${crypto.randomUUID()}`
     );
-    await agent.setVoiceResponseForTest("First sentence. Discarded ending.");
+    await agent.setVoiceResponseForTest(
+      "The caller heard this opening phrase, but not the rest of this sentence."
+    );
     await agent.useClientPlaybackMarkerAcksForTest();
     await agent.runMarkedVoiceTurnForTest("tell me a story");
     await expect(agent.ackOneClientPlaybackMarkerForTest()).resolves.toBe(
-      "First sentence."
+      "The caller heard this opening phrase,"
     );
     await agent.interruptMarkedVoiceTurnForTest();
 
@@ -127,13 +129,13 @@ describe("Think voice adapter", () => {
       "user",
       "assistant"
     ]);
-    expect(textOf(messages[1])).toBe("First sentence.");
+    expect(textOf(messages[1])).toBe("The caller heard this opening phrase,");
 
     await agent.setVoiceResponseForTest("Continuation answer.");
     await agent.runMarkedVoiceTurnForTest("continue");
     const nextPrompt = await agent.getLastModelPromptForTest();
-    expect(nextPrompt).toContain("First sentence.");
-    expect(nextPrompt).not.toContain("Discarded ending.");
+    expect(nextPrompt).toContain("The caller heard this opening phrase,");
+    expect(nextPrompt).not.toContain("but not the rest of this sentence");
   });
 
   it("deletes an interrupted text-only assistant with no playback mark", async () => {
