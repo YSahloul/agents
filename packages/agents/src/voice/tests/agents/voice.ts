@@ -134,21 +134,6 @@ class ControlledTestStreamingTTS
     }
   }
 }
-class MarkedControlledTestStreamingTTS
-  extends ControlledTestStreamingTTS
-  implements StreamingTextTTSProvider
-{
-  synthesizeTextStreamCalls = 0;
-
-  async *synthesizeTextStream(
-    text: ReadableStream<string>
-  ): AsyncGenerator<ArrayBuffer> {
-    this.synthesizeTextStreamCalls++;
-    for await (const chunk of text) {
-      yield new TextEncoder().encode(chunk).buffer;
-    }
-  }
-}
 
 class TestAudioTransport implements VoiceServerAudioTransport {
   events: string[] = [];
@@ -178,23 +163,6 @@ class TestAudioTransport implements VoiceServerAudioTransport {
 
   emit(byteLength: number): void {
     this.#onAudio?.(new ArrayBuffer(byteLength));
-  }
-}
-class MarkedTestAudioTransport extends TestAudioTransport {
-  #playedText: string[] = [];
-
-  resetPlaybackText(_connectionId: string): void {
-    this.#playedText = [];
-    this.events.push("reset-text");
-  }
-
-  markPlaybackText(_connectionId: string, text: string): void {
-    this.#playedText.push(text);
-    this.events.push(`mark:${text}`);
-  }
-
-  getPlaybackText(_connectionId: string): string {
-    return this.#playedText.join(" ");
   }
 }
 
@@ -654,11 +622,6 @@ export class TestVoiceAgent extends VoiceBase {
   #controlledTTS = new ControlledTestStreamingTTS(
     () => this.#currentTurnSignal
   );
-  #markedTTS = new MarkedControlledTestStreamingTTS(
-    () => this.#currentTurnSignal
-  );
-  #markerPipeline = false;
-  #releaseModelStream: (() => void) | null = null;
 
   async keepAlive(): Promise<() => void> {
     if (this.#keepAliveShouldThrow) {
@@ -750,16 +713,6 @@ export class TestVoiceAgent extends VoiceBase {
       const { promise, resolve } = Promise.withResolvers<void>();
       setTimeout(resolve, this.#turnDelayMs);
       await promise;
-    }
-    if (this.#markerPipeline) {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      this.#releaseModelStream = resolve;
-      const signal = context.signal;
-      return (async function* () {
-        yield "First sentence. ";
-        await promise;
-        if (!signal.aborted) yield "Second sentence.";
-      })();
     }
     if (this.#streamTurns) {
       return (async function* () {
@@ -870,20 +823,12 @@ export class TestVoiceAgent extends VoiceBase {
           );
           break;
         case "_set_tts_mode":
-          if (
-            parsed.value === "controlled" ||
-            parsed.value === "marked" ||
-            parsed.value === "sentence"
-          ) {
-            this.tts =
-              parsed.value === "marked" ? this.#markedTTS : this.#controlledTTS;
+          if (parsed.value === "controlled") {
+            this.tts = this.#controlledTTS;
             this.#streamTurns = true;
-            this.#markerPipeline =
-              parsed.value === "marked" || parsed.value === "sentence";
           } else if (parsed.value === "normal") {
             this.tts = new TestTTS();
             this.#streamTurns = false;
-            this.#markerPipeline = false;
           } else if (
             isTestTTSMode(parsed.value) &&
             this.tts instanceof TestTTS
@@ -896,7 +841,6 @@ export class TestVoiceAgent extends VoiceBase {
           break;
         case "_release_tts":
           this.#controlledTTS.release();
-          this.#markedTTS.release();
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
           );
@@ -905,31 +849,6 @@ export class TestVoiceAgent extends VoiceBase {
           if (this.tts instanceof TestTTS) this.tts.resolvePending();
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
-          );
-          break;
-        case "_release_model_stream":
-          this.#releaseModelStream?.();
-          this.#releaseModelStream = null;
-          connection.send(
-            JSON.stringify({ type: "_ack", command: parsed.type })
-          );
-          break;
-        case "_get_marker_tts_state":
-          connection.send(
-            JSON.stringify({
-              type: "_marker_tts_state",
-              synthesizeStreamTexts: this.#markedTTS.synthesizeStreamTexts,
-              synthesizeTextStreamCalls:
-                this.#markedTTS.synthesizeTextStreamCalls
-            })
-          );
-          break;
-        case "_get_playback_text":
-          connection.send(
-            JSON.stringify({
-              type: "_playback_text",
-              text: this.getPlaybackText(connection.id)
-            })
           );
           break;
         case "_get_turn_state":
@@ -984,12 +903,8 @@ export class TestVoiceAgent extends VoiceBase {
           );
           break;
         case "_set_audio_transport":
-          this.#useAudioTransport =
-            parsed.value === true || parsed.value === "marked";
-          this.#audioTransport =
-            parsed.value === "marked"
-              ? new MarkedTestAudioTransport()
-              : new TestAudioTransport();
+          this.#useAudioTransport = parsed.value === true;
+          this.#audioTransport = new TestAudioTransport();
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
           );
@@ -1539,14 +1454,6 @@ export class TestInterruptVoiceAgent extends InterruptVoiceBase {
           ) {
             this.transcriber.lastSession?.emitEnd(parsed.text);
           }
-          break;
-        case "_get_playback_text":
-          connection.send(
-            JSON.stringify({
-              type: "_playback_text",
-              text: this.getPlaybackText(connection.id)
-            })
-          );
           break;
         case "_get_turn_state":
           connection.send(

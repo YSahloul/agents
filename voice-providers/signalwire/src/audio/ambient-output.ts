@@ -3,23 +3,20 @@ import { AmbientMixer } from "./ambient-mixer.js";
 const FRAME_BYTES = 160;
 const FRAME_MS = 20;
 
-export interface AmbientPlaybackMarker {
-  type: "playback_marker";
-  playbackId: string;
-  sequence: number;
-  text: string;
+export interface AmbientPlaybackMark {
+  name: string;
 }
 
 type QueueEntry =
   | { type: "audio"; audio: Uint8Array }
-  | { type: "marker"; marker: AmbientPlaybackMarker };
+  | { type: "mark"; mark: AmbientPlaybackMark };
 
 export interface AmbientOutputOptions {
   audio: Uint8Array;
   volume?: number;
   sendAudio(audio: Uint8Array): void;
-  sendMarker(
-    marker: AmbientPlaybackMarker,
+  sendMark(
+    mark: AmbientPlaybackMark,
     metrics: { frames: number; bytes: number }
   ): void;
 }
@@ -28,7 +25,7 @@ export interface AmbientOutputOptions {
 export class AmbientOutput {
   private readonly mixer: AmbientMixer;
   private readonly sendAudio: AmbientOutputOptions["sendAudio"];
-  private readonly sendMarker: AmbientOutputOptions["sendMarker"];
+  private readonly sendMark: AmbientOutputOptions["sendMark"];
   private readonly queue: QueueEntry[] = [];
   private timer: ReturnType<typeof setInterval> | undefined;
   private frames = 0;
@@ -37,7 +34,7 @@ export class AmbientOutput {
   constructor(options: AmbientOutputOptions) {
     this.mixer = new AmbientMixer(options);
     this.sendAudio = options.sendAudio;
-    this.sendMarker = options.sendMarker;
+    this.sendMark = options.sendMark;
   }
 
   get enabled(): boolean {
@@ -74,14 +71,14 @@ export class AmbientOutput {
     }
   }
 
-  enqueueMarker(marker: AmbientPlaybackMarker): boolean {
+  enqueueMark(mark: AmbientPlaybackMark): boolean {
     if (
       this.frames === 0 &&
       !this.queue.some((entry) => entry.type === "audio")
     ) {
       return false;
     }
-    this.queue.push({ type: "marker", marker });
+    this.queue.push({ type: "mark", mark });
     return true;
   }
 
@@ -91,10 +88,10 @@ export class AmbientOutput {
   }
 
   private tick(): void {
-    while (this.queue[0]?.type === "marker") {
+    while (this.queue[0]?.type === "mark") {
       const entry = this.queue.shift();
-      if (!entry || entry.type !== "marker") break;
-      this.sendMarker(entry.marker, { frames: this.frames, bytes: this.bytes });
+      if (!entry || entry.type !== "mark") break;
+      this.sendMark(entry.mark, { frames: this.frames, bytes: this.bytes });
       this.resetMetrics();
     }
 

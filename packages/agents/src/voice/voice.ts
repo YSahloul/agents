@@ -63,7 +63,6 @@ import type {
   TranscriberSession,
   VoiceServerAudioTransport,
   VoiceCallStartContext,
-  VoicePlaybackMarkerMessage,
   VoiceCompletionOutcome,
   VoiceModelFinishReason,
   VoiceDiagnosticsOptions,
@@ -80,42 +79,6 @@ type ClientSpeechEnergy = {
   peakRms: number | null;
   threshold: number | null;
 };
-type ClientPlaybackMarkerState = {
-  markers: Map<string, string>;
-  acknowledgedMarkers: Set<string>;
-  acknowledgedText: string[];
-};
-type TTSOutputEvent =
-  | { type: "audio"; audio: ArrayBuffer }
-  | {
-      type: "playback_marker";
-      playbackId: string;
-      sequence: number;
-      text: string;
-    };
-
-type PlaybackTextTransport = VoiceServerAudioTransport & {
-  resetPlaybackText(connectionId: string): void;
-  markPlaybackText(connectionId: string, text: string): void;
-  getPlaybackText(connectionId: string): string;
-};
-
-function playbackTextTransport(
-  transport: VoiceServerAudioTransport | undefined
-): PlaybackTextTransport | null {
-  if (
-    typeof transport?.resetPlaybackText !== "function" ||
-    typeof transport.markPlaybackText !== "function" ||
-    typeof transport.getPlaybackText !== "function"
-  ) {
-    return null;
-  }
-  return transport as PlaybackTextTransport;
-}
-
-function playbackMarkerKey(playbackId: string, sequence: number): string {
-  return `${playbackId}:${sequence}`;
-}
 
 function readClientRms(
   message: object,
@@ -141,8 +104,6 @@ export type {
   VoiceRole,
   VoiceAudioFormat,
   VoiceCallStartContext,
-  VoicePlaybackMarkerMessage,
-  VoicePlaybackMarkerAckMessage,
   VoiceAudioInput,
   VoiceTransport,
   VoiceServerAudioTransport,
@@ -363,7 +324,6 @@ export interface VoiceAgentMixinMembers {
     | null
     | Promise<VoiceServerAudioTransport | null>;
   receiveAudio(connectionId: string, audio: ArrayBuffer): void;
-  getPlaybackText(connectionId: string): string | null;
   beforeCallStart(connection: Connection): boolean | Promise<boolean>;
   onCallStart(
     connection: Connection,
@@ -469,12 +429,6 @@ export function withVoice<TBase extends AgentLike>(
 
     // Current async start_call identity per connection, used to ignore stale readiness.
     #startupTokens = new Map<string, symbol>();
-    // Connections that explicitly opted into sentence playback markers.
-    #playbackMarkerConnections = new Set<string>();
-    // Carrier-acknowledged marker text for clients that support acknowledgements.
-    #clientPlaybackMarkers = new Map<string, ClientPlaybackMarkerState>();
-    // Response currently owning playback markers for each connection.
-    #playbackTurnSignals = new Map<string, AbortSignal>();
     // Persists after readiness so callbacks from replaced sessions cannot affect a newer call.
     #callTokens = new Map<string, symbol>();
     #turnSequence = 0;
@@ -489,7 +443,6 @@ export function withVoice<TBase extends AgentLike>(
       "start_of_speech",
       "end_of_speech",
       "interrupt",
-      "playback_marker_ack",
       "text_message"
     ]);
 
@@ -552,9 +505,6 @@ export function withVoice<TBase extends AgentLike>(
         this.#startupTokens.delete(connection.id);
         this.#activeAssistantText.delete(connection.id);
         this.#callStartInputSuppressed.delete(connection.id);
-        this.#playbackMarkerConnections.delete(connection.id);
-        this.#clientPlaybackMarkers.delete(connection.id);
-        this.#playbackTurnSignals.delete(connection.id);
         this.#clientSpeechEnergy.delete(connection.id);
         this.#callTokens.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
@@ -611,27 +561,6 @@ export function withVoice<TBase extends AgentLike>(
             case "hello":
               break;
             case "start_call": {
-              const playbackMarkers =
-                "playback_markers" in parsed &&
-                parsed.playback_markers === true;
-              if (playbackMarkers) {
-                this.#playbackMarkerConnections.add(connection.id);
-              } else {
-                this.#playbackMarkerConnections.delete(connection.id);
-              }
-              if (
-                playbackMarkers &&
-                "playback_marker_acks" in parsed &&
-                parsed.playback_marker_acks === true
-              ) {
-                this.#clientPlaybackMarkers.set(connection.id, {
-                  markers: new Map(),
-                  acknowledgedMarkers: new Set(),
-                  acknowledgedText: []
-                });
-              } else {
-                this.#clientPlaybackMarkers.delete(connection.id);
-              }
               const preferredFormat =
                 "preferred_format" in parsed &&
                 typeof parsed.preferred_format === "string"
@@ -644,8 +573,6 @@ export function withVoice<TBase extends AgentLike>(
               break;
             }
             case "end_call":
-              this.#playbackMarkerConnections.delete(connection.id);
-              this.#clientPlaybackMarkers.delete(connection.id);
               runBackground("end_call", () => this.#handleEndCall(connection));
               break;
             case "start_of_speech":
@@ -675,31 +602,6 @@ export function withVoice<TBase extends AgentLike>(
               runBackground("interrupt", () =>
                 this.#handleInterrupt(connection, source)
               );
-              break;
-            }
-            case "playback_marker_ack": {
-              const state = this.#clientPlaybackMarkers.get(connection.id);
-              const playbackId =
-                "playbackId" in parsed ? parsed.playbackId : undefined;
-              const sequence =
-                "sequence" in parsed ? parsed.sequence : undefined;
-              if (
-                !state ||
-                typeof playbackId !== "string" ||
-                playbackId.length === 0 ||
-                !Number.isInteger(sequence) ||
-                typeof sequence !== "number" ||
-                sequence <= 0
-              ) {
-                break;
-              }
-              const key = playbackMarkerKey(playbackId, sequence);
-              const text = state.markers.get(key);
-              if (text === undefined || state.acknowledgedMarkers.has(key)) {
-                break;
-              }
-              state.acknowledgedMarkers.add(key);
-              state.acknowledgedText.push(text);
               break;
             }
             case "text_message": {
@@ -751,38 +653,6 @@ export function withVoice<TBase extends AgentLike>(
     receiveAudio(connectionId: string, audio: ArrayBuffer): void {
       if (this.#callStartInputSuppressed.has(connectionId)) return;
       this.#cm.bufferAudio(connectionId, audio);
-    }
-    getPlaybackText(connectionId: string): string | null {
-      const transport = playbackTextTransport(
-        this.#audioTransports.get(connectionId)
-      );
-      if (transport) return transport.getPlaybackText(connectionId);
-      return (
-        this.#clientPlaybackMarkers
-          .get(connectionId)
-          ?.acknowledgedText.join(" ") ?? null
-      );
-    }
-    #hasPendingPlayback(connectionId: string): boolean {
-      const state = this.#clientPlaybackMarkers.get(connectionId);
-      if (!state) return false;
-      for (const key of state.markers.keys()) {
-        if (!state.acknowledgedMarkers.has(key)) return true;
-      }
-      return false;
-    }
-
-    #hasInterruptibleOutput(connectionId: string): boolean {
-      return (
-        this.#cm.hasActivePipeline(connectionId) ||
-        this.#hasPendingPlayback(connectionId)
-      );
-    }
-
-    #clearClientPlaybackMarkers(connectionId: string): void {
-      const state = this.#clientPlaybackMarkers.get(connectionId);
-      state?.markers.clear();
-      state?.acknowledgedMarkers.clear();
     }
 
     beforeCallStart(_connection: Connection): boolean | Promise<boolean> {
@@ -880,47 +750,6 @@ export function withVoice<TBase extends AgentLike>(
         role: row.role,
         content: row.text
       }));
-    }
-
-    #reconcileInterruptedAssistant(
-      connectionId: string,
-      signal?: AbortSignal
-    ): void {
-      const playbackSignal = this.#playbackTurnSignals.get(connectionId);
-      if (!playbackSignal || (signal && playbackSignal !== signal)) return;
-      this.#playbackTurnSignals.delete(connectionId);
-
-      const text = this.getPlaybackText(connectionId)?.trim();
-      if (text === undefined) return;
-
-      if (!opt("persistMessages", true)) {
-        const latest = this.#conversationHistory.at(-1);
-        if (latest?.role === "assistant") {
-          if (text) latest.content = text;
-          else this.#conversationHistory.pop();
-        } else if (text) {
-          this.saveMessage("assistant", text);
-        }
-        return;
-      }
-
-      this.#ensureMessageSchema();
-      const latest = this.sql<{ id: number; role: VoiceRole }>`
-        SELECT id, role FROM cf_voice_messages
-        ORDER BY id DESC LIMIT 1
-      `[0];
-      if (latest?.role === "assistant") {
-        if (text) {
-          this.sql`
-            UPDATE cf_voice_messages SET text = ${text}
-            WHERE id = ${latest.id}
-          `;
-        } else {
-          this.sql`DELETE FROM cf_voice_messages WHERE id = ${latest.id}`;
-        }
-      } else if (text) {
-        this.saveMessage("assistant", text);
-      }
     }
 
     // --- Audio transport helpers ---
@@ -1615,14 +1444,13 @@ export function withVoice<TBase extends AgentLike>(
       trigger: string
     ): Promise<void> {
       const activePipeline = this.#cm.hasActivePipeline(connection.id);
-      const pendingPlayback = this.#hasPendingPlayback(connection.id);
       console.log("[VoiceTrace]", {
         event: "interrupt_trigger",
         connectionId: connection.id,
         trigger,
         transcript: null,
         activePipeline,
-        pendingPlayback,
+        pendingPlayback: false,
         action: "interrupt"
       });
       this.#abortInputTurn(connection, "client_interrupt");
@@ -1631,7 +1459,6 @@ export function withVoice<TBase extends AgentLike>(
         "turn.interrupt_requested",
         "client_interrupt"
       );
-      this.#clearClientPlaybackMarkers(connection.id);
       this.#cm.abortPipeline(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "interrupt");
       this.#cm.clearAudioBuffer(connection.id);
@@ -1641,9 +1468,6 @@ export function withVoice<TBase extends AgentLike>(
           .get(connection.id)
           ?.interrupt(connection.id);
       } finally {
-        if (!activePipeline && pendingPlayback) {
-          this.#reconcileInterruptedAssistant(connection.id);
-        }
         await this.onInterrupt(connection);
       }
     }
@@ -1654,22 +1478,20 @@ export function withVoice<TBase extends AgentLike>(
       transcript?: string
     ): void {
       const activePipeline = this.#cm.hasActivePipeline(connection.id);
-      const pendingPlayback = this.#hasPendingPlayback(connection.id);
-      if (!this.#hasInterruptibleOutput(connection.id)) {
+      if (!activePipeline) {
         console.log("[VoiceTrace]", {
           event: "interrupt_trigger",
           connectionId: connection.id,
           trigger,
           transcript: transcript ?? null,
           activePipeline,
-          pendingPlayback,
+          pendingPlayback: false,
           action: "no_interruptible_output"
         });
         return;
       }
 
       this.#cancelSpeculativeTurn(connection.id, "speech_start");
-      this.#clearClientPlaybackMarkers(connection.id);
       this.#requestActiveTurnAbort(
         connection,
         "turn.abort_requested",
@@ -1682,7 +1504,7 @@ export function withVoice<TBase extends AgentLike>(
         trigger,
         transcript: transcript ?? null,
         activePipeline,
-        pendingPlayback,
+        pendingPlayback: false,
         action: "interrupt"
       });
       this.#sendJSON(connection, { type: "playback_interrupt" });
@@ -1693,9 +1515,6 @@ export function withVoice<TBase extends AgentLike>(
             .get(connection.id)
             ?.interrupt(connection.id);
         } finally {
-          if (!activePipeline && pendingPlayback) {
-            this.#reconcileInterruptedAssistant(connection.id);
-          }
           await this.onInterrupt(connection);
         }
       });
@@ -1998,7 +1817,6 @@ export function withVoice<TBase extends AgentLike>(
           turnOutcome = "aborted";
           active.model?.abort();
           turn.emit("turn.aborted");
-          this.#reconcileInterruptedAssistant(connection.id, signal);
         }
         turn.finish(turnOutcome);
         this.#cm.clearPipelineAbort(connection.id, signal);
@@ -2210,7 +2028,6 @@ export function withVoice<TBase extends AgentLike>(
           turnOutcome = "aborted";
           active.model?.abort();
           turn.emit("turn.aborted");
-          this.#reconcileInterruptedAssistant(connection.id, signal);
         }
         turn.finish(turnOutcome);
         this.#cm.clearPipelineAbort(connection.id, signal);
@@ -2236,39 +2053,6 @@ export function withVoice<TBase extends AgentLike>(
       firstAudioMs: number;
       finishReason?: VoiceModelFinishReason;
     }> {
-      const clientMarkers = this.#clientPlaybackMarkers.get(connection.id);
-      clientMarkers?.markers.clear();
-      clientMarkers?.acknowledgedMarkers.clear();
-      if (clientMarkers) clientMarkers.acknowledgedText.length = 0;
-      const markedTransport = playbackTextTransport(
-        this.#audioTransports.get(connection.id)
-      );
-      markedTransport?.resetPlaybackText(connection.id);
-      const tracksPlayback =
-        markedTransport !== null ||
-        this.#playbackMarkerConnections.has(connection.id);
-      if (tracksPlayback) {
-        this.#playbackTurnSignals.set(connection.id, signal);
-      } else {
-        this.#playbackTurnSignals.delete(connection.id);
-      }
-
-      if (typeof response === "string" && tracksPlayback) {
-        try {
-          return await this.#streamingTTSPipeline(
-            connection,
-            iterateTextEvents(response),
-            pipelineStart,
-            signal,
-            turn,
-            model,
-            markedTransport
-          );
-        } finally {
-          turn.finishTts();
-        }
-      }
-
       if (typeof response === "string") {
         this.#activeAssistantText.set(connection.id, {
           signal,
@@ -2342,20 +2126,6 @@ export function withVoice<TBase extends AgentLike>(
       const tts = this.#requireTTS() as TTSProvider &
         Partial<StreamingTextTTSProvider>;
       try {
-        if (
-          markedTransport ||
-          this.#playbackMarkerConnections.has(connection.id)
-        ) {
-          return await this.#streamingTTSPipeline(
-            connection,
-            iterateTextEvents(response),
-            pipelineStart,
-            signal,
-            turn,
-            model,
-            markedTransport
-          );
-        }
         if (typeof tts.synthesizeTextStream === "function") {
           return await this.#textStreamingTTSPipeline(
             connection,
@@ -2373,8 +2143,7 @@ export function withVoice<TBase extends AgentLike>(
           pipelineStart,
           signal,
           turn,
-          model,
-          markedTransport
+          model
         );
       } finally {
         turn.finishTts();
@@ -2535,8 +2304,7 @@ export function withVoice<TBase extends AgentLike>(
       pipelineStart: number,
       signal: AbortSignal,
       turn: TurnDiagnostics,
-      model: ModelDiagnosticTracker,
-      markedTransport: PlaybackTextTransport | null
+      model: ModelDiagnosticTracker
     ): Promise<{
       text: string;
       llmMs: number;
@@ -2547,17 +2315,12 @@ export function withVoice<TBase extends AgentLike>(
       finishReason?: VoiceModelFinishReason;
     }> {
       const tts = this.#requireTTS();
-      const tracksPlayback =
-        markedTransport !== null ||
-        this.#playbackMarkerConnections.has(connection.id);
       const chunker = new SentenceChunker(
-        tracksPlayback || typeof tts.synthesizeStream === "function"
+        typeof tts.synthesizeStream === "function"
           ? STREAMING_TTS_MAX_CHARS
           : Number.POSITIVE_INFINITY
       );
-      const ttsQueue: AsyncIterable<TTSOutputEvent>[] = [];
-      const playbackId = crypto.randomUUID();
-      let nextSequence = 0;
+      const ttsQueue: AsyncIterable<ArrayBuffer>[] = [];
       let fullText = "";
       let pendingTranscriptText = "";
       let transcriptStarted = false;
@@ -2623,27 +2386,8 @@ export function withVoice<TBase extends AgentLike>(
           if (signal.aborted) return;
 
           try {
-            for await (const event of ttsQueue[i]) {
+            for await (const chunk of ttsQueue[i]) {
               if (signal.aborted) return;
-              if (event.type === "playback_marker") {
-                markedTransport?.markPlaybackText(connection.id, event.text);
-                if (this.#playbackMarkerConnections.has(connection.id)) {
-                  const marker: VoicePlaybackMarkerMessage = {
-                    type: "playback_marker",
-                    playbackId: event.playbackId,
-                    sequence: event.sequence,
-                    text: event.text
-                  };
-                  const state = this.#clientPlaybackMarkers.get(connection.id);
-                  state?.markers.set(
-                    playbackMarkerKey(marker.playbackId, marker.sequence),
-                    marker.text
-                  );
-                  this.#sendJSON(connection, marker);
-                }
-                continue;
-              }
-              const chunk = event.audio;
               if (firstAudioSentAt === null) {
                 this.#sendJSON(connection, {
                   type: "status",
@@ -2685,11 +2429,10 @@ export function withVoice<TBase extends AgentLike>(
         }
       })();
       const makeSentenceTTS = (
-        sentence: string,
-        sequence: number
-      ): AsyncIterable<TTSOutputEvent> => {
+        sentence: string
+      ): AsyncIterable<ArrayBuffer> => {
         const self = this;
-        async function* generate(): AsyncGenerator<TTSOutputEvent> {
+        async function* generate(): AsyncGenerator<ArrayBuffer> {
           const attempt = turn.beginTtsSentence();
           let sentenceOutcome: "completed" | "skipped" | "failed" = "completed";
           let text: string | null = null;
@@ -2714,11 +2457,8 @@ export function withVoice<TBase extends AgentLike>(
               event: "tts_enqueued",
               connectionId: connection.id,
               elapsedMs: Date.now() - pipelineStart,
-              playbackId,
-              sequence,
               text
             });
-            let yieldedAudio = false;
             if (hasStreamingTTS) {
               for await (const chunk of tts.synthesizeStream!(text, signal)) {
                 const processed = await self.afterSynthesize(
@@ -2727,8 +2467,7 @@ export function withVoice<TBase extends AgentLike>(
                   connection
                 );
                 if (processed) {
-                  yieldedAudio = true;
-                  yield { type: "audio", audio: processed };
+                  yield processed;
                 }
               }
             } else {
@@ -2739,12 +2478,8 @@ export function withVoice<TBase extends AgentLike>(
                 connection
               );
               if (processed) {
-                yieldedAudio = true;
-                yield { type: "audio", audio: processed };
+                yield processed;
               }
-            }
-            if (yieldedAudio && !signal.aborted) {
-              yield { type: "playback_marker", playbackId, sequence, text };
             }
           } catch (error) {
             sentenceOutcome = "failed";
@@ -2753,13 +2488,12 @@ export function withVoice<TBase extends AgentLike>(
             cumulativeTtsMs += attempt.settle(sentenceOutcome);
           }
         }
-        return markedTransport ? generate() : eagerAsyncIterable(generate());
+        return eagerAsyncIterable(generate());
       };
 
       const enqueueSentence = (sentence: string) => {
         firstSentenceAt ??= Date.now();
-        const sequence = ++nextSequence;
-        ttsQueue.push(makeSentenceTTS(sentence, sequence));
+        ttsQueue.push(makeSentenceTTS(sentence));
         notifyDrain();
       };
 

@@ -47,13 +47,12 @@ type SFUResponse = {
   requiresImmediateRenegotiation?: unknown;
   [key: string]: unknown;
 };
-type TextMarker = { type: "text"; text: string };
 type FlushMarker = {
   type: "flush";
   resolve: () => void;
   reject: (error: Error) => void;
 };
-type QueueItem = Uint8Array | TextMarker | FlushMarker;
+type QueueItem = Uint8Array | FlushMarker;
 type SocketWaiter = {
   resolve: () => void;
   reject: (error: Error) => void;
@@ -94,7 +93,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
   #sttPeak = 0;
 
   #queue: QueueItem[] = [];
-  #playedTextSegments: string[] = [];
   #partialFrame = new Uint8Array();
   #partialInputByte: number | null = null;
   #pacingTimer: ReturnType<typeof setInterval> | null = null;
@@ -126,7 +124,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#sttFrameCount = 0;
     this.#sttPeak = 0;
     this.#partialInputByte = null;
-    this.#playedTextSegments = [];
     this.#startKeepalive();
     try {
       await this.#waitForTtsSocket(10_000);
@@ -180,32 +177,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#startPacing();
   }
 
-  resetPlaybackText(connectionId: string): void {
-    this.#requireActiveConnection(connectionId);
-    this.#playedTextSegments = [];
-  }
-
-  markPlaybackText(connectionId: string, text: string): void {
-    this.#requireActiveConnection(connectionId);
-    if (text.length === 0) return;
-    this.#queuePartialFrame();
-    this.#queue.push({ type: "text", text });
-    console.log("[VoiceTrace]", {
-      event: "sfu_text_mark_queued",
-      connectionId,
-      text,
-      queuedAudioMs:
-        this.#queue.filter((item) => item instanceof Uint8Array).length *
-        FRAME_INTERVAL_MS
-    });
-    this.#startPacing();
-  }
-
-  getPlaybackText(connectionId: string): string {
-    this.#requireActiveConnection(connectionId);
-    return this.#playedTextSegments.join(" ");
-  }
-
   flush(connectionId: string): Promise<void> {
     this.#requireActiveConnection(connectionId);
     this.#requireTtsSocket();
@@ -229,9 +200,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     const droppedAudioMs =
       this.#queue.filter((item) => item instanceof Uint8Array).length *
       FRAME_INTERVAL_MS;
-    const droppedTextMarks = this.#queue.filter(
-      (item) => !(item instanceof Uint8Array) && item.type === "text"
-    ).length;
     const socket = this.#ttsSocket;
     this.#clearPacing();
     this.#rejectQueue(new Error("SFU output interrupted"));
@@ -249,15 +217,13 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     console.log("[VoiceTrace]", {
       event: "sfu_interrupt",
       connectionId,
-      droppedAudioMs,
-      droppedTextMarks
+      droppedAudioMs
     });
   }
 
   async stop(connectionId: string): Promise<void> {
     this.#clearSuspendTimer();
     if (this.#connectionId !== connectionId) return;
-    this.#playedTextSegments = [];
 
     this.#connectionId = null;
     this.#onAudio = null;
@@ -314,7 +280,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
     this.#rejectQueue(new Error("SFU voice transport stopped"));
     this.#partialFrame = new Uint8Array();
     this.#partialInputByte = null;
-    this.#playedTextSegments = [];
     this.#rejectSocketWaiters(new Error("SFU voice transport stopped"));
 
     const adapterIds: string[] = [];
@@ -750,10 +715,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
       }
       if (item instanceof Uint8Array) {
         socket.send(encodePayloadToProtobuf(item));
-        this.#commitQueuedTextMarkers();
-      } else if (item.type === "text") {
-        this.#commitTextMarker(item);
-        this.#commitQueuedTextMarkers();
       } else {
         socket.send(encodePayloadToProtobuf(new Uint8Array()));
         item.resolve();
@@ -767,31 +728,6 @@ export class SFUVoiceTransport implements VoiceServerAudioTransport {
       }
       if (this.#queue.length === 0) this.#clearPacing();
     }, FRAME_INTERVAL_MS);
-  }
-
-  #commitQueuedTextMarkers(): void {
-    while (true) {
-      const item = this.#queue[0];
-      if (
-        item instanceof Uint8Array ||
-        item === undefined ||
-        item.type !== "text"
-      ) {
-        return;
-      }
-      this.#queue.shift();
-      this.#commitTextMarker(item);
-    }
-  }
-
-  #commitTextMarker(marker: TextMarker): void {
-    this.#playedTextSegments.push(marker.text);
-    console.log("[VoiceTrace]", {
-      event: "sfu_text_mark_committed",
-      connectionId: this.#connectionId,
-      text: marker.text,
-      committedText: this.#playedTextSegments.join(" ")
-    });
   }
 
   #queuePartialFrame(): void {

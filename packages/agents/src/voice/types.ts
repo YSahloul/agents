@@ -156,8 +156,6 @@ export type VoiceClientMessage =
       type: "start_call";
       preferred_format?: VoiceAudioFormat;
       resumed?: boolean;
-      playback_markers?: boolean;
-      playback_marker_acks?: boolean;
     }
   | { type: "end_call" }
   | {
@@ -171,21 +169,7 @@ export type VoiceClientMessage =
       threshold?: number;
     }
   | { type: "interrupt"; source?: "audio_level" }
-  | { type: "text_message"; text: string }
-  | VoicePlaybackMarkerAckMessage;
-
-export interface VoicePlaybackMarkerMessage {
-  type: "playback_marker";
-  playbackId: string;
-  sequence: number;
-  text: string;
-}
-
-export interface VoicePlaybackMarkerAckMessage {
-  type: "playback_marker_ack";
-  playbackId: string;
-  sequence: number;
-}
+  | { type: "text_message"; text: string };
 
 // --- Wire protocol: Server → Client ---
 
@@ -203,7 +187,6 @@ export type VoiceServerMessage =
   | { type: "transcript_delta"; text: string }
   | { type: "transcript_end"; text: string }
   | { type: "transcript_interim"; text: string }
-  | VoicePlaybackMarkerMessage
   | { type: "playback_interrupt" }
   | {
       type: "metrics";
@@ -492,9 +475,6 @@ export interface VoiceServerAudioTransport {
   flush(connectionId: string): void | Promise<void>;
   interrupt(connectionId: string): void | Promise<void>;
   stop(connectionId: string): void | Promise<void>;
-  resetPlaybackText?(connectionId: string): void;
-  markPlaybackText?(connectionId: string, text: string): void;
-  getPlaybackText?(connectionId: string): string;
   /** Suspend the transport, keeping media alive for a brief grace window. */
   suspend?(connectionId: string): void;
   /** Re-attach after suspension. */

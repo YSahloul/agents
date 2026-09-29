@@ -347,46 +347,6 @@ describe("SFUVoiceTransport", () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(interrupted).toHaveLength(1);
   });
-  it("commits paced text marks and drops pending marks on interrupt", async () => {
-    const { fetchMock } = createSfuFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
-    const trace = vi.spyOn(console, "log").mockImplementation(() => {});
-    const transport = new SFUVoiceTransport({ config: CONFIG });
-    const socket = upgrade(transport, "/voice/tts/subscribe");
-    await transport.start("call", () => {});
-    const packets: ArrayBuffer[] = [];
-    socket.addEventListener("message", (event) => {
-      packets.push(event.data as ArrayBuffer);
-    });
-    const audio = new Int16Array(480).buffer;
-
-    transport.send("call", audio);
-    transport.markPlaybackText("call", "A");
-    transport.send("call", audio);
-    transport.markPlaybackText("call", "B");
-    const flushed = transport.flush("call");
-    const firstPacket = nextSocketMessage(socket);
-
-    await vi.advanceTimersByTimeAsync(20);
-    await firstPacket;
-    expect(packets).toHaveLength(1);
-    expect(transport.getPlaybackText("call")).toBe("A");
-
-    transport.interrupt("call");
-    await expect(flushed).rejects.toThrow("SFU output interrupted");
-    expect(transport.getPlaybackText("call")).toBe("A");
-    await vi.advanceTimersByTimeAsync(100);
-    expect(
-      packets.map((packet) => extractPayloadFromProtobuf(packet)?.length)
-    ).toEqual([3840, 0]);
-    expect(trace).toHaveBeenCalledWith(
-      "[VoiceTrace]",
-      expect.objectContaining({
-        event: "sfu_interrupt",
-        droppedTextMarks: 1
-      })
-    );
-  });
 
   it("ignores stale interrupts and tolerates a closed TTS socket", async () => {
     const { fetchMock } = createSfuFetchMock();

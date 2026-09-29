@@ -18,11 +18,10 @@ import {
   mulawBase64ToPcm16,
   pcm16ToMulawBase64
 } from "./audio/utils.js";
-import { AmbientOutput } from "./audio/ambient-output.js";
-import type {
-  VoicePlaybackMarkerAckMessage,
-  VoicePlaybackMarkerMessage
-} from "agents/voice";
+import {
+  AmbientOutput,
+  type AmbientPlaybackMark
+} from "./audio/ambient-output.js";
 import type {
   SignalWireDtmfMessage,
   SignalWireMarkMessage,
@@ -88,16 +87,14 @@ export class SignalWireAdapter {
       | null = { format: "pcm16", sampleRate: 16000 };
     let outboundFrames = 0;
     let outboundBytes = 0;
-    const pendingPlaybackMarkers = new Map<
+    const pendingPlaybackMarks = new Map<
       string,
-      Pick<VoicePlaybackMarkerMessage, "playbackId" | "sequence" | "text"> & {
-        frames: number;
-        bytes: number;
-      }
+      { frames: number; bytes: number }
     >();
     let agentMessageChain: Promise<void> = Promise.resolve();
     let nextOutboundMediaAt = 0;
     let playbackGeneration = 0;
+    let nextPlaybackMark = 0;
 
     const sendCarrierAudio = (audio: Uint8Array) => {
       if (!streamSid || serverSocket.readyState !== WebSocket.OPEN) return;
@@ -110,31 +107,23 @@ export class SignalWireAdapter {
       );
     };
 
-    const sendPlaybackMarker = (
-      marker: VoicePlaybackMarkerMessage,
+    const sendPlaybackMark = (
+      mark: AmbientPlaybackMark,
       metrics: { frames: number; bytes: number }
     ) => {
       if (!streamSid || serverSocket.readyState !== WebSocket.OPEN) return;
-      const markName = `playback:${marker.playbackId}:${marker.sequence}`;
       serverSocket.send(
         JSON.stringify({
           event: "mark",
           streamSid,
-          mark: { name: markName }
+          mark: { name: mark.name }
         })
       );
-      pendingPlaybackMarkers.set(markName, {
-        playbackId: marker.playbackId,
-        sequence: marker.sequence,
-        text: marker.text,
-        ...metrics
-      });
+      pendingPlaybackMarks.set(mark.name, metrics);
       console.log("[VoiceTrace]", {
         event: "tts_sent",
         streamSid,
-        playbackId: marker.playbackId,
-        sequence: marker.sequence,
-        text: marker.text,
+        mark: mark.name,
         ...metrics
       });
     };
@@ -144,7 +133,7 @@ export class SignalWireAdapter {
           audio: options.ambientAudio,
           volume: options.ambientVolume,
           sendAudio: sendCarrierAudio,
-          sendMarker: sendPlaybackMarker
+          sendMark: sendPlaybackMark
         })
       : undefined;
     const ambientOutput = configuredAmbientOutput?.enabled
@@ -241,63 +230,27 @@ export class SignalWireAdapter {
               return;
             }
 
-            if (msg.type === "playback_marker") {
-              const sequence = msg.sequence;
-              if (
-                typeof msg.playbackId !== "string" ||
-                typeof msg.text !== "string" ||
-                typeof sequence !== "number" ||
-                !Number.isInteger(sequence) ||
-                sequence <= 0
-              ) {
-                return;
+            if (msg.type === "status") {
+              if (msg.status === "speaking") {
+                outboundFrames = 0;
+                outboundBytes = 0;
+                nextOutboundMediaAt = 0;
+                ambientOutput?.resetMetrics();
+              } else if (msg.status === "listening") {
+                const mark = {
+                  name: `playback:${++nextPlaybackMark}`
+                };
+                if (ambientOutput) {
+                  ambientOutput.enqueueMark(mark);
+                } else if (outboundFrames > 0) {
+                  sendPlaybackMark(mark, {
+                    frames: outboundFrames,
+                    bytes: outboundBytes
+                  });
+                  outboundFrames = 0;
+                  outboundBytes = 0;
+                }
               }
-              const marker: VoicePlaybackMarkerMessage = {
-                type: "playback_marker",
-                playbackId: msg.playbackId,
-                sequence,
-                text: msg.text
-              };
-              if (ambientOutput) {
-                ambientOutput.enqueueMarker(marker);
-                return;
-              }
-              if (
-                serverSocket.readyState !== WebSocket.OPEN ||
-                outboundFrames === 0
-              ) {
-                return;
-              }
-              sendPlaybackMarker(marker, {
-                frames: outboundFrames,
-                bytes: outboundBytes
-              });
-              outboundFrames = 0;
-              outboundBytes = 0;
-              return;
-            }
-
-            if (msg.type === "status" && msg.status === "speaking") {
-              outboundFrames = 0;
-              outboundBytes = 0;
-              nextOutboundMediaAt = 0;
-              ambientOutput?.resetMetrics();
-            }
-
-            if (
-              serverSocket.readyState === WebSocket.OPEN &&
-              (msg.type === "transcript" ||
-                msg.type === "transcript_end" ||
-                msg.type === "status")
-            ) {
-              const markName = JSON.stringify(msg);
-              serverSocket.send(
-                JSON.stringify({
-                  event: "mark",
-                  streamSid,
-                  mark: { name: markName }
-                })
-              );
             }
           } catch {
             // ignore non-JSON
@@ -406,7 +359,7 @@ export class SignalWireAdapter {
             if (message.type === "playback_interrupt") {
               playbackGeneration++;
               nextOutboundMediaAt = 0;
-              pendingPlaybackMarkers.clear();
+              pendingPlaybackMarks.clear();
               outboundFrames = 0;
               outboundBytes = 0;
               ambientOutput?.clear();
@@ -431,13 +384,7 @@ export class SignalWireAdapter {
         }
       });
 
-      ws.send(
-        JSON.stringify({
-          type: "start_call",
-          playback_markers: true,
-          playback_marker_acks: true
-        })
-      );
+      ws.send(JSON.stringify({ type: "start_call" }));
     };
 
     const handleCarrierMessage = async (event: MessageEvent) => {
@@ -452,7 +399,7 @@ export class SignalWireAdapter {
 
       switch (msg.event) {
         case "start": {
-          pendingPlaybackMarkers.clear();
+          pendingPlaybackMarks.clear();
           outboundFrames = 0;
           outboundBytes = 0;
           nextOutboundMediaAt = 0;
@@ -500,25 +447,14 @@ export class SignalWireAdapter {
             break;
           }
           const markName: SignalWireMarkMessage["mark"]["name"] = mark.name;
-          const playback = pendingPlaybackMarkers.get(markName);
-          if (playback) {
-            pendingPlaybackMarkers.delete(markName);
-            if (agentSocket?.readyState === WebSocket.OPEN) {
-              const acknowledgement: VoicePlaybackMarkerAckMessage = {
-                type: "playback_marker_ack",
-                playbackId: playback.playbackId,
-                sequence: playback.sequence
-              };
-              agentSocket.send(JSON.stringify(acknowledgement));
-            }
+          const metrics = pendingPlaybackMarks.get(markName);
+          if (metrics) {
+            pendingPlaybackMarks.delete(markName);
             console.log("[VoiceTrace]", {
               event: "tts_played",
               streamSid,
-              playbackId: playback.playbackId,
-              sequence: playback.sequence,
-              text: playback.text,
-              frames: playback.frames,
-              bytes: playback.bytes
+              mark: markName,
+              ...metrics
             });
           }
           break;
