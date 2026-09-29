@@ -5,6 +5,7 @@ import type {
   StreamingTextTTSProvider,
   StreamingTTSProvider,
   TTSProvider,
+  TTSStreamChunk,
   VoiceAudioFormat
 } from "./types";
 
@@ -42,9 +43,16 @@ export interface ConvertTTSProviderOptions {
   converter: AudioConverter;
 }
 
-export type ConvertedTTSProvider = TTSProvider &
-  StreamingTTSProvider &
-  Partial<StreamingTextTTSProvider>;
+export interface ConvertedTTSProvider extends TTSProvider {
+  synthesizeStream(
+    text: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer>;
+  synthesizeTextStream?(
+    text: ReadableStream<string>,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer>;
+}
 
 function normalizePcm16(
   input: Int16Array,
@@ -262,12 +270,13 @@ function hasStreamingText(
 }
 
 async function* convertAudio(
-  source: AsyncIterable<ArrayBuffer>,
+  source: AsyncIterable<TTSStreamChunk>,
   converter: AudioConverter
 ): AsyncGenerator<ArrayBuffer> {
   const stream = await converter.createStream();
   for await (const chunk of source) {
-    const converted = stream.push(new Uint8Array(chunk));
+    const audio = chunk instanceof ArrayBuffer ? chunk : chunk.audio;
+    const converted = stream.push(new Uint8Array(audio));
     if (converted) yield converted.slice().buffer;
   }
   const final = stream.finish();

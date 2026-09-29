@@ -59,6 +59,8 @@ import type {
   TTSProvider,
   StreamingTTSProvider,
   StreamingTextTTSProvider,
+  TextAlignedAudioChunk,
+  TTSStreamChunk,
   Transcriber,
   TranscriberSession,
   VoiceServerAudioTransport,
@@ -126,6 +128,8 @@ export type {
   TTSProvider,
   StreamingTTSProvider,
   StreamingTextTTSProvider,
+  TextAlignedAudioChunk,
+  TTSStreamChunk,
   Transcriber,
   TranscriberSession,
   TranscriberSessionOptions
@@ -184,6 +188,15 @@ export interface VoiceTurnContext {
   signal: AbortSignal;
 }
 
+/** Playback known to have reached the listener when speech was interrupted. */
+export interface VoiceInterruptContext {
+  /**
+   * Aligned spoken text, or undefined when the active TTS/transport cannot
+   * acknowledge playback.
+   */
+  spokenText?: string;
+}
+
 /** Configuration options for the voice mixin. Passed to `withVoice()`. */
 export interface VoiceAgentOptions {
   /** Max conversation history messages loaded for context. @default 20 */
@@ -232,6 +245,22 @@ interface SpeculativeTurn {
 interface ActiveAssistantText {
   signal: AbortSignal;
   text: string;
+}
+interface PlaybackState {
+  playbackId: string;
+  sourceText: string;
+  alignedText: string;
+  acknowledgedText: string;
+  acknowledgedSequence: number;
+  nextSequence: number;
+  finalSequence?: number;
+  checkpoints: Map<number, string>;
+}
+
+function isTextAlignedAudioChunk(
+  chunk: TTSStreamChunk
+): chunk is TextAlignedAudioChunk {
+  return !(chunk instanceof ArrayBuffer);
 }
 type SpeculativeCancelReason =
   | "turn_resumed"
@@ -330,7 +359,10 @@ export interface VoiceAgentMixinMembers {
     context: VoiceCallStartContext
   ): void | Promise<void>;
   onCallEnd(connection: Connection): void | Promise<void>;
-  onInterrupt(connection: Connection): void | Promise<void>;
+  onInterrupt(
+    connection: Connection,
+    context: VoiceInterruptContext
+  ): void | Promise<void>;
   afterTranscribe(
     transcript: string,
     connection: Connection
@@ -422,6 +454,9 @@ export function withVoice<TBase extends AgentLike>(
     #speculativeTurns = new Map<string, SpeculativeTurn>();
     // Text currently being spoken, used to reject live speakerphone echo.
     #activeAssistantText = new Map<string, ActiveAssistantText>();
+    // Alignment is retained only for transports that acknowledge playback.
+    #playbackCheckpointConnections = new Set<string>();
+    #playback = new Map<string, PlaybackState>();
     // Connections whose opening hook should not feed inbound audio to STT.
     #callStartInputSuppressed = new Set<string>();
     // Client-captured microphone energy for the current STT turn.
@@ -443,6 +478,7 @@ export function withVoice<TBase extends AgentLike>(
       "start_of_speech",
       "end_of_speech",
       "interrupt",
+      "playback_checkpoint_ack",
       "text_message"
     ]);
 
@@ -505,6 +541,8 @@ export function withVoice<TBase extends AgentLike>(
         this.#startupTokens.delete(connection.id);
         this.#activeAssistantText.delete(connection.id);
         this.#callStartInputSuppressed.delete(connection.id);
+        this.#playbackCheckpointConnections.delete(connection.id);
+        this.#playback.delete(connection.id);
         this.#clientSpeechEnergy.delete(connection.id);
         this.#callTokens.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
@@ -567,6 +605,14 @@ export function withVoice<TBase extends AgentLike>(
                   ? parsed.preferred_format
                   : undefined;
               const resumed = "resumed" in parsed && parsed.resumed === true;
+              if (
+                "playback_checkpoints" in parsed &&
+                parsed.playback_checkpoints === true
+              ) {
+                this.#playbackCheckpointConnections.add(connection.id);
+              } else {
+                this.#playbackCheckpointConnections.delete(connection.id);
+              }
               runBackground("start_call", () =>
                 this.#handleStartCall(connection, preferredFormat, resumed)
               );
@@ -602,6 +648,20 @@ export function withVoice<TBase extends AgentLike>(
               runBackground("interrupt", () =>
                 this.#handleInterrupt(connection, source)
               );
+              break;
+            }
+            case "playback_checkpoint_ack": {
+              const playbackId =
+                "playback_id" in parsed ? parsed.playback_id : undefined;
+              const sequence =
+                "sequence" in parsed ? parsed.sequence : undefined;
+              if (
+                typeof playbackId === "string" &&
+                typeof sequence === "number" &&
+                Number.isInteger(sequence)
+              ) {
+                this.#acknowledgePlayback(connection.id, playbackId, sequence);
+              }
               break;
             }
             case "text_message": {
@@ -664,7 +724,10 @@ export function withVoice<TBase extends AgentLike>(
       _context: VoiceCallStartContext
     ): void | Promise<void> {}
     onCallEnd(_connection: Connection): void | Promise<void> {}
-    onInterrupt(_connection: Connection): void | Promise<void> {}
+    onInterrupt(
+      _connection: Connection,
+      _context: VoiceInterruptContext
+    ): void | Promise<void> {}
 
     afterTranscribe(
       transcript: string,
@@ -750,6 +813,132 @@ export function withVoice<TBase extends AgentLike>(
         role: row.role,
         content: row.text
       }));
+    }
+
+    #reconcileInterruptedHistory(state: PlaybackState): string {
+      const spokenText = state.acknowledgedText.trim();
+      if (!opt("persistMessages", true)) {
+        const latest = this.#conversationHistory.at(-1);
+        if (
+          latest?.role === "assistant" &&
+          latest.content === state.sourceText
+        ) {
+          if (spokenText) {
+            latest.content = spokenText;
+          } else {
+            this.#conversationHistory.pop();
+          }
+        } else if (spokenText) {
+          this.saveMessage("assistant", spokenText);
+        }
+        return spokenText;
+      }
+
+      this.#ensureMessageSchema();
+      const latest = this.sql<{
+        id: number;
+        role: VoiceRole;
+        text: string;
+      }>`
+        SELECT id, role, text FROM cf_voice_messages
+        ORDER BY id DESC LIMIT 1
+      `[0];
+      if (latest?.role === "assistant" && latest.text === state.sourceText) {
+        if (spokenText) {
+          this.sql`
+            UPDATE cf_voice_messages SET text = ${spokenText}
+            WHERE id = ${latest.id}
+          `;
+        } else {
+          this.sql`DELETE FROM cf_voice_messages WHERE id = ${latest.id}`;
+        }
+      } else if (spokenText) {
+        this.saveMessage("assistant", spokenText);
+      }
+      return spokenText;
+    }
+
+    #acknowledgePlayback(
+      connectionId: string,
+      playbackId: string,
+      sequence: number
+    ): void {
+      const state = this.#playback.get(connectionId);
+      if (
+        !state ||
+        state.playbackId !== playbackId ||
+        sequence <= state.acknowledgedSequence
+      ) {
+        return;
+      }
+      const text = state.checkpoints.get(sequence);
+      if (text === undefined) return;
+      state.acknowledgedSequence = sequence;
+      state.acknowledgedText = text;
+      for (const checkpoint of state.checkpoints.keys()) {
+        if (checkpoint <= sequence) state.checkpoints.delete(checkpoint);
+      }
+      if (state.finalSequence === sequence) {
+        this.#playback.delete(connectionId);
+      }
+    }
+
+    #finalizePlayback(connectionId: string, sourceText: string): void {
+      const state = this.#playback.get(connectionId);
+      if (!state) return;
+      state.sourceText = sourceText;
+      state.finalSequence = state.nextSequence - 1;
+      if (state.acknowledgedSequence === state.finalSequence) {
+        this.#playback.delete(connectionId);
+      }
+    }
+
+    #consumeInterruptedPlayback(connection: Connection): VoiceInterruptContext {
+      const state = this.#playback.get(connection.id);
+      if (!state) return {};
+      this.#playback.delete(connection.id);
+      const spokenText = this.#reconcileInterruptedHistory(state);
+      if (spokenText) this.#cm.updateAgentContext(connection.id, spokenText);
+      return { spokenText };
+    }
+
+    async #sendStreamChunk(
+      connection: Connection,
+      chunk: TTSStreamChunk,
+      sourceText: string
+    ): Promise<number> {
+      const aligned = isTextAlignedAudioChunk(chunk) ? chunk : null;
+      const audio: ArrayBuffer = isTextAlignedAudioChunk(chunk)
+        ? chunk.audio
+        : chunk;
+      await this.#sendAudio(connection, audio);
+      if (!aligned || !this.#playbackCheckpointConnections.has(connection.id)) {
+        return audio.byteLength;
+      }
+
+      let state = this.#playback.get(connection.id);
+      if (!state) {
+        state = {
+          playbackId: crypto.randomUUID(),
+          sourceText,
+          alignedText: "",
+          acknowledgedText: "",
+          acknowledgedSequence: 0,
+          nextSequence: 1,
+          checkpoints: new Map()
+        };
+        this.#playback.set(connection.id, state);
+      }
+      state.sourceText = sourceText;
+      state.alignedText += aligned.text;
+      const sequence = state.nextSequence++;
+      state.checkpoints.set(sequence, state.alignedText);
+      this.#sendJSON(connection, {
+        type: "playback_checkpoint",
+        playback_id: state.playbackId,
+        sequence
+      });
+      return audio.byteLength;
     }
 
     // --- Audio transport helpers ---
@@ -982,8 +1171,9 @@ export function withVoice<TBase extends AgentLike>(
         try {
           for await (const chunk of tts.synthesizeStream(textToSpeak, signal)) {
             if (signal.aborted) return;
+            const aligned = isTextAlignedAudioChunk(chunk) ? chunk : null;
             const processed = await this.afterSynthesize(
-              chunk,
+              aligned?.audio ?? (chunk as ArrayBuffer),
               textToSpeak,
               connection
             );
@@ -997,10 +1187,16 @@ export function withVoice<TBase extends AgentLike>(
                 bytes: processed.byteLength
               });
             }
-            totalBytes += processed.byteLength;
-            await this.#sendAudio(connection, processed);
+            totalBytes += await this.#sendStreamChunk(
+              connection,
+              aligned ? { ...aligned, audio: processed } : processed,
+              textToSpeak
+            );
           }
-          if (!signal.aborted) await this.#flushAudio(connection);
+          if (!signal.aborted) {
+            this.#finalizePlayback(connection.id, textToSpeak);
+            await this.#flushAudio(connection);
+          }
           this.#diagnose(connection, "tts.completed", {
             duration_ms: Date.now() - startedAt,
             outcome: totalBytes > 0 ? "audio" : "no_audio",
@@ -1414,6 +1610,7 @@ export function withVoice<TBase extends AgentLike>(
         this.#keepAliveDispose.delete(connectionId);
       }
     }
+
     async #handleEndCall(connection: Connection): Promise<void> {
       this.#diagnose(connection, "call.ended", { reason: "requested" });
       this.#requestActiveTurnAbort(
@@ -1425,6 +1622,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#callTokens.delete(connection.id);
       this.#abortInputTurn(connection, "call_ended");
       this.#clientSpeechEnergy.delete(connection.id);
+      this.#playback.delete(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "end_call");
       this.#cm.cleanup(connection.id);
       try {
@@ -1444,13 +1642,15 @@ export function withVoice<TBase extends AgentLike>(
       trigger: string
     ): Promise<void> {
       const activePipeline = this.#cm.hasActivePipeline(connection.id);
+      const pendingPlayback = this.#playback.has(connection.id);
+      const interruptContext = this.#consumeInterruptedPlayback(connection);
       console.log("[VoiceTrace]", {
         event: "interrupt_trigger",
         connectionId: connection.id,
         trigger,
         transcript: null,
         activePipeline,
-        pendingPlayback: false,
+        pendingPlayback,
         action: "interrupt"
       });
       this.#abortInputTurn(connection, "client_interrupt");
@@ -1462,13 +1662,14 @@ export function withVoice<TBase extends AgentLike>(
       this.#cm.abortPipeline(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "interrupt");
       this.#cm.clearAudioBuffer(connection.id);
+      this.#sendJSON(connection, { type: "playback_interrupt" });
       this.#sendJSON(connection, { type: "status", status: "listening" });
       try {
         await this.#audioTransports
           .get(connection.id)
           ?.interrupt(connection.id);
       } finally {
-        await this.onInterrupt(connection);
+        await this.onInterrupt(connection, interruptContext);
       }
     }
 
@@ -1478,19 +1679,21 @@ export function withVoice<TBase extends AgentLike>(
       transcript?: string
     ): void {
       const activePipeline = this.#cm.hasActivePipeline(connection.id);
-      if (!activePipeline) {
+      const pendingPlayback = this.#playback.has(connection.id);
+      if (!activePipeline && !pendingPlayback) {
         console.log("[VoiceTrace]", {
           event: "interrupt_trigger",
           connectionId: connection.id,
           trigger,
           transcript: transcript ?? null,
           activePipeline,
-          pendingPlayback: false,
+          pendingPlayback,
           action: "no_interruptible_output"
         });
         return;
       }
 
+      const interruptContext = this.#consumeInterruptedPlayback(connection);
       this.#cancelSpeculativeTurn(connection.id, "speech_start");
       this.#requestActiveTurnAbort(
         connection,
@@ -1504,7 +1707,7 @@ export function withVoice<TBase extends AgentLike>(
         trigger,
         transcript: transcript ?? null,
         activePipeline,
-        pendingPlayback: false,
+        pendingPlayback,
         action: "interrupt"
       });
       this.#sendJSON(connection, { type: "playback_interrupt" });
@@ -1515,7 +1718,7 @@ export function withVoice<TBase extends AgentLike>(
             .get(connection.id)
             ?.interrupt(connection.id);
         } finally {
-          await this.onInterrupt(connection);
+          await this.onInterrupt(connection, interruptContext);
         }
       });
     }
@@ -2205,17 +2408,21 @@ export function withVoice<TBase extends AgentLike>(
           signal
         )) {
           if (signal.aborted) return;
+          const audio = isTextAlignedAudioChunk(chunk) ? chunk.audio : chunk;
           if (firstAudioSentAt === null) {
             this.#sendJSON(connection, { type: "status", status: "speaking" });
             firstAudioSentAt = Date.now();
             turn.emit("audio.first_sent", {
-              bytes: chunk.byteLength,
+              bytes: audio.byteLength,
               elapsed_ms: firstAudioSentAt - pipelineStart
             });
           }
-          totalAudioBytes += chunk.byteLength;
+          totalAudioBytes += await this.#sendStreamChunk(
+            connection,
+            chunk,
+            fullText
+          );
           turn.audioSent();
-          await this.#sendAudio(connection, chunk);
         }
       })();
 
@@ -2275,7 +2482,10 @@ export function withVoice<TBase extends AgentLike>(
             text: fullText
           });
         }
-        if (!signal.aborted) await this.#flushAudio(connection);
+        if (!signal.aborted) {
+          this.#finalizePlayback(connection.id, fullText);
+          await this.#flushAudio(connection);
+        }
       }
 
       const llmMs = model.elapsedMs();
@@ -2320,7 +2530,7 @@ export function withVoice<TBase extends AgentLike>(
           ? STREAMING_TTS_MAX_CHARS
           : Number.POSITIVE_INFINITY
       );
-      const ttsQueue: AsyncIterable<ArrayBuffer>[] = [];
+      const ttsQueue: AsyncIterable<TTSStreamChunk>[] = [];
       let fullText = "";
       let pendingTranscriptText = "";
       let transcriptStarted = false;
@@ -2388,6 +2598,9 @@ export function withVoice<TBase extends AgentLike>(
           try {
             for await (const chunk of ttsQueue[i]) {
               if (signal.aborted) return;
+              const audio = isTextAlignedAudioChunk(chunk)
+                ? chunk.audio
+                : chunk;
               if (firstAudioSentAt === null) {
                 this.#sendJSON(connection, {
                   type: "status",
@@ -2395,13 +2608,16 @@ export function withVoice<TBase extends AgentLike>(
                 });
                 firstAudioSentAt = Date.now();
                 turn.emit("audio.first_sent", {
-                  bytes: chunk.byteLength,
+                  bytes: audio.byteLength,
                   elapsed_ms: firstAudioSentAt - pipelineStart
                 });
               }
-              totalAudioBytes += chunk.byteLength;
+              totalAudioBytes += await this.#sendStreamChunk(
+                connection,
+                chunk,
+                fullText
+              );
               turn.audioSent();
-              await this.#sendAudio(connection, chunk);
             }
           } catch (error) {
             if (signal.aborted) return;
@@ -2430,9 +2646,9 @@ export function withVoice<TBase extends AgentLike>(
       })();
       const makeSentenceTTS = (
         sentence: string
-      ): AsyncIterable<ArrayBuffer> => {
+      ): AsyncIterable<TTSStreamChunk> => {
         const self = this;
-        async function* generate(): AsyncGenerator<ArrayBuffer> {
+        async function* generate(): AsyncGenerator<TTSStreamChunk> {
           const attempt = turn.beginTtsSentence();
           let sentenceOutcome: "completed" | "skipped" | "failed" = "completed";
           let text: string | null = null;
@@ -2461,13 +2677,14 @@ export function withVoice<TBase extends AgentLike>(
             });
             if (hasStreamingTTS) {
               for await (const chunk of tts.synthesizeStream!(text, signal)) {
+                const aligned = isTextAlignedAudioChunk(chunk) ? chunk : null;
                 const processed = await self.afterSynthesize(
-                  chunk,
+                  aligned?.audio ?? (chunk as ArrayBuffer),
                   text,
                   connection
                 );
                 if (processed) {
-                  yield processed;
+                  yield aligned ? { ...aligned, audio: processed } : processed;
                 }
               }
             } else {
@@ -2585,7 +2802,10 @@ export function withVoice<TBase extends AgentLike>(
       }
 
       await drainPromise;
-      if (!signal.aborted) await this.#flushAudio(connection);
+      if (!signal.aborted) {
+        this.#finalizePlayback(connection.id, fullText);
+        await this.#flushAudio(connection);
+      }
 
       if (firstTtsStartedAt === null) {
         turn.emit("tts.skipped", {

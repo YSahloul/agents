@@ -1,3 +1,4 @@
+import type { UIMessage } from "ai";
 import {
   ERROR_MESSENGER_RESPONSE,
   INTERRUPTED_MESSENGER_RESPONSE,
@@ -17,6 +18,7 @@ import type {
   Transcriber,
   VoiceAgentMixinMembers,
   VoiceAgentOptions,
+  VoiceInterruptContext,
   VoiceTurnContext,
   TTSProvider
 } from "agents/voice";
@@ -243,6 +245,16 @@ export function createVoiceThink<
   class VoiceThink extends VoiceBase {
     #activeVoiceStream?: VoiceChannelTextStream;
     #voiceConnections = new Set<string>();
+    #activeVoiceTurn: Promise<void> | null = null;
+    #voiceInterruption: Promise<void> = Promise.resolve();
+    #activeVoiceInput:
+      | {
+          connectionId: string;
+          transcript: string;
+          metadata?: Record<string, unknown>;
+          parentId: string | null;
+        }
+      | undefined;
 
     override async beforeCallStart(
       connection: Parameters<VoiceAgentMixinMembers["beforeCallStart"]>[0]
@@ -262,6 +274,10 @@ export function createVoiceThink<
     override async onCallEnd(
       connection: Parameters<VoiceAgentMixinMembers["onCallEnd"]>[0]
     ): Promise<void> {
+      this.#voiceInterruption = Promise.resolve();
+      if (this.#activeVoiceInput?.connectionId === connection.id) {
+        this.#activeVoiceInput = undefined;
+      }
       this.#voiceConnections.delete(connection.id);
       await super.onCallEnd(connection);
     }
@@ -270,6 +286,9 @@ export function createVoiceThink<
       connection: Parameters<VoiceAgentMixinMembers["beforeCallStart"]>[0]
     ): void {
       this.#voiceConnections.delete(connection.id);
+      if (this.#activeVoiceInput?.connectionId === connection.id) {
+        this.#activeVoiceInput = undefined;
+      }
     }
 
     getVoiceTurnMetadata(
@@ -279,10 +298,37 @@ export function createVoiceThink<
       return undefined;
     }
 
+    override async onInterrupt(
+      connection: Parameters<VoiceAgentMixinMembers["onInterrupt"]>[0],
+      context: VoiceInterruptContext
+    ): Promise<void> {
+      if (context.spokenText === undefined) {
+        await super.onInterrupt(connection, context);
+        return;
+      }
+
+      const activeVoiceTurn = this.#activeVoiceTurn;
+      const activeVoiceInput =
+        this.#activeVoiceInput?.connectionId === connection.id
+          ? this.#activeVoiceInput
+          : undefined;
+      const interruption = this.#voiceInterruption.then(async () => {
+        await activeVoiceTurn;
+        await this.#finalizeInterruptedAssistant(
+          context.spokenText ?? "",
+          activeVoiceInput
+        );
+      });
+      this.#voiceInterruption = interruption;
+      await interruption;
+      await super.onInterrupt(connection, context);
+    }
+
     async onTurn(
       transcript: string,
       context: VoiceTurnContext
     ): Promise<AsyncIterable<unknown>> {
+      await this.#voiceInterruption;
       const definition = voiceDefinition(
         this.getChannelDefinition(channel),
         channel
@@ -295,7 +341,13 @@ export function createVoiceThink<
       this.#activeVoiceStream = stream;
       const restore = this.bindActiveDeliverySurface(stream);
       const metadata = this.getVoiceTurnMetadata(transcript, context);
-      void this.runTurn({
+      this.#activeVoiceInput = {
+        connectionId: context.connection.id,
+        transcript,
+        metadata,
+        parentId: (await this.session.getLatestLeaf())?.id ?? null
+      };
+      const activeVoiceTurn = this.runTurn({
         input: transcript,
         channel,
         mode: "stream",
@@ -309,7 +361,99 @@ export function createVoiceThink<
           restore();
           this.#activeVoiceStream = previous;
         });
+      this.#activeVoiceTurn = activeVoiceTurn;
+      void activeVoiceTurn
+        .finally(() => {
+          if (this.#activeVoiceTurn === activeVoiceTurn) {
+            this.#activeVoiceTurn = null;
+          }
+        })
+        .catch(() => undefined);
       return stream;
+    }
+
+    async #finalizeInterruptedAssistant(
+      spokenText: string,
+      input:
+        | {
+            transcript: string;
+            metadata?: Record<string, unknown>;
+            parentId: string | null;
+          }
+        | undefined
+    ): Promise<void> {
+      let leaf = await this.session.getLatestLeaf();
+      const text = spokenText.trim();
+      if (!input) {
+        if (leaf?.role === "assistant") {
+          await this.#replaceInterruptedAssistant(leaf as UIMessage, text);
+        }
+        return;
+      }
+
+      if (leaf?.id !== input.parentId && leaf?.role === "assistant") {
+        await this.#replaceInterruptedAssistant(leaf as UIMessage, text);
+        return;
+      }
+
+      if ((!leaf && input.parentId === null) || leaf?.id === input.parentId) {
+        leaf = await this.appendMessageToHistory(
+          {
+            id: crypto.randomUUID(),
+            role: "user",
+            parts: [{ type: "text", text: input.transcript }],
+            metadata: {
+              channel,
+              ...(input.metadata ? { turnMetadata: input.metadata } : {})
+            }
+          },
+          input.parentId
+        );
+      }
+      if (!text || leaf?.role !== "user") return;
+      await this.appendMessageToHistory(
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          parts: [{ type: "text", text }],
+          metadata: { interrupted: true }
+        },
+        leaf.id
+      );
+    }
+
+    async #replaceInterruptedAssistant(
+      message: UIMessage,
+      text: string
+    ): Promise<void> {
+      if (!text) {
+        await this.session.deleteMessages([message.id]);
+        return;
+      }
+      let insertedText = false;
+      const parts: UIMessage["parts"] = [];
+      for (const part of message.parts) {
+        if (part.type !== "text") {
+          parts.push(part);
+        } else if (!insertedText) {
+          parts.push({ type: "text", text });
+          insertedText = true;
+        }
+      }
+      if (!insertedText) parts.push({ type: "text", text });
+      await this.updateMessageInHistory({
+        ...message,
+        role: "assistant",
+        parts,
+        metadata: {
+          ...(message.metadata &&
+          typeof message.metadata === "object" &&
+          !Array.isArray(message.metadata)
+            ? message.metadata
+            : {}),
+          interrupted: true
+        }
+      } as UIMessage);
     }
 
     protected override async resolveChannelDeliverySurface(

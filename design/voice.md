@@ -67,7 +67,7 @@ Voice-only options: `historyLimit`, `audioFormat`, `maxMessageCount`.
 
 6. **Streaming TTS** (withVoice only) — token stream → `SentenceChunker` (min 10 chars) → per-sentence TTS. Sentences synthesized eagerly via `eagerAsyncIterable` to overlap synthesis of sentence N+1 with delivery of sentence N. TTS providers receive `AbortSignal` for cancellation on interrupt. When the provider implements `synthesizeStream()`, individual chunks stream as they arrive.
 
-7. **Interruption** — client detects sustained speech above threshold during playback → stops playback → sends `interrupt` → server aborts active pipeline via `AbortController`, clears audio buffer, calls `onInterrupt()` hook. Both mixins support `onInterrupt()`.
+7. **Interruption** — client or telephony transport detects speech during playback → aborts the active pipeline and stops queued audio. Aligned TTS chunks create opaque playback checkpoints; checkpoint-aware transports acknowledge them only after playback. `onInterrupt(connection, context)` receives the acknowledged text prefix as `context.spokenText`, allowing persisted assistant history to retain only audio the caller heard. Providers or transports without alignment preserve the previous best-effort behavior with `spokenText` unset.
 
 ## Key decisions
 
@@ -211,13 +211,13 @@ Phone → Twilio → WebSocket → TwilioAdapter → WebSocket → VoiceAgent DO
 
 Both mixins support:
 
-| Hook                                | Purpose                                      |
-| ----------------------------------- | -------------------------------------------- |
-| `beforeCallStart(connection)`       | Return `false` to reject the call            |
-| `onCallStart(connection)`           | Called after call is accepted                |
-| `onCallEnd(connection)`             | Called when call ends                        |
-| `onInterrupt(connection)`           | Called when user interrupts the agent        |
-| `afterTranscribe(text, connection)` | Transform transcript after STT; `null` skips |
+| Hook                                | Purpose                                          |
+| ----------------------------------- | ------------------------------------------------ |
+| `beforeCallStart(connection)`       | Return `false` to reject the call                |
+| `onCallStart(connection)`           | Called after call is accepted                    |
+| `onCallEnd(connection)`             | Called when call ends                            |
+| `onInterrupt(connection, context)`  | Reports acknowledged speech when user interrupts |
+| `afterTranscribe(text, connection)` | Transform transcript after STT; `null` skips     |
 
 `withVoice` adds:
 

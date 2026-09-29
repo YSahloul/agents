@@ -46,7 +46,8 @@ it("streams Eleven v4 dialogue over one WebSocket", async () => {
     apiKey: "test-key",
     voiceId: "voice-1",
     modelId: "eleven_v4_turbo",
-    outputFormat: "ulaw_8000"
+    outputFormat: "ulaw_8000",
+    syncAlignment: true
   });
   const stream = provider.synthesizeTextStream?.(
     new ReadableStream<string>({
@@ -65,7 +66,8 @@ it("streams Eleven v4 dialogue over one WebSocket", async () => {
   expect(fetchMock).toHaveBeenCalledWith(
     expect.objectContaining({
       pathname: "/v1/text-to-dialogue/stream-input",
-      search: "?model_id=eleven_v4_turbo&output_format=ulaw_8000"
+      search:
+        "?model_id=eleven_v4_turbo&output_format=ulaw_8000&sync_alignment=true"
     }),
     {
       headers: {
@@ -100,12 +102,22 @@ it("streams Eleven v4 dialogue over one WebSocket", async () => {
 
   ws.dispatchEvent(
     new MessageEvent("message", {
-      data: JSON.stringify({ audio: btoa("\x01\x02\xff") })
+      data: JSON.stringify({
+        audio: btoa("\x01\x02\xff"),
+        alignment: {
+          chars: ["I", " ", "found"],
+          char_start_times_ms: [0, 40, 80],
+          char_durations_ms: [40, 40, 120]
+        }
+      })
     })
   );
   await expect(firstChunk).resolves.toEqual({
     done: false,
-    value: new Uint8Array([1, 2, 255]).buffer
+    value: {
+      audio: new Uint8Array([1, 2, 255]).buffer,
+      text: "I found"
+    }
   });
 
   const completion = stream!.next();

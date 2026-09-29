@@ -44,6 +44,21 @@ describe("Think voice adapter", () => {
     expect(await agent.getStoredMessages()).toEqual([]);
   });
 
+  it("replaces an interrupted assistant response with acknowledged speech", async () => {
+    const agent = await freshAgent(`voice-interrupted-${crypto.randomUUID()}`);
+
+    await agent.reconcileInterruptedVoiceTurnForTest("voice");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(textOf(messages[0])).toBe("interrupted question");
+    expect(textOf(messages[1])).toBe("voice");
+    expect(messages[1].metadata).toMatchObject({ interrupted: true });
+  });
+
   it("stamps connection metadata once for an inherited voice turn", async () => {
     const agent = await freshAgent(`voice-metadata-${crypto.randomUUID()}`);
     const uri = "https://example.com/voice?llm=%40cf%2Ftest";

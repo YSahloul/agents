@@ -1,6 +1,7 @@
 ---
 "agents": patch
+"@cloudflare/think": patch
 "@cloudflare/voice-signalwire": patch
 ---
 
-Add SignalWire carrier-rate pacing for buffered audio bursts, continuous inbound audio for barge-in, and restored assistant-echo and greeting safeguards.
+Add acknowledged playback checkpoints for SignalWire calls, reconcile interrupted Think responses to speech the caller heard, preserve carrier-rate pacing for buffered audio bursts, and keep continuous inbound audio for barge-in.

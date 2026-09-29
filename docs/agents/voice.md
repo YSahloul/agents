@@ -225,13 +225,14 @@ The `context` object provides:
 
 ### Lifecycle Hooks
 
-| Method                        | Description                                 |
-| ----------------------------- | ------------------------------------------- |
-| `beforeCallStart(connection)` | Return `false` to reject the call           |
-| `onCallStart(connection)`     | Called after a call is accepted             |
-| `onCallEnd(connection)`       | Called when a call ends                     |
-| `onInterrupt(connection)`     | Called when user interrupts during playback |
+| Method                             | Description                                 |
+| ---------------------------------- | ------------------------------------------- |
+| `beforeCallStart(connection)`      | Return `false` to reject the call           |
+| `onCallStart(connection)`          | Called after a call is accepted             |
+| `onCallEnd(connection)`            | Called when a call ends                     |
+| `onInterrupt(connection, context)` | Called when user interrupts during playback |
 
+`context.spokenText` contains the aligned text acknowledged as played by a checkpoint-aware transport. An empty string means no aligned text was acknowledged. It is `undefined` when the TTS provider or transport cannot report playback progress.
 If startup is rejected or fails, the server sends the client back to `idle` and calls `onCallEnd()` so cleanup logic can run.
 
 ### Pipeline Hooks
@@ -313,7 +314,7 @@ Called after each utterance is transcribed. Override this to process the transcr
 `withVoiceInput` supports the same lifecycle hooks as `withVoice`:
 
 - `beforeCallStart(connection)` — return `false` to reject
-- `onCallStart(connection)`, `onCallEnd(connection)`, `onInterrupt(connection)`
+- `onCallStart(connection)`, `onCallEnd(connection)`, `onInterrupt(connection, context)`
 - `createTranscriber(connection)` — override for runtime model switching
 - `afterTranscribe(transcript, connection)` — filter or transform transcripts
 

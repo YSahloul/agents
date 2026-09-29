@@ -242,7 +242,9 @@ describe("SignalWireAdapter.handleRequest", () => {
   it("connects to the agent on start", async () => {
     const harness = createHarness();
     await startCall(harness);
-    expect(harness.agentSocket.jsonSent).toEqual([{ type: "start_call" }]);
+    expect(harness.agentSocket.jsonSent).toEqual([
+      { type: "start_call", playback_checkpoints: true }
+    ]);
   });
 
   it("uses the SignalWire callSid as the agent instance name by default", async () => {
@@ -638,7 +640,9 @@ describe("agent playback → SignalWire marks", () => {
     });
     await tick();
 
-    expect(harness.agentSocket.jsonSent).toEqual([{ type: "start_call" }]);
+    expect(harness.agentSocket.jsonSent).toEqual([
+      { type: "start_call", playback_checkpoints: true }
+    ]);
     expect(logSpy).toHaveBeenCalledWith(
       "[VoiceTrace]",
       expect.objectContaining({
@@ -648,6 +652,49 @@ describe("agent playback → SignalWire marks", () => {
         bytes: 160
       })
     );
+  });
+
+  it("acknowledges aligned playback only after SignalWire plays its mark", async () => {
+    const harness = createHarness();
+    await startCall(harness);
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "audio_config",
+        format: "mulaw",
+        sampleRate: 8000
+      })
+    });
+    harness.agentSocket.emit("message", { data: new ArrayBuffer(160) });
+    harness.agentSocket.emit("message", {
+      data: JSON.stringify({
+        type: "playback_checkpoint",
+        playback_id: "turn-1",
+        sequence: 1
+      })
+    });
+    await tick();
+
+    const mark = harness.serverSocket.jsonSent.find(
+      (message) => message.event === "mark"
+    );
+    const markName = readMarkName(mark);
+    expect(markName).toBe("playback:1");
+    expect(harness.agentSocket.jsonSent).not.toContainEqual({
+      type: "playback_checkpoint_ack",
+      playback_id: "turn-1",
+      sequence: 1
+    });
+
+    harness.serverSocket.emit("message", {
+      data: JSON.stringify({ event: "mark", mark: { name: markName } })
+    });
+    await tick();
+
+    expect(harness.agentSocket.jsonSent).toContainEqual({
+      type: "playback_checkpoint_ack",
+      playback_id: "turn-1",
+      sequence: 1
+    });
   });
 
   it("does not translate agent transcripts into carrier marks", async () => {

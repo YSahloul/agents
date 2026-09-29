@@ -2,6 +2,7 @@ import type {
   StreamingTextTTSProvider,
   StreamingTTSProvider,
   TTSProvider,
+  TTSStreamChunk,
   Transcriber,
   TranscriberSession,
   TranscriberSessionOptions
@@ -29,6 +30,8 @@ export interface ElevenLabsTTSOptions {
   modelId?: string;
   /** Output format. @default "mp3_44100_128" */
   outputFormat?: string;
+  /** Include character alignment with Eleven v4 audio chunks. @default false */
+  syncAlignment?: boolean;
 }
 
 export interface ElevenLabsSTTOptions {
@@ -103,6 +106,7 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
   #voiceId: string;
   #modelId: string;
   #outputFormat: string;
+  #syncAlignment: boolean;
   readonly audioFormat?: "pcm16" | "mulaw" | "mp3" | "opus";
   readonly sampleRate?: number;
   readonly synthesizeTextStream?: StreamingTextTTSProvider["synthesizeTextStream"];
@@ -112,6 +116,7 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
     this.#voiceId = options.voiceId ?? DEFAULT_VOICE_ID;
     this.#modelId = options.modelId ?? DEFAULT_MODEL_ID;
     this.#outputFormat = options.outputFormat ?? DEFAULT_OUTPUT_FORMAT;
+    this.#syncAlignment = options.syncAlignment ?? false;
     if (this.#modelId.startsWith("eleven_v4")) {
       this.synthesizeTextStream = (text, signal) =>
         this.#synthesizeDialogueTextStream(text, signal);
@@ -144,8 +149,9 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
       const chunks: ArrayBuffer[] = [];
       let byteLength = 0;
       for await (const chunk of this.synthesizeStream(text, signal)) {
-        chunks.push(chunk);
-        byteLength += chunk.byteLength;
+        const audioChunk = chunk instanceof ArrayBuffer ? chunk : chunk.audio;
+        chunks.push(audioChunk);
+        byteLength += audioChunk.byteLength;
       }
       if (signal?.aborted) return null;
       if (chunks.length === 0) return null;
@@ -206,7 +212,7 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
   async *synthesizeStream(
     text: string,
     signal?: AbortSignal
-  ): AsyncGenerator<ArrayBuffer> {
+  ): AsyncGenerator<TTSStreamChunk> {
     if (this.#modelId.startsWith("eleven_v4")) {
       const source = new ReadableStream<string>({
         start(controller) {
@@ -272,12 +278,15 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
   async *#synthesizeDialogueTextStream(
     text: ReadableStream<string>,
     signal?: AbortSignal
-  ): AsyncGenerator<ArrayBuffer> {
+  ): AsyncGenerator<TTSStreamChunk> {
     if (signal?.aborted) return;
 
     const url = new URL(TEXT_TO_DIALOGUE_STREAM_URL);
     url.searchParams.set("model_id", this.#modelId);
     url.searchParams.set("output_format", this.#outputFormat);
+    if (this.#syncAlignment) {
+      url.searchParams.set("sync_alignment", "true");
+    }
     const response = await fetch(url, {
       headers: {
         Upgrade: "websocket",
@@ -297,9 +306,9 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
     }
     ws.accept();
 
-    let controller!: ReadableStreamDefaultController<ArrayBuffer>;
+    let controller!: ReadableStreamDefaultController<TTSStreamChunk>;
     let settled = false;
-    const audio = new ReadableStream<ArrayBuffer>({
+    const audio = new ReadableStream<TTSStreamChunk>({
       start(value) {
         controller = value;
       }
@@ -326,7 +335,13 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
       }
       if (!isObject(message)) return;
       if (typeof message.audio === "string") {
-        controller.enqueue(base64ToArrayBuffer(message.audio));
+        const audioChunk = base64ToArrayBuffer(message.audio);
+        const text = alignmentText(message.alignment);
+        controller.enqueue(
+          this.#syncAlignment && text !== null
+            ? { audio: audioChunk, text }
+            : audioChunk
+        );
       }
       if (message.is_final === true) {
         finish();
@@ -419,6 +434,17 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
       }
     }
   }
+}
+
+function alignmentText(value: unknown): string | null {
+  if (
+    !isObject(value) ||
+    !Array.isArray(value.chars) ||
+    !value.chars.every((character) => typeof character === "string")
+  ) {
+    return null;
+  }
+  return value.chars.join("");
 }
 
 function base64ToArrayBuffer(value: string): ArrayBuffer {

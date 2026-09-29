@@ -6,6 +6,7 @@ import type {
   TranscriberSession,
   TranscriberSessionOptions,
   TTSProvider,
+  VoiceInterruptContext,
   VoiceTurnContext
 } from "agents/voice";
 import { Think } from "../../think";
@@ -146,6 +147,24 @@ export class ThinkVoiceTestAgent extends VoiceThink {
       }
     }
     return text;
+  }
+  async reconcileInterruptedVoiceTurnForTest(
+    spokenText: string
+  ): Promise<void> {
+    const connection = {
+      id: "interrupted-voice-test",
+      uri: "https://example.com/voice"
+    } as Connection;
+    const controller = new AbortController();
+    await this.onTurn("interrupted question", {
+      connection,
+      messages: [],
+      signal: controller.signal
+    });
+    controller.abort("caller interrupted playback");
+    await this.onInterrupt(connection, {
+      spokenText
+    } satisfies VoiceInterruptContext);
   }
   async runAbortedVoiceOnTurnForTest(input: string): Promise<void> {
     const controller = new AbortController();

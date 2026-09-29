@@ -156,6 +156,8 @@ export type VoiceClientMessage =
       type: "start_call";
       preferred_format?: VoiceAudioFormat;
       resumed?: boolean;
+      /** Transport can acknowledge server playback checkpoints. */
+      playback_checkpoints?: boolean;
     }
   | { type: "end_call" }
   | {
@@ -169,6 +171,11 @@ export type VoiceClientMessage =
       threshold?: number;
     }
   | { type: "interrupt"; source?: "audio_level" }
+  | {
+      type: "playback_checkpoint_ack";
+      playback_id: string;
+      sequence: number;
+    }
   | { type: "text_message"; text: string };
 
 // --- Wire protocol: Server → Client ---
@@ -187,6 +194,11 @@ export type VoiceServerMessage =
   | { type: "transcript_delta"; text: string }
   | { type: "transcript_end"; text: string }
   | { type: "transcript_interim"; text: string }
+  | {
+      type: "playback_checkpoint";
+      playback_id: string;
+      sequence: number;
+    }
   | { type: "playback_interrupt" }
   | {
       type: "metrics";
@@ -244,6 +256,13 @@ export interface TranscriptMessage {
 }
 
 // --- Provider interfaces ---
+/** Audio plus the text ElevenLabs aligned to that audio chunk. */
+export interface TextAlignedAudioChunk {
+  audio: ArrayBuffer;
+  text: string;
+}
+
+export type TTSStreamChunk = ArrayBuffer | TextAlignedAudioChunk;
 
 export interface TTSProvider {
   /**
@@ -273,7 +292,7 @@ export interface StreamingTTSProvider {
   synthesizeStream(
     text: string,
     signal?: AbortSignal
-  ): AsyncGenerator<ArrayBuffer>;
+  ): AsyncGenerator<TTSStreamChunk>;
 }
 
 /**
@@ -286,7 +305,7 @@ export interface StreamingTextTTSProvider {
   synthesizeTextStream(
     text: ReadableStream<string>,
     signal?: AbortSignal
-  ): AsyncGenerator<ArrayBuffer>;
+  ): AsyncGenerator<TTSStreamChunk>;
 }
 
 // --- Transcriber (continuous per-call STT) ---
