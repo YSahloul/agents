@@ -2842,6 +2842,44 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     ws.close();
   });
 
+  it("passes eager confirmation to onTurn across resume and end-of-turn", async () => {
+    const name = `confirmation-${crypto.randomUUID()}`;
+    const { ws } = await connectWS(`/agents/test-voice-agent/${name}`);
+    await waitForStatus(ws, "idle");
+    await startCall(ws);
+    const stub = env.TestVoiceAgent.get(
+      env.TestVoiceAgent.idFromName(name)
+    ) as DurableObjectStub<TestVoiceAgent>;
+
+    sendJSON(ws, { type: "_emit_eager", text: "discard this" });
+    await waitUntilTurnState(ws, (state) => state.transcripts.length === 1);
+    expect(
+      await runInDurableObject(stub, (agent) =>
+        agent.getTurnConfirmationsForTest()
+      )
+    ).toEqual(["pending"]);
+
+    sendJSON(ws, { type: "_emit_turn_resumed" });
+    await waitUntilTurnState(ws, (state) => state.abortCount === 1);
+    expect(
+      await runInDurableObject(stub, (agent) =>
+        agent.getTurnConfirmationsForTest()
+      )
+    ).toEqual([false]);
+
+    sendJSON(ws, { type: "_emit_eager", text: "keep this" });
+    await waitUntilTurnState(ws, (state) => state.transcripts.length === 2);
+    const done = waitForType(ws, "transcript_end");
+    sendJSON(ws, { type: "_emit_end", text: "keep this" });
+    await done;
+    expect(
+      await runInDurableObject(stub, (agent) =>
+        agent.getTurnConfirmationsForTest()
+      )
+    ).toEqual([false, true]);
+    ws.close();
+  });
+
   it("silently cancels an eager turn when speech resumes", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");

@@ -20,6 +20,15 @@ function textOf(message: UIMessage | undefined): string {
     .join("");
 }
 
+type EagerResult = {
+  pending: UIMessage[];
+  stored: UIMessage[];
+  modelCalls: number;
+  pendingToolExecutions: number;
+  toolExecutions: number;
+  text: string;
+};
+
 describe("Think voice adapter", () => {
   it("routes a voice channel turn through Think Session", async () => {
     const agent = await freshAgent(`voice-${crypto.randomUUID()}`);
@@ -37,12 +46,80 @@ describe("Think voice adapter", () => {
     );
     expect(await agent.getVoiceSqlTables()).toEqual([]);
   });
-  it("rolls back a rejected eager voice transcript", async () => {
+  it("starts inference but never commits a rejected eager turn", async () => {
     const agent = await freshAgent(`voice-eager-abort-${crypto.randomUUID()}`);
-    await agent.runAbortedVoiceOnTurnForTest("discarded eager transcript");
-
-    expect(await agent.getStoredMessages()).toEqual([]);
+    await agent.runVoiceTurnForTest("previous confirmed turn");
+    const before = (await agent.getStoredMessages()) as UIMessage[];
+    const result = JSON.parse(
+      await agent.runEagerVoiceTurnForTest(
+        "discarded eager transcript",
+        false,
+        true
+      )
+    ) as EagerResult;
+    expect(result.modelCalls).toBeGreaterThan(0);
+    expect(result.pending).toEqual(before);
+    expect(result.stored).toEqual(before);
+    expect(result.pendingToolExecutions).toBe(0);
+    expect(result.toolExecutions).toBe(0);
+    expect(result.text).toBe("");
   });
+
+  it("commits a confirmed eager turn once and executes its tool", async () => {
+    const agent = await freshAgent(
+      `voice-eager-confirm-${crypto.randomUUID()}`
+    );
+    const result = JSON.parse(
+      await agent.runEagerVoiceTurnForTest(
+        "confirmed eager transcript",
+        true,
+        true
+      )
+    ) as EagerResult;
+    expect(result.pending).toEqual([]);
+    expect(result.pendingToolExecutions).toBe(0);
+    expect(result.stored.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(textOf(result.stored[0])).toBe("confirmed eager transcript");
+    expect(result.toolExecutions).toBe(1);
+    expect(result.text).toBe("voice answer");
+  });
+  it.each([
+    { mode: "ordinary", eager: false, spokenText: "" },
+    { mode: "confirmed eager", eager: true, spokenText: "" },
+    { mode: "partially spoken", eager: false, spokenText: "voice" }
+  ])(
+    "keeps a $mode tool result after speech interrupts its voice output",
+    async ({ eager, spokenText }) => {
+      const agent = await freshAgent(`voice-tool-${crypto.randomUUID()}`);
+      const result = JSON.parse(
+        await agent.runInterruptedToolVoiceTurnForTest(eager, spokenText)
+      ) as {
+        stored: UIMessage[];
+        toolExecutions: number;
+        outputDiscarded: boolean;
+      };
+
+      expect(result.toolExecutions).toBe(1);
+      expect(result.outputDiscarded).toBe(true);
+      expect(result.stored.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      expect(result.stored[1].parts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "tool-record",
+            state: "output-available",
+            output: "recorded"
+          })
+        ])
+      );
+      expect(textOf(result.stored[1])).toBe(spokenText);
+    }
+  );
 
   it("replaces an interrupted assistant response with acknowledged speech", async () => {
     const agent = await freshAgent(`voice-interrupted-${crypto.randomUUID()}`);

@@ -15,7 +15,7 @@ Caller
   → retained RetailAgent instances and retail MCP tools
 ```
 
-`MyThinkAgent` is the only active Durable Object binding. `createVoiceThink()` composes the Voice protocol with Think, so the same object receives Voice frames and Think chat frames, persists the conversation in Think Session, and propagates the Voice abort signal directly into `runTurn()`. Voice history remains transient; `cf_voice_messages` is not created.
+`MyThinkAgent` is the only active Durable Object binding. `createVoiceThink()` composes the Voice protocol with Think, so the same object receives Voice frames and Think chat frames and persists the conversation in Think Session. Voice history remains transient; `cf_voice_messages` is not created. Barge-in stops playback without cancelling detached retail work.
 
 The `voiceChannel()` definition supplies the Flux transcriber, SignalWire PCM TTS provider, and live-speech instructions. `deliverNotice({ channel: "voice" })` speaks an in-turn notice without ending the model turn and speaks an out-of-turn notice to live calls.
 
@@ -35,7 +35,7 @@ pnpm run deploy
 Point the SignalWire number's **WHEN A CALL COMES IN** webhook at:
 
 ```text
-https://<worker>.workers.dev/answer
+https://signalwire-think-voice-agent.yousef-18b.workers.dev/answer
 ```
 
 Dial the number. SignalWire fetches `/answer`, opens the `/signalwire` media stream, and the agent greets the caller.

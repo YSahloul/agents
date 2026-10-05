@@ -104,7 +104,8 @@ class VoiceChannelTextStream implements AsyncIterable<unknown> {
 
   constructor(
     callback: TextStreamCallback,
-    policy: VoiceChannelDefinition["delivery"]
+    policy: VoiceChannelDefinition["delivery"],
+    readonly connectionId: string
   ) {
     this.#callback = callback;
     this.#policy = policy;
@@ -147,6 +148,15 @@ class VoiceChannelTextStream implements AsyncIterable<unknown> {
     return new Promise<IteratorResult<unknown>>((resolve) => {
       this.#waiters.push(resolve);
     });
+  }
+
+  discard(): void {
+    this.#callback.close();
+    this.#chunks.length = 0;
+    this.#closed = true;
+    for (const waiter of this.#waiters.splice(0)) {
+      waiter({ value: undefined, done: true });
+    }
   }
 
   async #pump(): Promise<void> {
@@ -274,6 +284,9 @@ export function createVoiceThink<
     override async onCallEnd(
       connection: Parameters<VoiceAgentMixinMembers["onCallEnd"]>[0]
     ): Promise<void> {
+      if (this.#activeVoiceStream?.connectionId === connection.id) {
+        this.#activeVoiceStream.discard();
+      }
       this.#voiceInterruption = Promise.resolve();
       if (this.#activeVoiceInput?.connectionId === connection.id) {
         this.#activeVoiceInput = undefined;
@@ -285,6 +298,9 @@ export function createVoiceThink<
     onClose(
       connection: Parameters<VoiceAgentMixinMembers["beforeCallStart"]>[0]
     ): void {
+      if (this.#activeVoiceStream?.connectionId === connection.id) {
+        this.#activeVoiceStream.discard();
+      }
       this.#voiceConnections.delete(connection.id);
       if (this.#activeVoiceInput?.connectionId === connection.id) {
         this.#activeVoiceInput = undefined;
@@ -302,6 +318,9 @@ export function createVoiceThink<
       connection: Parameters<VoiceAgentMixinMembers["onInterrupt"]>[0],
       context: VoiceInterruptContext
     ): Promise<void> {
+      if (this.#activeVoiceStream?.connectionId === connection.id) {
+        this.#activeVoiceStream.discard();
+      }
       if (context.spokenText === undefined) {
         await super.onInterrupt(connection, context);
         return;
@@ -336,25 +355,40 @@ export function createVoiceThink<
       const callback = new TextStreamCallback({
         visibleSoftLimit: definition.delivery?.visibleSoftLimit
       });
-      const stream = new VoiceChannelTextStream(callback, definition.delivery);
+      const stream = new VoiceChannelTextStream(
+        callback,
+        definition.delivery,
+        context.connection.id
+      );
       const previous = this.#activeVoiceStream;
       this.#activeVoiceStream = stream;
       const restore = this.bindActiveDeliverySurface(stream);
       const metadata = this.getVoiceTurnMetadata(transcript, context);
-      this.#activeVoiceInput = {
+      const input = {
         connectionId: context.connection.id,
         transcript,
         metadata,
         parentId: (await this.session.getLatestLeaf())?.id ?? null
       };
+      this.#activeVoiceInput = undefined;
+      if (context.confirmation) {
+        void context.confirmation.then((confirmed) => {
+          if (confirmed && this.#activeVoiceStream === stream) {
+            this.#activeVoiceInput = input;
+          }
+        });
+      } else {
+        this.#activeVoiceInput = input;
+      }
+      // The voice signal stops playback, not confirmed Think tools. A rejected
+      // eager draft is canceled by its confirmation resolving false.
       const activeVoiceTurn = this.runTurn({
         input: transcript,
         channel,
         mode: "stream",
         callback,
-        signal: context.signal,
         metadata,
-        rollbackMessagesOnAbort: true
+        confirmation: context.confirmation
       })
         .catch((error: unknown) => callback.fail(error))
         .finally(() => {
@@ -426,7 +460,13 @@ export function createVoiceThink<
       message: UIMessage,
       text: string
     ): Promise<void> {
-      if (!text) {
+      if (
+        !text &&
+        !message.parts.some(
+          (part) =>
+            part.type.startsWith("tool-") || part.type === "dynamic-tool"
+        )
+      ) {
         await this.session.deleteMessages([message.id]);
         return;
       }
@@ -435,12 +475,12 @@ export function createVoiceThink<
       for (const part of message.parts) {
         if (part.type !== "text") {
           parts.push(part);
-        } else if (!insertedText) {
+        } else if (!insertedText && text) {
           parts.push({ type: "text", text });
           insertedText = true;
         }
       }
-      if (!insertedText) parts.push({ type: "text", text });
+      if (!insertedText && text) parts.push({ type: "text", text });
       await this.updateMessageInHistory({
         ...message,
         role: "assistant",

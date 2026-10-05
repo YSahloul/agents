@@ -5,7 +5,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/index.ts",
   "vars": {
-    "RETAIL_MCP_SERVER_URL": "https://wpros-mcp.agenticflows.workers.dev/retail/mcp"
+    "RETAIL_MCP_SERVER_URL": "https://wpros-mcp.yousef-18b.workers.dev/retail/mcp"
   },
   "ai": {
     "binding": "AI",

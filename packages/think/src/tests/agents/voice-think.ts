@@ -1,4 +1,5 @@
-import type { LanguageModel, UIMessage } from "ai";
+import { tool, type LanguageModel, type ToolSet, type UIMessage } from "ai";
+import { z } from "zod";
 import { createVoiceThink, voiceChannel } from "../../voice";
 import type { Connection } from "agents";
 import type {
@@ -45,7 +46,12 @@ class TestTranscriber implements Transcriber {
   }
 }
 
-function modelResponse(response: string): LanguageModel {
+function modelResponse(
+  response: string,
+  onCall: () => void = () => {},
+  callTool = false
+): LanguageModel {
+  let calls = 0;
   return {
     specificationVersion: "v3",
     provider: "think-voice-test",
@@ -55,19 +61,33 @@ function modelResponse(response: string): LanguageModel {
       throw new Error("doGenerate is not used by this fixture");
     },
     doStream() {
+      onCall();
+      const useTool = callTool && calls++ === 0;
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
-          controller.enqueue({ type: "text-start", id: "voice-text" });
-          controller.enqueue({
-            type: "text-delta",
-            id: "voice-text",
-            delta: response
-          });
-          controller.enqueue({ type: "text-end", id: "voice-text" });
+          if (useTool) {
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "voice-tool",
+              toolName: "record",
+              input: "{}"
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "voice-text" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "voice-text",
+              delta: response
+            });
+            controller.enqueue({ type: "text-end", id: "voice-text" });
+          }
           controller.enqueue({
             type: "finish",
-            finishReason: { unified: "stop", raw: undefined },
+            finishReason: {
+              unified: useTool ? "tool-calls" : "stop",
+              raw: undefined
+            },
             usage: {
               inputTokens: {
                 total: 1,
@@ -86,11 +106,32 @@ function modelResponse(response: string): LanguageModel {
   } as LanguageModel;
 }
 
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+};
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 const VoiceThink = createVoiceThink({ channel: "voice" });
 
 export class ThinkVoiceTestAgent extends VoiceThink {
   private _voiceMetadataCalls = 0;
   private _response = "voice answer";
+  private _toolMode = false;
+  private _toolExecutions = 0;
+  private _modelCalls = 0;
+  private _modelStarted = deferred<void>();
+  private _heldTool?: {
+    started: Deferred<void>;
+    release: Deferred<void>;
+  };
   readonly #transcriber = new TestTranscriber();
   readonly #tts = new TestTTS();
 
@@ -105,7 +146,30 @@ export class ThinkVoiceTestAgent extends VoiceThink {
   }
 
   override getModel(): LanguageModel {
-    return modelResponse(this._response);
+    return modelResponse(
+      this._response,
+      () => {
+        this._modelCalls++;
+        this._modelStarted.resolve();
+      },
+      this._toolMode
+    );
+  }
+
+  override getTools(): ToolSet {
+    if (!this._toolMode) return {};
+    return {
+      record: tool({
+        inputSchema: z.object({}),
+        execute: async () => {
+          const gate = this._heldTool;
+          gate?.started.resolve();
+          await gate?.release.promise;
+          this._toolExecutions++;
+          return "recorded";
+        }
+      })
+    };
   }
 
   async setVoiceResponseForTest(response: string): Promise<void> {
@@ -166,18 +230,101 @@ export class ThinkVoiceTestAgent extends VoiceThink {
       spokenText
     } satisfies VoiceInterruptContext);
   }
-  async runAbortedVoiceOnTurnForTest(input: string): Promise<void> {
+  async runEagerVoiceTurnForTest(
+    input: string,
+    confirmed: boolean,
+    withTool = false
+  ): Promise<string> {
+    this._toolMode = withTool;
+    const modelCallsBefore = this._modelCalls;
+    this._modelStarted = deferred<void>();
     const controller = new AbortController();
-    controller.abort("eager transcript rejected");
-    await this.onTurn(input, {
+    const outcome = deferred<boolean>();
+    const stream = await this.onTurn(input, {
       connection: {
-        id: "aborted-voice-test",
+        id: "eager-voice-test",
         uri: "https://example.com/voice"
       } as Connection,
       messages: [],
-      signal: controller.signal
+      signal: controller.signal,
+      confirmation: outcome.promise
     });
-    await scheduler.wait(25);
+    await this._modelStarted.promise;
+    const pending = await this.session.getHistory();
+    const pendingToolExecutions = this._toolExecutions;
+    outcome.resolve(confirmed);
+    if (!confirmed) controller.abort("eager transcript rejected");
+    let text = "";
+    if (
+      typeof stream !== "object" ||
+      stream === null ||
+      !(Symbol.asyncIterator in stream)
+    ) {
+      throw new TypeError("Expected an async Voice Think stream");
+    }
+    for await (const chunk of stream) {
+      if (
+        typeof chunk === "object" &&
+        chunk !== null &&
+        "type" in chunk &&
+        chunk.type === "text-delta" &&
+        "delta" in chunk &&
+        typeof chunk.delta === "string"
+      ) {
+        text += chunk.delta;
+      }
+    }
+    return JSON.stringify({
+      pending,
+      stored: await this.session.getHistory(),
+      modelCalls: this._modelCalls - modelCallsBefore,
+      pendingToolExecutions,
+      toolExecutions: this._toolExecutions,
+      text
+    });
+  }
+
+  async runInterruptedToolVoiceTurnForTest(
+    eager: boolean,
+    spokenText = ""
+  ): Promise<string> {
+    this._toolMode = true;
+    const gate = {
+      started: deferred<void>(),
+      release: deferred<void>()
+    };
+    this._heldTool = gate;
+    const connection = {
+      id: "tool-interruption-test",
+      uri: "https://example.com/voice"
+    } as Connection;
+    const controller = new AbortController();
+    const confirmation = eager ? deferred<boolean>() : undefined;
+    const output = await this.onTurn("use the slow tool", {
+      connection,
+      messages: [],
+      signal: controller.signal,
+      ...(confirmation && { confirmation: confirmation.promise })
+    });
+    confirmation?.resolve(true);
+    await gate.started.promise;
+    controller.abort("caller spoke over the running tool");
+    const interrupted = this.onInterrupt(connection, { spokenText });
+    gate.release.resolve();
+    await interrupted;
+    if (
+      typeof output !== "object" ||
+      output === null ||
+      !(Symbol.asyncIterator in output)
+    ) {
+      throw new TypeError("Expected an async Voice Think stream");
+    }
+    const next = await output[Symbol.asyncIterator]().next();
+    return JSON.stringify({
+      stored: await this.session.getHistory(),
+      toolExecutions: this._toolExecutions,
+      outputDiscarded: next.done
+    });
   }
 
   async getVoiceMetadataCallsForTest(): Promise<number> {

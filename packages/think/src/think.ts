@@ -1651,10 +1651,10 @@ export interface StreamableResult {
 export interface ChatOptions {
   signal?: AbortSignal;
   /**
-   * Remove this turn's user and assistant messages when its signal aborts.
-   * Voice eager-end-of-turn uses this so rejected hypotheses stay provisional.
+   * Start inference with transient input, but defer persistence, delivery, and
+   * tool execution until this resolves true. False discards the entire turn.
    */
-  rollbackMessagesOnAbort?: boolean;
+  confirmation?: Promise<boolean>;
   /**
    * Client-defined tool schemas to expose to the model for this turn, mirroring
    * the `clientTools` carried over the WebSocket chat protocol. Use this when a
@@ -1739,7 +1739,7 @@ export interface RunTurnStream extends RunTurnBase {
   onClientToolCall?: ClientToolExecutor;
   signal?: AbortSignal;
   metadata?: Record<string, unknown>;
-  rollbackMessagesOnAbort?: boolean;
+  confirmation?: Promise<boolean>;
 }
 
 export type RunTurnOptions = RunTurnWait | RunTurnSubmit | RunTurnStream;
@@ -2005,6 +2005,8 @@ const admittedTurnContext = new AsyncLocalStorage<{
   channel?: string | undefined;
   continuation?: boolean | undefined;
   generation?: number | undefined;
+  provisionalMessages?: UIMessage[];
+  confirmation?: Promise<boolean>;
 }>();
 
 // A messenger turn waits in the turn queue before it runs, and a concurrent
@@ -7154,7 +7156,12 @@ export class Think<
     tools: ToolSet
   ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
     const history = await this._turnHistory();
-    const providerSafeHistory = history.map(
+    const turn = admittedTurnContext.getStore();
+    const modelHistory =
+      turn?.agent === this && turn.provisionalMessages
+        ? [...history, ...turn.provisionalMessages]
+        : history;
+    const providerSafeHistory = modelHistory.map(
       toProviderSafeExecutionOutcomeMessage
     );
     const keepRecent = truncationKeepRecent(
@@ -8841,6 +8848,12 @@ export class Think<
   ): Promise<
     { execute: true; finalInput: unknown } | { execute: false; output: unknown }
   > {
+    const turn = admittedTurnContext.getStore();
+    if (turn?.agent === this && turn.confirmation) {
+      if (!(await turn.confirmation) || options.abortSignal?.aborted) {
+        throw new Error("Provisional turn cancelled");
+      }
+    }
     // Build the discriminated `TypedToolCall`-shaped context.
     const toolCallBase = {
       type: "tool-call" as const,
@@ -9288,6 +9301,80 @@ export class Think<
             options?.channel,
             options?.metadata
           );
+          const turn = admittedTurnContext.getStore();
+          const confirmation = options?.confirmation;
+          if (confirmation && turn) {
+            turn.provisionalMessages = turnMessages;
+            turn.confirmation = confirmation;
+          }
+
+          // Pull the model stream before committing or exposing its input.
+          // Tool execution waits at _resolveToolCallDecision.
+          const provisional = confirmation
+            ? agentContext
+                .run(
+                  {
+                    agent: this,
+                    connection: undefined,
+                    request: undefined,
+                    email: undefined
+                  },
+                  () =>
+                    this._runInferenceLoop({
+                      signal: abortSignal,
+                      clientTools,
+                      clientToolExecutor,
+                      continuation: false
+                    })
+                )
+                .then((result) => {
+                  if (abortSignal?.aborted) return result;
+                  const iterator = result
+                    .toUIMessageStream({ onError: streamErrorToString })
+                    [Symbol.asyncIterator]();
+                  const first = iterator.next();
+                  void first.catch(() => undefined);
+                  const buffered: StreamableResult = {
+                    output: result.output,
+                    toUIMessageStream: () => ({
+                      async *[Symbol.asyncIterator]() {
+                        const chunk = await first;
+                        if (!chunk.done) yield chunk.value;
+                        for (;;) {
+                          const next = await iterator.next();
+                          if (next.done) return;
+                          yield next.value;
+                        }
+                      }
+                    })
+                  };
+                  const finalizer = inferenceStreamFinalizers.get(result);
+                  if (finalizer)
+                    inferenceStreamFinalizers.set(buffered, finalizer);
+                  return buffered;
+                })
+            : undefined;
+          void provisional?.catch(() => undefined);
+
+          if (confirmation) {
+            const confirmed = await confirmation;
+            if (!confirmed || abortSignal?.aborted) {
+              this.abortRequest(requestId);
+              void provisional?.then(
+                (result) => this._drainInferenceStream(result),
+                () => undefined
+              );
+              await callback.onDone();
+              return;
+            }
+            // Preparation must finish before committing, or its async history
+            // assembly could see both the transient and persisted input.
+            await provisional?.then(
+              () => undefined,
+              () => undefined
+            );
+            if (turn) turn.provisionalMessages = undefined;
+          }
           for (const msg of turnMessages) {
             await this._appendMessageToHistory(msg);
           }
@@ -9304,21 +9391,24 @@ export class Think<
             for (let attempt = 0; ; attempt++) {
               let result: StreamableResult;
               try {
-                result = await agentContext.run(
-                  {
-                    agent: this,
-                    connection: undefined,
-                    request: undefined,
-                    email: undefined
-                  },
-                  () =>
-                    this._runInferenceLoop({
-                      signal: abortSignal,
-                      clientTools,
-                      clientToolExecutor,
-                      continuation: false
-                    })
-                );
+                result =
+                  provisional && attempt === 0
+                    ? await provisional
+                    : await agentContext.run(
+                        {
+                          agent: this,
+                          connection: undefined,
+                          request: undefined,
+                          email: undefined
+                        },
+                        () =>
+                          this._runInferenceLoop({
+                            signal: abortSignal,
+                            clientTools,
+                            clientToolExecutor,
+                            continuation: false
+                          })
+                      );
               } catch (error) {
                 const wrapped = this.onChatError(error, {
                   stage: "turn",
@@ -9373,19 +9463,6 @@ export class Think<
           };
 
           await this._runChatRecoveryFiber(requestId, false, chatBody);
-          if (options?.rollbackMessagesOnAbort && abortSignal?.aborted) {
-            const history = await this.session.getHistory();
-            const firstTurnMessage = history.findIndex((message) =>
-              turnMessages.some((turnMessage) => turnMessage.id === message.id)
-            );
-            if (firstTurnMessage !== -1) {
-              await this.session.deleteMessages(
-                history.slice(firstTurnMessage).map((message) => message.id)
-              );
-              await this._syncMessages();
-              this._broadcastMessages();
-            }
-          }
         }
       });
     } finally {
@@ -9672,7 +9749,7 @@ export class Think<
       onClientToolCall: options.onClientToolCall,
       channel: options.channel,
       metadata: options.metadata,
-      rollbackMessagesOnAbort: options.rollbackMessagesOnAbort
+      confirmation: options.confirmation
     });
   }
 

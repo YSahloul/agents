@@ -186,6 +186,8 @@ export interface VoiceTurnContext {
   /** Completed conversation history before the current transcript. */
   messages: Array<{ role: VoiceRole; content: string }>;
   signal: AbortSignal;
+  /** Resolves true at end-of-turn or false if this speculative turn is rejected. */
+  confirmation?: Promise<boolean>;
 }
 
 /** Playback known to have reached the listener when speech was interrupted. */
@@ -2082,7 +2084,8 @@ export function withVoice<TBase extends AgentLike>(
         const context: VoiceTurnContext = {
           connection,
           messages: priorMessages,
-          signal
+          signal,
+          ...(speculative && { confirmation: speculative.outcome })
         };
 
         const model = turn.startModel();

@@ -177,7 +177,7 @@ Custom transcriber sessions can implement `waitUntilReady(): Promise<void>` when
 
 ### `onTurn(transcript, context)`
 
-**Required.** Called when the user finishes speaking and the transcript is ready. `context.messages` contains completed conversation history before this transcript. Append `transcript` exactly once when constructing an LLM message list.
+**Required.** Called when the transcript is ready; a transcriber with eager end-of-turn support may call it before the user finishes speaking. `context.messages` contains completed conversation history before this transcript. Append `transcript` exactly once when constructing an LLM message list.
 
 Return a `string`, `AsyncIterable<string>`, or `ReadableStream` for streaming responses:
 
@@ -217,11 +217,14 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
 
 The `context` object provides:
 
-| Field        | Type                                       | Description                             |
-| ------------ | ------------------------------------------ | --------------------------------------- |
-| `connection` | `Connection`                               | The WebSocket connection                |
-| `messages`   | `Array<{ role: string; content: string }>` | Completed history before the transcript |
-| `signal`     | `AbortSignal`                              | Aborted on interrupt or disconnect      |
+| Field          | Type                                       | Description                                                                                 |
+| -------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| `connection`   | `Connection`                               | The WebSocket connection                                                                    |
+| `messages`     | `Array<{ role: string; content: string }>` | Completed history before the transcript                                                     |
+| `signal`       | `AbortSignal`                              | Aborted on interrupt or disconnect                                                          |
+| `confirmation` | `Promise<boolean> \| undefined`            | Present only for an eager turn; `true` confirms end-of-turn, `false` rejects the hypothesis |
+
+For eager turns, model inference may start immediately, but do not persist the transcript, publish the reply, or execute tools until `await context.confirmation` resolves `true`. An interrupted or resumed hypothesis resolves `false`; discard its draft. `context.signal` also aborts on interruption. Normal turns have no `confirmation` promise. The `@cloudflare/think/voice` adapter handles this gate automatically; custom `onTurn` implementations must gate their own side effects.
 
 ### Lifecycle Hooks
 

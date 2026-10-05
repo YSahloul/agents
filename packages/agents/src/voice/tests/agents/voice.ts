@@ -653,6 +653,7 @@ export class TestVoiceAgent extends VoiceBase {
   #turnMode: TestTurnMode = "normal";
   #turnTranscripts: string[] = [];
   #turnAbortCount = 0;
+  #turnConfirmations: Array<boolean | "pending" | "normal"> = [];
   #currentTurnSignal: AbortSignal | null = null;
   #controlledTTS = new ControlledTestStreamingTTS(
     () => this.#currentTurnSignal
@@ -718,6 +719,13 @@ export class TestVoiceAgent extends VoiceBase {
     context: VoiceTurnContext
   ): Promise<TextSource> {
     this.#turnTranscripts.push(transcript);
+    const turnIndex =
+      this.#turnConfirmations.push(
+        context.confirmation ? "pending" : "normal"
+      ) - 1;
+    void context.confirmation?.then((confirmed) => {
+      this.#turnConfirmations[turnIndex] = confirmed;
+    });
     this.#currentTurnSignal = context.signal;
     if (context.signal.aborted) {
       this.#turnAbortCount++;
@@ -1075,6 +1083,10 @@ export class TestVoiceAgent extends VoiceBase {
       transcripts: [...this.#turnTranscripts],
       abortCount: this.#turnAbortCount
     };
+  }
+
+  getTurnConfirmationsForTest(): Array<boolean | "pending" | "normal"> {
+    return [...this.#turnConfirmations];
   }
 
   async exerciseAbruptTransportCloseForTest(): Promise<string[]> {

@@ -75,6 +75,15 @@ Session is the durable source of truth and `cf_voice_messages` is not created.
 The channel id is stamped onto Think's user message and shared by Voice turns
 and `runTurn({ channel: "voice" })`.
 
+For transcribers that emit an eager end-of-turn, Think starts the model on a
+transient transcript. The turn is not persisted or delivered, and tools cannot
+execute, until the transcriber confirms end-of-turn. A resumed or interrupted
+hypothesis is discarded without removing any previously stored messages.
+After confirmation, barge-in stops voice output without canceling Think's
+running tools. Their results remain in Session; when the transport acknowledges
+playback, the assistant text is replaced with the portion actually spoken while
+retaining completed tool parts.
+
 ### SFU WebRTC voice
 
 For browser WebRTC audio through Cloudflare Realtime SFU, use
