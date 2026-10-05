@@ -10,6 +10,16 @@ export default defineConfig({
       wrangler: { configPath: path.join(testsDir, "wrangler.jsonc") }
     })
   ],
+  resolve: {
+    // Resolve every pi package from this example, so the harness and the
+    // tests share one copy of pi's module state.
+    dedupe: [
+      "@earendil-works/chord",
+      "@earendil-works/pi-ai",
+      "@earendil-works/pi-durable",
+      "@earendil-works/pi-telemetry"
+    ]
+  },
   test: {
     name: "next-pi-harness",
     include: [path.join(testsDir, "**/*.test.ts")],

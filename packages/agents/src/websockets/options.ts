@@ -29,11 +29,15 @@ export type WebSocketHandlers = {
     connection: Connection,
     ctx: ConnectionContext
   ): void | Promise<void>;
-  /** Handle a message from a hibernating WebSocket connection. */
+  /**
+   * Handle a message from a hibernating WebSocket connection. For handlers
+   * added with `WebSockets.use`, returning true claims the message, so
+   * later handlers do not see it.
+   */
   onMessage?(
     connection: Connection,
     message: WebSocketMessage
-  ): void | Promise<void>;
+  ): void | boolean | Promise<void | boolean>;
   /** Handle a closing hibernating WebSocket connection. */
   onClose?(
     connection: Connection,
@@ -81,7 +85,8 @@ export interface WebSocketsOptions {
    *   connect or via `broadcastState()`, but can still send and receive
    *   ordinary messages and use callables. For binary-only clients.
    * - `false`: the host drives the connect sequence itself with
-   *   `sendIdentity()` and `sendState()`, and applies client state frames
+   *   `sendConnectFrames()` (or `sendIdentity()` and `sendState()`
+   *   separately), and applies client state frames
    *   with `applyStateFrame()` — `Agent` does this, since it must decide
    *   whether a connection belongs to a facet before any frame is sent.
    */

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   UIMessage,
   GenerateTextOnFinishCallback,
@@ -8,8 +9,10 @@ import type {
 import {
   Agent,
   isDurableObjectMemoryLimitReset,
+  isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope,
+  type AgentToolEventDelivery,
   type AgentToolLifecycleResult,
   type AgentToolMilestone,
   type AgentToolProgress,
@@ -28,7 +31,6 @@ import { MessageType, type OutgoingMessage } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import {
   reconcileMessages,
-  resolveToolMergeId,
   reconcileOrphanPartial,
   repairInterruptedToolParts,
   persistReconstructedOrphan,
@@ -39,6 +41,8 @@ import {
 } from "agents/chat";
 import {
   applyChunkToParts,
+  applyLateToolInput,
+  lateToolInputForwardChunks,
   AgentToolProgressEmitter,
   aiSdkRecoveryCodec,
   ResumeHandshake,
@@ -55,7 +59,8 @@ import {
   type MessagePart,
   type StreamChunkData,
   type SubmitConcurrencyDecision,
-  type ChatFiberSnapshot
+  type ChatFiberSnapshot,
+  type ChatTurnOutcome
 } from "agents/chat";
 import { ResumableStream, createChatStreams } from "agents/chat";
 import type { Streams } from "agents/streams";
@@ -78,6 +83,7 @@ import {
   awaitWithDeadline,
   drainInteractionApplies,
   interceptAgentToolBroadcast,
+  isPositionlessAgentToolChunk,
   type ClientToolSchema
 } from "agents/chat";
 import {
@@ -94,9 +100,14 @@ import {
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
+  originMessageIds,
+  withOriginMessageIds,
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
+  chatRecoveryBackoffSeconds,
+  isDurableObjectResetError,
+  partialHasSettledToolResults,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
   type ResolvedRecoveryStream,
@@ -181,6 +192,7 @@ function withAgentSpan<T>(
 type ChatRecoveryRetryData = {
   targetUserId?: string;
   originalRequestId?: string;
+  originMessageIds?: string[];
   incidentId?: string;
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
@@ -189,6 +201,7 @@ type ChatRecoveryRetryData = {
 type ChatRecoveryContinueData = {
   targetAssistantId?: string;
   originalRequestId?: string;
+  originMessageIds?: string[];
   incidentId?: string;
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
@@ -241,6 +254,7 @@ type AIChatRecoveryClassification = { shouldRetryPreStream: boolean };
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
   error?: string;
+  finishReason?: string;
 };
 
 export type ChatMessage = UIMessage;
@@ -257,6 +271,28 @@ const PROVIDER_TOOL_OPAQUE_STRING_KEY_PREFIX = "encrypted";
  * limit are truncated with a marker so persisted messages stay small.
  */
 const PROVIDER_TOOL_MAX_STRING_LENGTH = 500;
+
+/**
+ * Whether a response-reader error is a platform transient that bounded chat
+ * recovery can retry. A deploy or storage reset is excluded: the isolate is
+ * going away, and the restart's own recovery owns the turn.
+ */
+function isRecoverableStreamReadError(error: unknown): boolean {
+  return isPlatformTransientError(error) && !isDurableObjectResetError(error);
+}
+
+/** A live stream interruption (stall or transient error) to route to recovery. */
+type StreamInterruptionRoute = {
+  requestId: string;
+  streamId: string;
+  partialParts: MessagePart[];
+  targetAssistantId?: string;
+  continuation: boolean;
+  /** Delay the recovery with exponential backoff (transient errors). */
+  backoff?: boolean;
+  /** Skip persisting the partial (`onChatRecovery` returned `persist: false`). */
+  discardPartial: () => Promise<void>;
+};
 
 /**
  * Validates that a parsed message has the minimum required structure.
@@ -384,9 +420,22 @@ const LEGACY_LIFT_WINDOW_BYTES = 4 * 1024 * 1024;
 export class AIChatAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = object
 > extends Agent<Env, State, Props> {
   private _activeChatRecoveryRootRequestId: string | undefined;
+  /**
+   * The originating user message ids of the active recovery chain (#2280),
+   * carried in the recovery payload because the successor turn runs under a
+   * fresh request id. Scoped to the recovery callback's async context, so a
+   * concurrent client request never inherits them.
+   */
+  private _chatRecoveryOriginIdsScope = new AsyncLocalStorage<
+    string[] | undefined
+  >();
+
+  private get _activeChatRecoveryOriginIds(): string[] | undefined {
+    return this._chatRecoveryOriginIdsScope.getStore();
+  }
 
   /**
    * Registry of per-request AbortControllers.
@@ -564,6 +613,8 @@ export class AIChatAgent<
   private _agentToolLastErrors = new Map<string, string>();
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
+  /** Runs started with `eventDelivery: "terminal"`: their chunks are not broadcast. */
+  private _agentToolTerminalOnlyRuns = new Set<string>();
   /**
    * Request id → run id for in-flight agent-tool turns (null = resolved as
    * not an agent-tool turn, cached so unrelated turns don't re-query SQLite
@@ -788,6 +839,17 @@ export class AIChatAgent<
     );
   }
 
+  /**
+   * Start time and latest `stash()` data of each chat turn running in this
+   * isolate, keyed by request id. A live stream failure is recovered while the
+   * turn is still running, so `onChatRecovery` reads these instead of a fiber
+   * snapshot.
+   */
+  private readonly _liveChatRecoveryTurns = new Map<
+    string,
+    { createdAt: number; recoveryData: unknown }
+  >();
+
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
@@ -800,11 +862,35 @@ export class AIChatAgent<
       continuation,
       messages: this.messages,
       lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools
+      lastClientTools: this._lastClientTools,
+      originMessageIds: this._originMessageIdsFor(requestId)
     });
-    const wrap = (data: unknown) =>
-      wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
+    const liveTurn = { createdAt: Date.now(), recoveryData: null as unknown };
+    const wrap = (data: unknown) => {
+      liveTurn.recoveryData = data;
+      return wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
+    };
+    this._liveChatRecoveryTurns.set(requestId, liveTurn);
+    try {
+      return await this._runWrappedChatRecoveryFiber(
+        requestId,
+        continuation,
+        wrap,
+        fn
+      );
+    } finally {
+      if (this._liveChatRecoveryTurns.get(requestId) === liveTurn) {
+        this._liveChatRecoveryTurns.delete(requestId);
+      }
+    }
+  }
 
+  private async _runWrappedChatRecoveryFiber<T>(
+    requestId: string,
+    continuation: boolean,
+    wrap: (data: unknown) => Record<string, unknown>,
+    fn: () => Promise<T>
+  ): Promise<T> {
     // Facet-hosted turns stay on the legacy fiber engine: the Tasks
     // capability does not accept runs on routed sub-agents yet, and facet
     // recovery routes through the root's facet-run index.
@@ -867,17 +953,43 @@ export class AIChatAgent<
     // allocation-free — only build the snoop hooks while a run is in flight.
     if (
       this._agentToolForwarders.size > 0 ||
-      this._agentToolLiveSequences.size > 0
+      this._agentToolLiveSequences.size > 0 ||
+      this._agentToolTerminalOnlyRuns.size > 0
     ) {
-      interceptAgentToolBroadcast(msg, {
+      const chunkRunId = interceptAgentToolBroadcast(msg, {
         forwarders: this._agentToolForwarders,
         liveSequences: this._agentToolLiveSequences,
         lastErrors: this._agentToolLastErrors,
+        onError: (runId, body) => this._recordAgentToolStreamError(runId, body),
         responseType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-        runForRequest: (requestId) => this._agentToolRunForRequest(requestId)
+        runForRequest: (requestId) => this._agentToolRunForRequest(requestId),
+        terminalOnlyRuns: this._agentToolTerminalOnlyRuns
       });
+      if (
+        chunkRunId !== null &&
+        this._agentToolTerminalOnlyRuns.has(chunkRunId)
+      ) {
+        return;
+      }
     }
     super.broadcast(msg, without);
+  }
+
+  /**
+   * Durably record a run's stream error on its still-open row, so a stale-row
+   * reconcile after an eviction (before the finalizer seals `error`) still
+   * sees the failure. Leaves `status` to the finalizer / reconcile.
+   */
+  private _recordAgentToolStreamError(runId: string, body: string): void {
+    try {
+      this.sql`
+        update cf_ai_chat_agent_tool_runs
+        set error_message = ${body}
+        where run_id = ${runId} and status = 'running'
+      `;
+    } catch {
+      // Best-effort: broadcast must never throw; the in-memory capture remains.
+    }
   }
 
   /**
@@ -894,12 +1006,15 @@ export class AIChatAgent<
     // `starting` phase), but we match on both for parity with
     // `@cloudflare/think` and to stay correct if a `starting` phase is ever
     // added. Terminal rows set `status` AND `completed_at` together.
-    const rows = this.sql<{ run_id: string }>`
-      select run_id from cf_ai_chat_agent_tool_runs
+    const rows = this.sql<{ run_id: string; event_delivery: string | null }>`
+      select run_id, event_delivery from cf_ai_chat_agent_tool_runs
       where request_id = ${requestId} and status in ('starting', 'running')
       limit 1
     `;
     const runId = rows?.[0]?.run_id ?? null;
+    if (runId && rows?.[0]?.event_delivery === "terminal") {
+      this._agentToolTerminalOnlyRuns.add(runId);
+    }
     this._agentToolRunsByRequestId.set(requestId, runId);
     return runId;
   }
@@ -934,19 +1049,22 @@ export class AIChatAgent<
    */
   private _rebindAgentToolChildRunRequestId(requestId: string): void {
     let runId: string | undefined;
+    let terminalOnly = false;
     try {
-      const rows = this.sql<{ run_id: string }>`
-        select run_id from cf_ai_chat_agent_tool_runs
+      const rows = this.sql<{ run_id: string; event_delivery: string | null }>`
+        select run_id, event_delivery from cf_ai_chat_agent_tool_runs
         where status in ('starting', 'running')
         order by started_at desc
         limit 1
       `;
       runId = rows?.[0]?.run_id;
+      terminalOnly = rows?.[0]?.event_delivery === "terminal";
     } catch {
       // No child-run table on this facet (it never ran as a child).
       return;
     }
     if (!runId) return;
+    if (terminalOnly) this._agentToolTerminalOnlyRuns.add(runId);
     this._agentToolRunsByRequestId.set(requestId, runId);
     this.sql`
       update cf_ai_chat_agent_tool_runs
@@ -1164,12 +1282,17 @@ export class AIChatAgent<
           const requestBody =
             Object.keys(customBody).length > 0 ? customBody : undefined;
           const epoch = this._turnQueue.generation;
+          const requestOriginIds = originMessageIds(messages);
+          if (requestOriginIds) {
+            this._requestOriginMessageIds.set(chatMessageId, requestOriginIds);
+          }
           const concurrencyDecision =
             this._getSubmitConcurrencyDecision(requestTrigger);
 
           if (concurrencyDecision.action === "drop") {
             this._rollbackDroppedSubmit(connection);
             this._completeSkippedRequest(connection, chatMessageId);
+            this._requestOriginMessageIds.delete(chatMessageId);
             return;
           }
 
@@ -1369,7 +1492,10 @@ export class AIChatAgent<
                               "cloudflare.agents.turn.admission": "queue",
                               "cloudflare.agents.turn.generation": epoch
                             },
-                            () => this._repairInterruptedToolsBeforeTurn()
+                            () =>
+                              this._repairInterruptedToolsBeforeTurn({
+                                continuation: false
+                              })
                           );
                           const response = await this.onChatMessage(
                             async (_finishResult) => {
@@ -1411,15 +1537,13 @@ export class AIChatAgent<
                             console.warn(
                               `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
                             );
-                            this._broadcastChatMessage(
-                              {
-                                body: "No response was generated by the agent.",
-                                done: true,
-                                id: chatMessageId,
-                                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                              },
-                              [connection.id]
-                            );
+                            this._broadcastChatMessage({
+                              body: "No response was generated by the agent.",
+                              done: true,
+                              id: chatMessageId,
+                              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                              outcome: "completed"
+                            });
                           }
                         } finally {
                           this._abortRegistry.remove(chatMessageId);
@@ -1453,6 +1577,7 @@ export class AIChatAgent<
             // covers a throw in a pre-turn-body step before chatTurnBody's
             // finally could run.
             this._settlePreStreamTurn(chatMessageId);
+            this._requestOriginMessageIds.delete(chatMessageId);
           }
           return;
         }
@@ -1492,6 +1617,7 @@ export class AIChatAgent<
         // Handle request cancellation
         if (event.type === "cancel") {
           this._abortRegistry.cancel(event.id);
+          await this._cancelScheduledRecovery(event.id);
           this._emit("message:cancel", { requestId: event.id });
           return;
         }
@@ -1663,6 +1789,9 @@ export class AIChatAgent<
     addColumnIfNotExists(
       "alter table cf_ai_chat_agent_tool_runs add column last_signal_at integer"
     );
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column event_delivery text"
+    );
     this.sql`create index if not exists idx_ai_chat_agent_tool_request_id
       on cf_ai_chat_agent_tool_runs(request_id)`;
     // Durable milestones (rfc-detached-agent-tools §progress, 4b). One row per
@@ -1770,7 +1899,9 @@ export class AIChatAgent<
       persistOrphanedStream: (streamId) =>
         this._persistOrphanedStream(streamId),
       isConnectionPresent: (connectionId) =>
-        this._isConnectionPresent(connectionId)
+        this._isConnectionPresent(connectionId),
+      holdsTerminalFrames: (requestId) =>
+        this._heldTerminalFrames.has(requestId)
     }));
   }
 
@@ -1804,7 +1935,13 @@ export class AIChatAgent<
     requestId: string,
     options: { messageId?: string; continuation?: boolean } = {}
   ): string {
-    const streamId = this._resumableStream.start(requestId, options);
+    const originIds =
+      this._requestOriginMessageIds.get(requestId) ??
+      this._activeChatRecoveryOriginIds;
+    const streamId = this._resumableStream.start(requestId, {
+      ...options,
+      ...(originIds && { originMessageIds: originIds })
+    });
     // Flush connections parked during this turn's pre-stream window (#1784)
     // into the normal STREAM_RESUMING path now that a stream exists. Safe for
     // every turn — the awaiting set is empty unless a client reconnected before
@@ -1824,9 +1961,9 @@ export class AIChatAgent<
   }
 
   /** @internal Delegate to _resumableStream */
-  protected _completeStream(streamId: string) {
+  protected _completeStream(streamId: string, outcome?: ChatTurnOutcome) {
     const completedRequestId = this._resumableStream.activeRequestId;
-    this._resumableStream.complete(streamId);
+    this._resumableStream.complete(streamId, outcome);
     this._afterStreamFinished(completedRequestId);
   }
 
@@ -1835,9 +1972,9 @@ export class AIChatAgent<
    * persists the message (`persistMessages` via `#pendingCutover`). `_reply`'s
    * finally settles it if no persist follows.
    */
-  protected _finishStream(streamId: string) {
+  protected _finishStream(streamId: string, outcome?: ChatTurnOutcome) {
     const finishedRequestId = this._resumableStream.activeRequestId;
-    this._resumableStream.finish(streamId);
+    this._resumableStream.finish(streamId, outcome);
     this._afterStreamFinished(finishedRequestId);
   }
 
@@ -1872,8 +2009,11 @@ export class AIChatAgent<
    * as forward progress the moment it lands, as it did under the old
    * per-chunk counter. Streaming deltas keep the buffer's own packing.
    */
-  protected async _storeStreamChunk(streamId: string, body: string) {
-    this._resumableStream.storeChunk(streamId, body);
+  protected async _storeStreamChunk(
+    streamId: string,
+    body: string
+  ): Promise<number | undefined> {
+    const seq = this._resumableStream.storeChunk(streamId, body);
     let type: string | undefined;
     try {
       type = (JSON.parse(body) as { type?: string }).type;
@@ -1887,6 +2027,7 @@ export class AIChatAgent<
     ) {
       this._resumableStream.flushBuffer();
     }
+    return seq;
   }
 
   /** @internal Delegate to _resumableStream */
@@ -2052,7 +2193,10 @@ export class AIChatAgent<
     return {
       ...part,
       state: "output-error",
-      errorText: "The tool call was interrupted before a result was recorded."
+      errorText:
+        (part as { state?: string }).state === "approval-responded"
+          ? "The tool call was approved but did not run before the next turn started."
+          : "The tool call was interrupted before a result was recorded."
     } as UIMessage["parts"][number];
   }
 
@@ -2089,12 +2233,20 @@ export class AIChatAgent<
    * write, one broadcast), which also refreshes `this.messages`.
    * @internal
    */
-  private async _repairInterruptedToolsBeforeTurn(): Promise<void> {
+  private async _repairInterruptedToolsBeforeTurn(options: {
+    continuation: boolean;
+  }): Promise<void> {
     const clientResolvable = this._clientResolvableToolNames();
     const repaired = repairInterruptedToolParts(this.messages, {
       repairPart: (part) => this.repairInterruptedToolPart(part),
       shouldRepair: (part) =>
-        !this._partAwaitsClientInteraction(part, clientResolvable)
+        !this._partAwaitsClientInteraction(part, clientResolvable),
+      // An approval a continuation will still execute must survive; one the
+      // conversation moved past without running would 400 at the provider.
+      repairApprovalResponded:
+        !options.continuation &&
+        !this._continuation.pending &&
+        !this._continuation.deferred
     });
     if (repaired.removedToolCalls === 0 && repaired.normalizedInputs === 0) {
       return;
@@ -2153,7 +2305,43 @@ export class AIChatAgent<
     }
   }
 
+  /**
+   * User message ids a WebSocket chat request originated from (#2280), keyed
+   * by request id while the request is handled. After that (or after a
+   * restart) the request's stream metadata is the fallback.
+   */
+  private _requestOriginMessageIds = new Map<string, string[]>();
+
+  private _originMessageIdsFor(requestId: string): string[] | undefined {
+    return (
+      this._requestOriginMessageIds.get(requestId) ??
+      this._resumableStream.getOriginMessageIds(requestId) ??
+      this._activeChatRecoveryOriginIds
+    );
+  }
+
+  private _withOriginMessageIds(message: OutgoingMessage): OutgoingMessage {
+    if (
+      message.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
+      !(message.done || message.error)
+    ) {
+      return message;
+    }
+    return withOriginMessageIds(message, this._originMessageIdsFor(message.id));
+  }
+
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
+    message = this._withOriginMessageIds(message);
+    if (
+      message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+      (message.done || message.error)
+    ) {
+      const held = this._heldTerminalFrames.get(message.id);
+      if (held) {
+        held.push({ message, exclude });
+        return;
+      }
+    }
     // Combine explicit exclusions with connections pending stream resume.
     // Pending connections should not receive live stream chunks until they ACK,
     // at which point they'll receive the full replay via _sendStreamChunks.
@@ -2162,6 +2350,45 @@ export class AIChatAgent<
       ...this._pendingResumeConnections
     ];
     this.broadcast(JSON.stringify(message), allExclusions);
+  }
+
+  /**
+   * `useAgentChat` flips to ready on the terminal `done` frame, and a message
+   * the user sends after that is replaced by any transcript broadcast that
+   * arrives later. So while `_reply` owns a request, its terminal frames (the
+   * `done` frame, and an in-band `error` frame, which clients also treat as
+   * terminal) are held here in order and sent only after the assistant message
+   * is persisted and broadcast.
+   */
+  private _heldTerminalFrames = new Map<
+    string,
+    Array<{ message: OutgoingMessage; exclude?: string[] }>
+  >();
+
+  private _releaseTerminalFrames(id: string, errorText?: string): void {
+    const held = this._heldTerminalFrames.get(id);
+    this._heldTerminalFrames.delete(id);
+    if (!held) return;
+    const failed =
+      errorText !== undefined &&
+      !held.some(
+        ({ message }) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.error
+      );
+    for (const { message, exclude } of held) {
+      this._broadcastChatMessage(
+        failed && message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
+          ? {
+              ...message,
+              body: errorText,
+              error: true,
+              ...(message.done && { outcome: "error" as const })
+            }
+          : message,
+        exclude
+      );
+    }
   }
 
   /**
@@ -2181,12 +2408,13 @@ export class AIChatAgent<
     continuation: boolean
   ) {
     const body = JSON.stringify(event);
-    await this._storeStreamChunk(streamId, body);
+    const seq = await this._storeStreamChunk(streamId, body);
     this._broadcastChatMessage({
       body,
       done: false,
       id: event.id,
       type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      ...(seq !== undefined && { seq }),
       ...(continuation && { continuation: true })
     });
   }
@@ -2335,37 +2563,12 @@ export class AIChatAgent<
    * cache.
    */
   #subscribeToSessionChanges(): void {
-    this.sessions.subscribe(async (event) => {
-      if (event.sessionId !== this.#session.sessionId) return;
-      switch (event.type) {
-        case "append": {
-          if (!event.inserted) return;
-          const message = this.#messageForCache(event.message);
-          const index = this.messages.findIndex((m) => m.id === message.id);
-          if (index === -1) this.messages.push(message);
-          else this.messages[index] = message;
-          return;
-        }
-        case "update": {
-          const index = this.messages.findIndex(
-            (m) => m.id === event.message.id
-          );
-          if (index === -1) return;
-          this.messages[index] = this.#messageForCache(event.message);
-          return;
-        }
-        case "delete": {
-          const removed = new Set(event.messageIds);
-          this.messages = this.messages.filter((m) => !removed.has(m.id));
-          return;
-        }
-        case "clear": {
-          this.messages = [];
-          return;
-        }
-        default:
-          return;
-      }
+    this.#session.mirror<UIMessage>({
+      get: () => this.messages,
+      set: (messages) => {
+        this.messages = messages;
+      },
+      transform: (message) => this.#messageForCache(message)
     });
   }
 
@@ -2656,12 +2859,16 @@ export class AIChatAgent<
   }
 
   private _completeSkippedRequest(connection: Connection, requestId: string) {
-    this._sendDirectMessage(connection, {
-      body: "",
-      done: true,
-      id: requestId,
-      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-    });
+    this._sendDirectMessage(
+      connection,
+      this._withOriginMessageIds({
+        body: "",
+        done: true,
+        id: requestId,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        outcome: "skipped"
+      })
+    );
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
@@ -2874,6 +3081,22 @@ export class AIChatAgent<
    */
   protected abortRequest(requestId: string, reason?: unknown): void {
     this._abortRegistry.cancel(requestId, reason);
+  }
+
+  /**
+   * A cancel can land while the turn's recovery is waiting out its backoff,
+   * with nothing in flight to abort: cancel the scheduled recovery instead,
+   * so the queued callback bails when it fires.
+   */
+  private async _cancelScheduledRecovery(requestId: string): Promise<void> {
+    try {
+      await this._chatRecoveryEngine().cancelScheduledRecovery(requestId);
+    } catch (error) {
+      console.error(
+        "[AIChatAgent] failed to cancel a scheduled chat recovery",
+        error
+      );
+    }
   }
 
   /**
@@ -3122,8 +3345,26 @@ export class AIChatAgent<
    * continuation would never fire. A slow batch is re-checked here and simply
    * keeps holding (event-driven) until its remaining siblings answer.
    */
-  private _onStreamingTurnFinalized(): void {
+  private _onStreamingTurnFinalized(finishReason?: string): void {
     this._streamingTurnActive = false;
+
+    // A tool result or approval can leave an auto-continuation pending while the
+    // original AI SDK stream is still active. If that stream then finishes with
+    // a normal assistant response, the continuation is stale: firing it would
+    // replay a transcript ending in assistant text. Modern Anthropic models
+    // reject that request as an unsupported assistant prefill (#1618, #2171).
+    // A sibling tool call still awaiting its result keeps the continuation:
+    // the stream's text did not answer it, and the continuation is the only
+    // record of the batch's opt-in.
+    if (
+      finishReason === "stop" &&
+      this._continuation.pending &&
+      !this._hasIncompleteToolBatch()
+    ) {
+      this._clearPendingAutoContinuation(true);
+      return;
+    }
+
     this._autoContinuation.rearmForBatch();
   }
 
@@ -3195,8 +3436,11 @@ export class AIChatAgent<
               },
               async () => {
                 const autoContinuationBody = async () => {
+                  let replying = false;
                   try {
-                    await this._repairInterruptedToolsBeforeTurn();
+                    await this._repairInterruptedToolsBeforeTurn({
+                      continuation: true
+                    });
                     const response = await this.onChatMessage(
                       async (_finishResult) => {},
                       {
@@ -3215,7 +3459,10 @@ export class AIChatAgent<
                         [],
                         {
                           continuation: true,
-                          chatMessageId: requestId
+                          chatMessageId: requestId,
+                          onStreamStart: () => {
+                            replying = true;
+                          }
                         }
                       );
                       if (replyResult.status === "error") {
@@ -3227,6 +3474,15 @@ export class AIChatAgent<
                       this._clearPendingAutoContinuation(true);
                       this._activateDeferredAutoContinuation();
                     }
+                  } catch (error) {
+                    if (
+                      !replying &&
+                      !abortSignal?.aborted &&
+                      !isDurableObjectResetError(error)
+                    ) {
+                      await this._reportContinuationFailure(requestId, error);
+                    }
+                    throw error;
                   } finally {
                     this._abortRegistry.remove(requestId);
                   }
@@ -3255,6 +3511,42 @@ export class AIChatAgent<
       this._clearAllAutoContinuationState(true);
       console.error(errorPrefix, error);
     });
+  }
+
+  /**
+   * Report an auto-continuation that failed before it produced a response,
+   * the way a stream error is reported: an error frame, a durable terminal
+   * record, and `onChatResponse` with `status: "error"` for the assistant
+   * message the continuation would have extended. Called inside the turn so
+   * the response hook drains when the turn settles.
+   */
+  private async _reportContinuationFailure(
+    requestId: string,
+    error: unknown
+  ): Promise<void> {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    this._broadcastChatMessage({
+      body: errorMessage,
+      done: true,
+      error: true,
+      id: requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      continuation: true
+    });
+    const message = [...this.messages]
+      .reverse()
+      .find((candidate) => candidate.role === "assistant");
+    if (message) {
+      this._pendingChatResponseResults.push({
+        message,
+        requestId,
+        continuation: true,
+        status: "error",
+        error: errorMessage
+      });
+    } else {
+      await this._recordChatTerminal(requestId, errorMessage);
+    }
   }
 
   /**
@@ -3291,7 +3583,9 @@ export class AIChatAgent<
           );
           try {
             const programmaticBody = async () => {
-              await this._repairInterruptedToolsBeforeTurn();
+              await this._repairInterruptedToolsBeforeTurn({
+                continuation: false
+              });
               const response = await this.onChatMessage(() => {}, {
                 requestId,
                 abortSignal,
@@ -3784,7 +4078,11 @@ export class AIChatAgent<
 
   async startAgentToolRun(
     input: unknown,
-    options: { runId: string; signal?: AbortSignal }
+    options: {
+      runId: string;
+      signal?: AbortSignal;
+      eventDelivery?: AgentToolEventDelivery;
+    }
   ): Promise<AgentToolRunInspection> {
     const existing = await this.inspectAgentToolRun(options.runId);
     if (existing) return existing;
@@ -3799,8 +4097,8 @@ export class AIChatAgent<
 
     this.sql`
       insert into cf_ai_chat_agent_tool_runs
-        (run_id, request_id, status, input_json, started_at)
-      values (${options.runId}, null, 'running', ${AIChatAgent._stringifyAgentToolValue(input)}, ${startedAt})
+        (run_id, request_id, status, input_json, started_at, event_delivery)
+      values (${options.runId}, null, 'running', ${AIChatAgent._stringifyAgentToolValue(input)}, ${startedAt}, ${options.eventDelivery === "terminal" ? "terminal" : null})
     `;
     this._agentToolAbortControllers.set(options.runId, controller);
     this._agentToolPreTurnAssistantIds.set(
@@ -3808,6 +4106,9 @@ export class AIChatAgent<
       assistantIdsBeforeStart
     );
     this._agentToolLiveSequences.set(options.runId, 0);
+    if (options.eventDelivery === "terminal") {
+      this._agentToolTerminalOnlyRuns.add(options.runId);
+    }
 
     const abortFromParent = () => controller.abort(options.signal?.reason);
     if (options.signal?.aborted) {
@@ -3916,6 +4217,7 @@ export class AIChatAgent<
         options.signal?.removeEventListener("abort", abortFromParent);
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
+        this._agentToolTerminalOnlyRuns.delete(options.runId);
         // Drop the progress emitter's per-run coalescing state.
         this._agentToolProgressEmitterInstance?.forget(options.runId);
         // Drop this run's request-id mappings. When no runs remain in flight
@@ -3998,6 +4300,22 @@ export class AIChatAgent<
   ): Promise<void> {
     const recovery = await this._classifyAgentToolChildRecovery();
     if (recovery === "in-progress" || this._resumableStream.hasActiveStream()) {
+      return;
+    }
+    // A stream error recorded on the open row means the turn failed even if it
+    // persisted an assistant reply — matching the live finalizer, which fails a
+    // run whenever a stream error was captured.
+    if (row.error_message !== null) {
+      const completedAt = Date.now();
+      this.sql`
+        update cf_ai_chat_agent_tool_runs
+        set status = 'error', error_message = ${row.error_message},
+            completed_at = ${completedAt}
+        where run_id = ${runId}
+      `;
+      row.status = "error";
+      row.completed_at = completedAt;
+      this._closeAgentToolTailers(runId);
       return;
     }
     const messagesAfterStart = this._getAgentToolMessagesAfterStart(runId);
@@ -4088,7 +4406,8 @@ export class AIChatAgent<
   }
 
   async inspectAgentToolRun(
-    runId: string
+    runId: string,
+    options?: { reconcile?: boolean }
   ): Promise<AgentToolRunInspection | null> {
     const row = this._getAgentToolRunRow(runId);
     if (!row) return null;
@@ -4098,6 +4417,7 @@ export class AIChatAgent<
     // was in flight, #1630) — lazily reconcile it from the child's own durable
     // recovery before reporting (mutates `row` in place when it settles).
     if (
+      options?.reconcile !== false &&
       row.status === "running" &&
       !this._agentToolAbortControllers.has(runId)
     ) {
@@ -4194,14 +4514,19 @@ export class AIChatAgent<
         // stored-replay → live-forwarding handoff: a chunk that lands in both
         // the drained backlog AND the live buffer (because it was stored and
         // broadcast during the drain) is emitted exactly once, in order.
+        // Progress/milestone frames and unstored chunks have no stored
+        // position (they reuse the next one), so they bypass the high-water
+        // mark instead of moving it.
         let lastEmitted = options?.afterSequence ?? -1;
         const emit = (chunk: AgentToolStoredChunk) => {
           if (closed) return;
           // Drop out-of-order / duplicate sequences. Guarantees in-order,
           // exactly-once delivery so the parent can rebuild tool-call state
           // (input-available → output-available) without gaps.
-          if (chunk.sequence <= lastEmitted) return;
-          lastEmitted = chunk.sequence;
+          if (!isPositionlessAgentToolChunk(chunk)) {
+            if (chunk.sequence <= lastEmitted) return;
+            lastEmitted = chunk.sequence;
+          }
           try {
             controller.enqueue(
               agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
@@ -4262,6 +4587,10 @@ export class AIChatAgent<
           // returning a remote `toUIMessageStreamResponse()` from
           // `onChatMessage`) hits this window constantly, leaving tool parts
           // stuck at `input-available` on the client (#1589).
+          //
+          // Seed a cold live counter first, so a chunk broadcast while this
+          // tail drains or inspects continues the stored numbering.
+          const seeded = this._seedAgentToolLiveSequence(runId);
           const forwarders =
             this._agentToolForwarders.get(runId) ??
             new Set<(chunk: AgentToolStoredChunk) => void>();
@@ -4287,27 +4616,11 @@ export class AIChatAgent<
 
           const inspection = await this.inspectAgentToolRun(runId);
           if (!inspection || inspection.status !== "running") {
+            // Don't leave a seeded counter re-heating the broadcast idle-guard
+            // for a terminal run.
+            if (seeded) this._agentToolLiveSequences.delete(runId);
             close();
             return;
-          }
-
-          // Run is still live: realign the live sequence to continue right
-          // after the highest emitted chunk (the stored high-water plus
-          // anything captured during the drain). On a normal warm attach the
-          // in-memory counter is already in lockstep with the stored
-          // chunk_index, so this is a no-op. But after the CHILD's Durable
-          // Object restarts/wakes from hibernation, `_agentToolLiveSequences`
-          // is cold (empty) while the stored backlog sits at N, and a
-          // chat-recovery resume re-attaches via `tailAgentToolRun` WITHOUT
-          // re-running `startAgentToolRun` (which is what seeds the counter).
-          // Without this realign the broadcast snoop would hand the recovered
-          // turn's new chunks sequences from 0 — all <= N — and `emit`'s
-          // high-water dedupe would silently drop every one, leaving the parent
-          // stuck with no post-restart chunks. Gating on the still-running check
-          // also avoids re-heating the broadcast idle-guard for a terminal run.
-          // Mirrors @cloudflare/think's tail.
-          if (lastEmitted > (options?.afterSequence ?? -1)) {
-            this._agentToolLiveSequences.set(runId, lastEmitted + 1);
           }
         } catch (error) {
           // Detach the up-front-registered forwarder before surfacing the
@@ -4352,6 +4665,27 @@ export class AIChatAgent<
     return this._resumableStream.latestStreamInfoForRequest(requestId)?.id;
   }
 
+  /**
+   * After this DO restarts, `_agentToolLiveSequences` is cold while the stored
+   * backlog sits at N, and a chat-recovery resume re-attaches via
+   * `tailAgentToolRun` without re-running `startAgentToolRun` (which seeds the
+   * counter). Unseeded, the broadcast snoop numbers the recovered turn's chunks
+   * from 0 and the tail's high-water dedupe drops them. Seeds only a running
+   * run, so a terminal one doesn't re-heat the broadcast idle-guard; a warm
+   * counter is authoritative. Returns whether it seeded.
+   */
+  private _seedAgentToolLiveSequence(runId: string): boolean {
+    if (this._agentToolLiveSequences.has(runId)) return false;
+    this._flushChunkBuffer();
+    const row = this._getAgentToolRunRow(runId);
+    if (!row?.request_id || row.status !== "running") return false;
+    this._agentToolLiveSequences.set(
+      runId,
+      this._getAgentToolStoredChunks(row.request_id).length
+    );
+    return true;
+  }
+
   private _getAgentToolStoredChunks(
     requestId: string,
     afterSequence = -1
@@ -4386,6 +4720,11 @@ export class AIChatAgent<
       this._agentToolClosers.delete(runId);
     }
     this._agentToolForwarders.delete(runId);
+    // A live in-isolate run keeps suppressing until `startAgentToolRun`'s
+    // finally; a recovered turn never reaches that finally.
+    if (!this._agentToolAbortControllers.has(runId)) {
+      this._agentToolTerminalOnlyRuns.delete(runId);
+    }
   }
 
   private static _stringifyAgentToolValue(value: unknown): string | null {
@@ -4559,7 +4898,9 @@ export class AIChatAgent<
                   options?.signal
                 );
                 try {
-                  await this._repairInterruptedToolsBeforeTurn();
+                  await this._repairInterruptedToolsBeforeTurn({
+                    continuation: true
+                  });
                   const response = await this.onChatMessage(() => {}, {
                     requestId,
                     abortSignal,
@@ -4745,6 +5086,10 @@ export class AIChatAgent<
         sweepStaleChatRecoveryIncidents(this.ctx.storage, now),
       getIncident: async (key) =>
         (await this.ctx.storage.get<ChatRecoveryIncident>(key)) ?? null,
+      listActiveIncidents: async () =>
+        (await listActiveChatRecoveryIncidents(this.ctx.storage)).map(
+          ({ incident }) => incident
+        ),
       readProgress: () => this._chatRecoveryProgressMarker(),
       // A turn parked on a pending CLIENT interaction is waiting on the human,
       // not stuck, so the engine keeps it budget-free.
@@ -4771,13 +5116,21 @@ export class AIChatAgent<
           "[AIChatAgent] chatRecovery shouldKeepRecovering hook threw",
           error
         ),
-      exhaustChatRecovery: (incident, config, partial, streamId, createdAt) =>
+      exhaustChatRecovery: (
+        incident,
+        config,
+        partial,
+        streamId,
+        createdAt,
+        originMessageIds
+      ) =>
         this._exhaustChatRecovery(
           incident,
           config,
           partial,
           streamId,
-          createdAt
+          createdAt,
+          originMessageIds
         ),
       resolveRecoveryStream: (requestId) =>
         this._resolveAIChatRecoveryStream(requestId),
@@ -4837,7 +5190,8 @@ export class AIChatAgent<
     // user-facing exhausted-context edge below.
     partial: { text: string; parts: unknown[] },
     streamId: string,
-    createdAt: number
+    createdAt: number,
+    originMessageIds?: string[]
   ): Promise<void> {
     // Build + notification (event + onExhausted-swallow) and the
     // notify-before-terminalize invariant live in the engine helper; the
@@ -4871,17 +5225,24 @@ export class AIChatAgent<
           // at-least-once edge). Persisting first gains no durability (the
           // re-run persists either way) while dropping the live banner on the
           // failing pass — so ai-chat matches `Think`'s broadcast-first.
+          const messageIds =
+            this._originMessageIdsFor(ctx.requestId) ?? originMessageIds;
           this._broadcastChatMessage({
             body: ctx.terminalMessage,
             done: true,
             error: true,
             id: ctx.requestId,
-            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+            ...(messageIds ? { messageIds } : {})
           });
           // The durable terminal record (#1645) is replayed to a client that
           // (re)connects after the turn ended (shared
           // `ResumeHandshake._replayTerminalOnResume`).
-          await this._recordChatTerminal(ctx.requestId, ctx.terminalMessage);
+          await this._recordChatTerminal(
+            ctx.requestId,
+            ctx.terminalMessage,
+            messageIds
+          );
           // Exhaustion resolves recovery — clear the "recovering…" status (#1620).
           await this._setChatRecovering(false);
         }
@@ -4899,9 +5260,10 @@ export class AIChatAgent<
    */
   private async _recordChatTerminal(
     requestId: string,
-    body: string
+    body: string,
+    messageIds = this._originMessageIdsFor(requestId)
   ): Promise<void> {
-    await recordChatTerminal(this.ctx.storage, requestId, body);
+    await recordChatTerminal(this.ctx.storage, requestId, body, messageIds);
   }
 
   /** Clear the durable terminal record once a later turn supersedes it (#1645). */
@@ -4912,6 +5274,7 @@ export class AIChatAgent<
   private async _pendingChatTerminal(): Promise<{
     requestId: string;
     body: string;
+    messageIds?: string[];
   } | null> {
     return pendingChatTerminal(this.ctx.storage);
   }
@@ -5089,6 +5452,8 @@ export class AIChatAgent<
     input: DispatchRecoveredTurnInput<AIChatRecoveryClassification>
   ): Promise<void> {
     const { incident, options, snapshot, recoveryRootRequestId } = input;
+    const originIds =
+      this._originMessageIdsFor(input.requestId) ?? snapshot?.originMessageIds;
     const leaf =
       this.messages.length > 0
         ? this.messages[this.messages.length - 1]
@@ -5116,7 +5481,8 @@ export class AIChatAgent<
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: snapshot?.lastBody ?? null,
-          lastClientTools: snapshot?.lastClientTools ?? null
+          lastClientTools: snapshot?.lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
     } else if (lostPartialUserId !== undefined && options.continue !== false) {
@@ -5132,7 +5498,8 @@ export class AIChatAgent<
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: snapshot?.lastBody ?? null,
-          lastClientTools: snapshot?.lastClientTools ?? null
+          lastClientTools: snapshot?.lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
     } else if (options.continue !== false) {
@@ -5149,7 +5516,8 @@ export class AIChatAgent<
                 lastBody: snapshot.lastBody ?? null,
                 lastClientTools: snapshot.lastClientTools ?? null
               }
-            : {})
+            : {}),
+          ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
     } else {
@@ -5186,7 +5554,10 @@ export class AIChatAgent<
     await this._dispatchChatRecovery(
       "_chatRecoveryContinue",
       data,
-      (onTurnStarted) => this._chatRecoveryContinueDetached(data, onTurnStarted)
+      (onTurnStarted) =>
+        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
+          this._chatRecoveryContinueDetached(data, onTurnStarted)
+        )
     );
   }
 
@@ -5194,6 +5565,11 @@ export class AIChatAgent<
     data?: ChatRecoveryContinueData,
     onTurnStarted?: () => void
   ): Promise<void> {
+    if (
+      await this._chatRecoveryEngine().isRecoveryCancelled(data?.incidentId)
+    ) {
+      return;
+    }
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
@@ -5269,7 +5645,15 @@ export class AIChatAgent<
       // recovered transcript is settled and the next `convertToModelMessages`
       // doesn't 400 with `AI_MissingToolResultsError`.
       onTurnStarted?.();
+      this._takeRecoveryReschedule(data?.incidentId);
       const result = await this.continueLastTurn();
+      if (
+        result.status !== "completed" &&
+        this._takeRecoveryReschedule(data?.incidentId)
+      ) {
+        // Interrupted again: the attempt it scheduled owns the outcome.
+        return;
+      }
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"
@@ -5326,37 +5710,49 @@ export class AIChatAgent<
    * schedule payload carries no `recoveredRequestId`.
    *
    * Returns `"exhausted"` when the budget was spent (terminal UX already
-   * delivered), or `"scheduled"` when a continuation was queued.
+   * delivered), `"scheduled"` when a continuation was queued, or `"declined"`
+   * / `"failed"` when `onChatRecovery` opted out or threw — the caller then
+   * delivers the ordinary terminal error.
    */
-  private async _routeStallToBoundedRecovery(input: {
-    requestId: string;
-    streamId: string;
-    partialParts: MessagePart[];
-    targetAssistantId?: string;
-  }): Promise<"scheduled" | "exhausted"> {
+  private async _routeStallToBoundedRecovery(
+    input: StreamInterruptionRoute
+  ): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
+    const originIds = this._originMessageIdsFor(input.requestId);
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
+    // A new turn that failed before producing any part has nothing to continue:
+    // continuing would clone and merge into the previous assistant (#1691), so
+    // re-run it fresh like `_dispatchRecoveredChatTurn` does after a restart.
+    const leaf = this.messages[this.messages.length - 1];
+    const lostPartialUserId =
+      !input.continuation &&
+      input.partialParts.length === 0 &&
+      leaf?.role === "user" &&
+      leaf.id === latestUserMessageId
+        ? latestUserMessageId
+        : undefined;
+    const recoveryKind = lostPartialUserId ? "retry" : "continue";
     const { incident, config, exhausted } =
       await this._beginChatRecoveryIncident({
         requestId: input.requestId,
         recoveryRootRequestId,
         latestUserMessageId,
-        recoveryKind: "continue"
+        recoveryKind
       });
+    const partialText = input.partialParts
+      .filter(
+        (p): p is { type: "text"; text: string } =>
+          (p as { type?: string }).type === "text"
+      )
+      .map((p) => p.text)
+      .join("");
     if (exhausted) {
       // Budget spent: deliver the SAME terminal UX as deploy-recovery
       // exhaustion (terminalMessage + onExhausted + chat:recovery:exhausted)
       // instead of letting the raw stall error leak out. `firstSeenAt` is the
       // closest available turn-start proxy here.
-      const partialText = input.partialParts
-        .filter(
-          (p): p is { type: "text"; text: string } =>
-            (p as { type?: string }).type === "text"
-        )
-        .map((p) => p.text)
-        .join("");
       await this._exhaustChatRecovery(
         incident,
         config,
@@ -5366,8 +5762,101 @@ export class AIChatAgent<
       );
       return "exhausted";
     }
+
+    const liveTurn = this._liveChatRecoveryTurns.get(input.requestId);
+    let options: ChatRecoveryOptions;
+    try {
+      options =
+        (await this.onChatRecovery({
+          incidentId: incident.incidentId,
+          recoveryRootRequestId,
+          attempt: incident.attempt,
+          maxAttempts: incident.maxAttempts,
+          recoveryKind,
+          streamId: input.streamId,
+          requestId: input.requestId,
+          partialText,
+          partialParts: input.partialParts,
+          recoveryData: liveTurn?.recoveryData ?? null,
+          messages: [...this.messages],
+          lastBody: this._lastBody,
+          lastClientTools: this._lastClientTools,
+          createdAt: liveTurn?.createdAt ?? incident.firstSeenAt
+        })) ?? {};
+    } catch (error) {
+      console.error(
+        "[AIChatAgent] onChatRecovery threw during stream recovery:",
+        error
+      );
+      await this._updateChatRecoveryIncident(
+        incident.incidentId,
+        "failed",
+        error instanceof Error ? error.message : String(error)
+      );
+      return "failed";
+    }
+    // `persist: false` drops the partial unless it holds settled tool results
+    // (non-idempotent work that must not re-run), same as Think.
+    const discardPartial =
+      options.persist === false &&
+      !partialHasSettledToolResults(input.partialParts);
+    if (discardPartial) await input.discardPartial();
+    if (options.continue === false) {
+      await this._updateChatRecoveryIncident(
+        incident.incidentId,
+        "skipped",
+        "continue_disabled"
+      );
+      return "declined";
+    }
+
+    // A dropped partial on a new turn leaves the user's message as the leaf,
+    // so there is nothing to continue: retry the turn instead.
+    const leafAfterDiscard = this.messages[this.messages.length - 1];
+    const retryUserId =
+      lostPartialUserId ??
+      (discardPartial &&
+      !input.continuation &&
+      leafAfterDiscard?.role === "user"
+        ? leafAfterDiscard.id
+        : undefined);
+    // Stalls count too: a turn that streams a little and then stalls resets
+    // the progress-keyed attempt cap every time, so this is its only bound.
+    const retries = await this._chatRecoveryEngine().recordTransientRetry(
+      incident.incidentId
+    );
+    const delaySeconds = input.backoff
+      ? chatRecoveryBackoffSeconds(retries)
+      : undefined;
+    // Inside a recovery attempt, the next attempt must not join the run that
+    // is scheduling it (see `ChatRecoveryScheduleReason`).
+    const reason =
+      this._activeChatRecoveryRootRequestId !== undefined
+        ? "chained_retry"
+        : undefined;
+    if (retryUserId) {
+      await this._chatRecoveryEngine().scheduleRecovery({
+        incident,
+        delaySeconds,
+        reason,
+        recoveryKind: "retry",
+        callback: "_chatRecoveryRetry",
+        data: {
+          targetUserId: retryUserId,
+          originalRequestId: recoveryRootRequestId,
+          incidentId: incident.incidentId,
+          lastBody: this._lastBody ?? null,
+          lastClientTools: this._lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {})
+        }
+      });
+      this._rescheduledRecoveryIncidents.add(incident.incidentId);
+      return "scheduled";
+    }
     await this._chatRecoveryEngine().scheduleRecovery({
       incident,
+      delaySeconds,
+      reason,
       recoveryKind: "continue",
       callback: "_chatRecoveryContinue",
       data: {
@@ -5377,10 +5866,41 @@ export class AIChatAgent<
         originalRequestId: recoveryRootRequestId,
         incidentId: incident.incidentId,
         lastBody: this._lastBody ?? null,
-        lastClientTools: this._lastClientTools ?? null
+        lastClientTools: this._lastClientTools ?? null,
+        ...(originIds ? { originMessageIds: originIds } : {})
       }
     });
+    this._rescheduledRecoveryIncidents.add(incident.incidentId);
     return "scheduled";
+  }
+
+  /** Incidents whose running recovery attempt scheduled the next attempt. */
+  private _rescheduledRecoveryIncidents = new Set<string>();
+
+  private _takeRecoveryReschedule(incidentId: string | undefined): boolean {
+    return (
+      incidentId !== undefined &&
+      this._rescheduledRecoveryIncidents.delete(incidentId)
+    );
+  }
+
+  /**
+   * {@link _routeStallToBoundedRecovery} for the stream `catch`: a routing
+   * failure (e.g. a rejected incident write) degrades to `"failed"`, so the
+   * caller still delivers its terminal error frame.
+   */
+  private async _routeStreamInterruption(
+    input: StreamInterruptionRoute
+  ): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
+    try {
+      return await this._routeStallToBoundedRecovery(input);
+    } catch (error) {
+      console.error(
+        "[AIChatAgent] routing a stream interruption into recovery failed; delivering the terminal error",
+        error
+      );
+      return "failed";
+    }
   }
 
   /**
@@ -5614,7 +6134,10 @@ export class AIChatAgent<
     await this._dispatchChatRecovery(
       "_chatRecoveryRetry",
       data,
-      (onTurnStarted) => this._chatRecoveryRetryDetached(data, onTurnStarted)
+      (onTurnStarted) =>
+        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
+          this._chatRecoveryRetryDetached(data, onTurnStarted)
+        )
     );
   }
 
@@ -5622,6 +6145,11 @@ export class AIChatAgent<
     data?: ChatRecoveryRetryData,
     onTurnStarted?: () => void
   ): Promise<void> {
+    if (
+      await this._chatRecoveryEngine().isRecoveryCancelled(data?.incidentId)
+    ) {
+      return;
+    }
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
@@ -5693,10 +6221,18 @@ export class AIChatAgent<
       // an unanswered user-message tail (no assistant orphan to repair), so that
       // is a defensive no-op here, but keeps both recovery entrypoints converged.
       onTurnStarted?.();
+      this._takeRecoveryReschedule(data?.incidentId);
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
         this._lastBody
       );
+      if (
+        result.status !== "completed" &&
+        this._takeRecoveryReschedule(data?.incidentId)
+      ) {
+        // Interrupted again: the attempt it scheduled owns the outcome.
+        return;
+      }
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"
@@ -5768,10 +6304,7 @@ export class AIChatAgent<
 
     const toWrite: UIMessage[] = [];
     for (const message of mergedMessages) {
-      const resolved = resolveToolMergeId(
-        this._sanitizeMessageForPersistence(message),
-        priorMessages
-      );
+      const resolved = this._sanitizeMessageForPersistence(message);
       // The live array mirrors storage, so a message serializing to what it
       // already holds is already stored. Comparing here is a string compare;
       // letting Sessions discover it would cost a row read and, for media, a
@@ -6372,6 +6905,7 @@ export class AIChatAgent<
     // than creating new blocks. Track whether we've already resumed each type.
     let continuationTextResumed = false;
     let continuationReasoningResumed = false;
+    let finishReason: string | undefined;
 
     // Cancel the reader when the abort signal fires (e.g. client pressed stop).
     // This ensures we stop broadcasting chunks even if the underlying stream
@@ -6453,7 +6987,7 @@ export class AIChatAgent<
           type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
           ...(continuation && { continuation: true })
         });
-        return { status: "completed" };
+        return { status: "completed", finishReason };
       }
 
       const chunk = decoder.decode(value);
@@ -6551,6 +7085,38 @@ export class AIChatAgent<
             // already has when the replay matches, so it's
             // semantically a no-op on the client too.
             if (isReplayChunk(message.parts, data as StreamChunkData)) {
+              // A `tool-input-available` that lands after its approval
+              // request still carries the canonical input the approved
+              // call executes with. Refresh the approval snapshot persisted
+              // without it, and forward it followed by the approval request
+              // again so clients show the input on the approval card.
+              if (
+                applyLateToolInput(message.parts, data as StreamChunkData) &&
+                this._approvalPersistedMessageId !== null &&
+                this._streamingMessage
+              ) {
+                await this.#session.upsertMessage(
+                  this._sanitizeMessageForPersistence({
+                    ...this._streamingMessage,
+                    parts: [...this._streamingMessage.parts]
+                  })
+                );
+              }
+              for (const forwarded of lateToolInputForwardChunks(
+                message.parts,
+                data as StreamChunkData
+              )) {
+                const chunkBody = JSON.stringify(forwarded);
+                const seq = await this._storeStreamChunk(streamId, chunkBody);
+                this._broadcastChatMessage({
+                  body: chunkBody,
+                  done: false,
+                  id,
+                  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                  ...(seq !== undefined && { seq }),
+                  ...(continuation && { continuation: true })
+                });
+              }
               continue;
             }
 
@@ -6726,6 +7292,7 @@ export class AIChatAgent<
                     done: true,
                     id,
                     type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                    outcome: "error",
                     ...(continuation && { continuation: true })
                   });
                   return { status: "error", error };
@@ -6770,25 +7337,27 @@ export class AIChatAgent<
               }
             }
             if (data.type === "finish" && "finishReason" in data) {
-              const { finishReason, ...rest } = data as {
+              const { finishReason: chunkFinishReason, ...rest } = data as {
                 finishReason: string;
                 [key: string]: unknown;
               };
+              finishReason = chunkFinishReason;
               eventToSend = {
                 ...rest,
                 type: "finish",
-                messageMetadata: { finishReason }
+                messageMetadata: { finishReason: chunkFinishReason }
               };
             }
 
             // Store chunk for replay and broadcast to clients
             const chunkBody = JSON.stringify(eventToSend);
-            await this._storeStreamChunk(streamId, chunkBody);
+            const seq = await this._storeStreamChunk(streamId, chunkBody);
             this._broadcastChatMessage({
               body: chunkBody,
               done: false,
               id,
               type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+              ...(seq !== undefined && { seq }),
               ...(continuation && { continuation: true })
             });
           } catch (_error) {
@@ -6800,19 +7369,20 @@ export class AIChatAgent<
 
     // If we exited due to abort, send a done signal so clients know the stream ended
     if (!streamCompleted.value) {
-      this._finishStream(streamId);
+      this._finishStream(streamId, "aborted");
       streamCompleted.value = true;
       this._broadcastChatMessage({
         body: "",
         done: true,
         id,
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        outcome: "aborted",
         ...(continuation && { continuation: true })
       });
       return { status: "aborted" };
     }
 
-    return { status: "completed" };
+    return { status: "completed", finishReason };
   }
 
   // Handle plain text responses (e.g., from generateText)
@@ -6927,13 +7497,14 @@ export class AIChatAgent<
         { type: "text-end", id },
         continuation
       );
-      this._finishStream(streamId);
+      this._finishStream(streamId, "aborted");
       streamCompleted.value = true;
       this._broadcastChatMessage({
         body: "",
         done: true,
         id,
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        outcome: "aborted",
         ...(continuation && { continuation: true })
       });
       return { status: "aborted" };
@@ -6976,9 +7547,17 @@ export class AIChatAgent<
     id: string,
     response: Response,
     excludeBroadcastIds: string[] = [],
-    options: { continuation?: boolean; chatMessageId?: string } = {}
+    options: {
+      continuation?: boolean;
+      chatMessageId?: string;
+      /**
+       * Called once the stream is set up. From then on `_reply` reports its
+       * own failures to clients; a throw before it is the caller's to report.
+       */
+      onStreamStart?: () => void;
+    } = {}
   ): Promise<StreamResultStatus> {
-    const { continuation = false, chatMessageId } = options;
+    const { continuation = false, chatMessageId, onStreamStart } = options;
     // Look up the abort signal for this request so we can cancel the reader
     // loop if the client sends a cancel message. This is a safety net —
     // users should also pass abortSignal to streamText for proper cancellation.
@@ -7003,28 +7582,37 @@ export class AIChatAgent<
           return { status: "completed" };
         }
 
-        // Parsing state adapted from:
-        // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
-        const message = this._createStreamingAssistantMessage(continuation);
-
-        // Start tracking this stream for resumability. The allocated message id
-        // is persisted in stream metadata so orphan recovery (#1691) can
-        // re-associate reconstructed chunks with the right assistant message —
-        // even when the provider stream carries no `start.messageId`. For a
-        // continuation this is the cloned last-assistant id, so recovery merges
-        // into it; for a new turn it is a fresh id, so recovery keeps it
-        // distinct.
-        // The continuation flag is persisted in stream metadata so replayed
-        // frames carry `continuation: true` exactly like the live broadcast
-        // frames below (#1733) — a reconnecting client needs it to append to
-        // the existing assistant message instead of rebuilding it from
-        // scratch and dropping the pre-continuation parts.
-        const streamId = this._startStream(id, {
-          messageId: message.id,
-          continuation
-        });
-
+        // Take the reader before the stream starts: an unreadable body must
+        // fail while nothing has been sent, not leave a started stream behind.
         const reader = response.body.getReader();
+        let message: UIMessage;
+        let streamId: string;
+        try {
+          // Parsing state adapted from:
+          // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
+          message = this._createStreamingAssistantMessage(continuation);
+
+          // Start tracking this stream for resumability. The allocated message id
+          // is persisted in stream metadata so orphan recovery (#1691) can
+          // re-associate reconstructed chunks with the right assistant message —
+          // even when the provider stream carries no `start.messageId`. For a
+          // continuation this is the cloned last-assistant id, so recovery merges
+          // into it; for a new turn it is a fresh id, so recovery keeps it
+          // distinct.
+          // The continuation flag is persisted in stream metadata so replayed
+          // frames carry `continuation: true` exactly like the live broadcast
+          // frames below (#1733) — a reconnecting client needs it to append to
+          // the existing assistant message instead of rebuilding it from
+          // scratch and dropping the pre-continuation parts.
+          streamId = this._startStream(id, {
+            messageId: message.id,
+            continuation
+          });
+        } catch (error) {
+          // The streaming `finally` that releases the reader is not entered yet.
+          reader.cancel(error).catch(() => {});
+          throw error;
+        }
 
         // Track the streaming message so tool results can be applied before persistence
         this._streamingMessage = message;
@@ -7043,6 +7631,9 @@ export class AIChatAgent<
         // (or terminal exhaustion) now owns the turn, so the post-stream
         // persistence + the success `message:response` emit below are skipped.
         let stallRouted = false;
+        // Set when `onChatRecovery` returned `persist: false` for the routed
+        // interruption: the partial is dropped instead of persisted.
+        let discardPartial = false;
 
         // Stream-active gate for the auto-continuation barrier (#1650): while
         // this assistant turn is streaming the parallel tool batch can still
@@ -7051,6 +7642,9 @@ export class AIChatAgent<
         // tool parts) is persisted to `this.messages` — so the re-armed barrier
         // check sees the fully-materialized batch.
         this._streamingTurnActive = true;
+        this._heldTerminalFrames.set(id, []);
+        let persisted = false;
+        onStreamStart?.();
         try {
           try {
             if (isSSE) {
@@ -7076,13 +7670,15 @@ export class AIChatAgent<
               );
             }
           } catch (error) {
-            // A stall watchdog abort (#1626) is a recoverable interruption, not a
+            // A stall watchdog abort (#1626) or a platform transient such as a
+            // dropped connection (#1964) is a recoverable interruption, not a
             // terminal error. Persist the settled partial (so the continuation
             // re-anchors without re-running completed tool calls, and the user
             // keeps generated content), then route into bounded recovery.
             if (
-              error instanceof ChatStreamStalledError &&
-              !streamCompleted.value
+              !streamCompleted.value &&
+              (error instanceof ChatStreamStalledError ||
+                (!abortSignal?.aborted && isRecoverableStreamReadError(error)))
             ) {
               // The partial generated so far lives on the in-memory `message`; the
               // unconditional post-stream persistence block below writes it under
@@ -7092,22 +7688,39 @@ export class AIChatAgent<
               // chunks here — the live `message` is authoritative.)
               const targetAssistantId =
                 message.parts.length > 0 ? message.id : undefined;
-              const outcome = await this._routeStallToBoundedRecovery({
+              const outcome = await this._routeStreamInterruption({
                 requestId: id,
                 streamId,
                 partialParts: message.parts,
-                targetAssistantId
+                targetAssistantId,
+                continuation,
+                backoff: !(error instanceof ChatStreamStalledError),
+                discardPartial: async () => {
+                  discardPartial = true;
+                  // An approval request already persisted this turn's
+                  // message; drop it too. A continuation's early persist
+                  // overwrote the message it continues, which stays.
+                  const earlyId = this._approvalPersistedMessageId;
+                  if (!earlyId || continuation) return;
+                  this._approvalPersistedMessageId = null;
+                  await this._deleteMessagesByIds([earlyId]);
+                  this._broadcastChatMessage({
+                    messages: this._messagesForClientSync(),
+                    type: MessageType.CF_AGENT_CHAT_MESSAGES
+                  });
+                }
               });
               if (outcome === "scheduled") {
                 // Recovering: close the stream cleanly (no terminal error frame);
                 // the scheduled continuation drives the turn to completion. Report
                 // `aborted` so this attempt does not terminalize the turn.
-                this._completeStream(streamId);
+                this._completeStream(streamId, "recovering");
                 this._broadcastChatMessage({
                   body: "",
                   done: true,
                   id,
                   type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                  outcome: "recovering",
                   ...(continuation && { continuation: true })
                 });
                 streamResult = { status: "aborted" };
@@ -7181,7 +7794,7 @@ export class AIChatAgent<
                   discard: !this._agentToolRunsByRequestId.get(id)
                 }
               : null;
-          if (message.parts.length > 0) {
+          if (message.parts.length > 0 && !discardPartial) {
             if (earlyPersistedId) {
               // Message already exists in this.messages from the early persist.
               // Update it in place with the final streaming state.
@@ -7231,6 +7844,8 @@ export class AIChatAgent<
           // mistaken for an interrupted turn.
           this.#pendingCutover = null;
           this._resumableStream.finalizePending();
+          persisted = true;
+          this._releaseTerminalFrames(id);
 
           this._pendingChatResponseResults.push({
             message,
@@ -7245,6 +7860,10 @@ export class AIChatAgent<
         } finally {
           this.#pendingCutover = null;
           this._resumableStream.finalizePending();
+          this._releaseTerminalFrames(
+            id,
+            persisted ? undefined : "Failed to save the response."
+          );
           // The streamed assistant message (with all tool parts) is now
           // persisted: clear the stream-active gate and re-run the
           // auto-continuation barrier for a continuation it held (#1650). This
@@ -7253,7 +7872,7 @@ export class AIChatAgent<
           // TODO(phase-5): the Tier-2 streaming-codec extraction touches this
           // same region — fold this finalize hook into the extracted codec
           // rather than leaving a second seam here.
-          this._onStreamingTurnFinalized();
+          this._onStreamingTurnFinalized(streamResult.finishReason);
         }
       })
     );

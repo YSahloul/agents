@@ -1,301 +1,84 @@
 import { DurableObject } from "cloudflare:workers";
+import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { createGitClient } from "@cloudflare/computer/git";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
-import { Type } from "typebox";
-import { PiHarness } from "./harness/pi-harness";
-import type { PiEvent, PiTool } from "./harness/types";
+import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
-import { createModels } from "./providers/models";
-import { workersAI } from "./providers/workers-ai";
-import { fromManifest } from "agents/skills";
-import { Streams } from "agents/streams";
-import { Tasks } from "agents/tasks";
+import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
+import { PiSessionSockets } from "./sockets";
+import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "./workspace";
 
-const MEMORY_PREFIX = "pi-playground:memory:";
 const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
-const calculateParameters = Type.Object({
-  operation: Type.Union([
-    Type.Literal("add"),
-    Type.Literal("subtract"),
-    Type.Literal("multiply"),
-    Type.Literal("divide"),
-    Type.Literal("+"),
-    Type.Literal("-"),
-    Type.Literal("*"),
-    Type.Literal("/")
-  ]),
-  left: Type.Number(),
-  right: Type.Number()
-});
-const diceParameters = Type.Object({
-  sides: Type.Integer({ minimum: 2, maximum: 1000 }),
-  count: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 }))
-});
-const memoryParameters = Type.Object({
-  key: Type.String({ minLength: 1, maxLength: 64 }),
-  value: Type.String({ maxLength: 4000 })
-});
-const recallParameters = Type.Object({
-  key: Type.String({ minLength: 1, maxLength: 64 })
-});
-const noParameters = Type.Object({});
-
-type ToolContext = {
-  readonly storage: DurableObjectStorage;
-  readonly now: () => Date;
-};
-
-function text(content: string) {
-  return [{ type: "text" as const, text: content }];
-}
-
-function calculate(
-  operation: "add" | "subtract" | "multiply" | "divide" | "+" | "-" | "*" | "/",
-  left: number,
-  right: number
-): number {
-  switch (operation) {
-    case "add":
-    case "+":
-      return left + right;
-    case "subtract":
-    case "-":
-      return left - right;
-    case "multiply":
-    case "*":
-      return left * right;
-    case "divide":
-    case "/":
-      if (right === 0) throw new Error("Cannot divide by zero");
-      return left / right;
-  }
-}
-
-function createTools(): PiTool<ToolContext>[] {
-  const calculator: PiTool<
-    ToolContext,
-    typeof calculateParameters,
-    { readonly result: number }
-  > = {
-    name: "calculate",
-    label: "Calculator",
-    description: "Perform exact arithmetic with two numbers.",
-    parameters: calculateParameters,
-    replay: "safe",
-    async execute(_id, input) {
-      const result = calculate(input.operation, input.left, input.right);
-      return { content: text(String(result)), details: { result } };
-    }
-  };
-
-  const rollDice: PiTool<
-    ToolContext,
-    typeof diceParameters,
-    { readonly rolls: number[]; readonly total: number }
-  > = {
-    name: "roll_dice",
-    label: "Roll dice",
-    description: "Roll one or more fair dice.",
-    parameters: diceParameters,
-    replay: "never",
-    async execute(_id, input, onUpdate) {
-      const count = input.count ?? 1;
-      onUpdate({
-        content: text(`Rolling ${count}d${input.sides}…`),
-        details: { rolls: [], total: 0 }
-      });
-      const rolls = Array.from(
-        { length: count },
-        () => Math.floor(Math.random() * input.sides) + 1
-      );
-      const total = rolls.reduce((sum, roll) => sum + roll, 0);
-      return {
-        content: text(`Rolled ${rolls.join(", ")} (total ${total})`),
-        details: { rolls, total }
-      };
-    }
-  };
-
-  const remember: PiTool<
-    ToolContext,
-    typeof memoryParameters,
-    { readonly key: string }
-  > = {
-    name: "remember",
-    label: "Remember",
-    description: "Persist a named fact in this Durable Object session.",
-    parameters: memoryParameters,
-    replay: "safe",
-    async execute(_id, input, _onUpdate, context) {
-      await context.storage.put(`${MEMORY_PREFIX}${input.key}`, input.value);
-      return {
-        content: text(`Remembered ${JSON.stringify(input.key)}.`),
-        details: { key: input.key }
-      };
-    }
-  };
-
-  const recall: PiTool<
-    ToolContext,
-    typeof recallParameters,
-    { readonly key: string; readonly found: boolean }
-  > = {
-    name: "recall",
-    label: "Recall",
-    description: "Read one fact previously saved in this session.",
-    parameters: recallParameters,
-    replay: "safe",
-    async execute(_id, input, _onUpdate, context) {
-      const value = await context.storage.get<string>(
-        `${MEMORY_PREFIX}${input.key}`
-      );
-      return {
-        content: text(
-          value === undefined
-            ? `No memory named ${JSON.stringify(input.key)}.`
-            : value
-        ),
-        details: { key: input.key, found: value !== undefined }
-      };
-    }
-  };
-
-  const listMemory: PiTool<
-    ToolContext,
-    typeof noParameters,
-    { readonly keys: string[] }
-  > = {
-    name: "list_memories",
-    label: "List memories",
-    description: "List the fact names stored in this session.",
-    parameters: noParameters,
-    replay: "safe",
-    async execute(_id, _input, _onUpdate, context) {
-      const values = await context.storage.list<string>({
-        prefix: MEMORY_PREFIX
-      });
-      const keys = [...values.keys()].map((key) =>
-        key.slice(MEMORY_PREFIX.length)
-      );
-      return {
-        content: text(keys.length === 0 ? "No memories." : keys.join("\n")),
-        details: { keys }
-      };
-    }
-  };
-
-  const clock: PiTool<
-    ToolContext,
-    typeof noParameters,
-    { readonly iso: string }
-  > = {
-    name: "current_time",
-    label: "Current time",
-    description: "Return the current UTC time.",
-    parameters: noParameters,
-    replay: "safe",
-    async execute(_id, _input, _onUpdate, context) {
-      const iso = context.now().toISOString();
-      return { content: text(iso), details: { iso } };
-    }
-  };
-
-  return [calculator, rollDice, remember, recall, listMemory, clock];
-}
-
-const skills = fromManifest({
-  id: "pi-playground-skills",
-  fingerprint: "1",
-  skills: [
-    {
-      name: "trip-planning",
-      description:
-        "Use when the user asks to plan a trip, itinerary, or travel schedule.",
-      body: [
-        "Ask for the destination, dates, and interests if not given.",
-        "Use the calculator tool for any budget math instead of estimating.",
-        "Remember the finished itinerary with the remember tool under the key",
-        "`itinerary` so it can be recalled in a later message."
-      ].join("\n")
-    }
-  ]
-});
-
-type ToolCallEvent = { readonly toolName: string; readonly args: unknown };
-
-function toolCallOf(event: unknown): ToolCallEvent | undefined {
-  return typeof event === "object" &&
-    event !== null &&
-    "toolName" in event &&
-    typeof event.toolName === "string" &&
-    "args" in event
-    ? { toolName: event.toolName, args: event.args }
-    : undefined;
-}
-
-function memoryKeyOf(call: ToolCallEvent): string {
-  return typeof call.args === "object" &&
-    call.args !== null &&
-    "key" in call.args &&
-    typeof call.args.key === "string"
-    ? call.args.key
-    : "";
-}
+const PREAMBLE =
+  "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
 
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
-  readonly tasks = new Tasks();
-  readonly streams = new Streams();
-  readonly harness = new PiHarness<ToolContext>({
-    models: createModels({ providers: [workersAI(this.env.AI)] }),
-    model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
-    tasks: this.tasks,
-    streams: this.streams,
-    thinkingLevel: "low",
-    toolContext: { storage: this.ctx.storage, now: () => new Date() },
-    tools: () => createTools(),
-    skills: [skills],
-    systemPrompt:
-      "You are a concise playground assistant. Use tools whenever they can answer the request. Explain tool results plainly. You can calculate, roll dice, read the current time, and persist or recall facts for this session.",
-    retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
-    compaction: {
-      enabled: true,
-      reserveTokens: 4000,
-      keepRecentTokens: 12000
-    },
-    configure: (hooks) => {
-      // Pi hooks are process-local and re-registered on every wake.
-      hooks.on("before_tool", (event) => {
-        const call = toolCallOf(event);
-        if (
-          call?.toolName === "remember" &&
-          memoryKeyOf(call).startsWith("_")
-        ) {
-          return { block: { reason: "Memory names cannot start with _." } };
-        }
-        return undefined;
+  // Workers AI and AI Gateway over the AI binding, as a pi-ai provider.
+  readonly ai = createAI({ binding: this.env.AI });
+  // A durable filesystem on the object's SQLite, beside pi's own tables.
+  // `exec` runs JavaScript modules in a fresh Dynamic Worker per call, with
+  // no network of its own. `git` turns on `workspace.git`, which `ws:git`
+  // calls in the host; `allowGitNetwork` lets it clone, fetch and push.
+  readonly workspace = new Workspace({
+    storage: this.ctx.storage as unknown as DurableObjectStorageLike,
+    git: createGitClient(),
+    backends: [
+      new WorkerJavaScriptBackend({
+        id: JAVASCRIPT_BACKEND,
+        loader: this.env.LOADER,
+        root: "/workspace",
+        access: "read-write",
+        allowGitNetwork: true
+      })
+    ]
+  });
+  readonly registry = createRegistry();
+  readonly harness = new PiHarness({
+    harness: async ({ storage, context }) => {
+      // pi's own extension: the system prompt and the workspace tools.
+      this.registry.install({
+        name: "playground",
+        sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
+        tools: createWorkspaceTools(this.workspace)
       });
-    }
+      const models = createModels();
+      models.setProvider(this.ai.provider);
+      return Harness.open(
+        storage,
+        {
+          models,
+          registry: this.registry,
+          settings: {
+            // pi doubles the delay before each retry: 1, 2, 4, 8 and 16 seconds,
+            // so a rate-limited model gets about 30 seconds to recover.
+            retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 }
+          },
+          onReport: (error) => console.warn("pi report", error)
+        },
+        context
+      );
+    },
+    defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" }
   });
 
-  readonly webSockets = new WebSockets(this.harness.webSockets());
-
+  // App glue, not the harness: how this app puts sessions on a socket.
+  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
+    this.ctx.getWebSockets(tag)
+  );
+  readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
-    .use(this.tasks)
-    .use(this.streams)
     .use(this.webSockets)
     .use(this.harness);
 
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    // Surface durable operation lifecycle in the tail log for local `wrangler
-    // dev` observability; a real host would forward these to its own sink.
-    this.harness.on((event: PiEvent) => {
-      if (event.type === "fault" || event.type === "operation_end") {
-        console.log("pi", event);
-      }
-    });
+  /** Host startup, after the harness has opened pi. */
+  async onStart(): Promise<void> {
+    await this.sockets.reattach();
   }
 }
 

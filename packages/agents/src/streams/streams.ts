@@ -83,6 +83,8 @@ export interface StreamsSyncInternal {
     tag: string | null,
     metadata: Record<string, StreamJson> | undefined
   ): void;
+  /** Replace a stream row's metadata, whatever its state. */
+  setMetadata(streamId: string, metadata: Record<string, StreamJson>): void;
   /** The read-fenced append: one chunk insert at the log tail, reader wakeup. */
   append(streamId: string, chunk: StreamJson): number;
   /**
@@ -348,6 +350,10 @@ export class Streams extends LifecycleCapability {
         continue;
       }
 
+      // The yield above was a suspension point: appends made while the
+      // consumer held the batch woke no waiter, so re-poll before sleeping.
+      if (rows.length > 0) continue;
+
       // Live tail: wait for the next append or settlement, then re-poll.
       // Wakeups carry no data, so there is nothing to buffer or dedupe.
       await this.#waitForWakeup(streamId, signal);
@@ -441,6 +447,16 @@ export class Streams extends LifecycleCapability {
             (${streamId}, 'streaming', ${tag}, ${metadataJson}, 0, ${now}, ${now})
         `;
         this.#emit("stream:opened", { streamId });
+      },
+      setMetadata: (streamId, metadata) => {
+        const metadataJson = this.#serialize(
+          metadata,
+          `metadata for stream "${streamId}"`
+        );
+        this.#sql`
+          UPDATE cf_agents_streams SET metadata = ${metadataJson}
+          WHERE stream_id = ${streamId}
+        `;
       },
       append: (streamId, chunk) => this.#append(streamId, chunk),
       lastChunkAt: (streamId) => this.#tail(streamId).lastChunkAt,

@@ -9,7 +9,10 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.24.0",
+  "bin": {
+    "agents": "./dist/cli.js"
+  },
+  "version": "0.26.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -35,9 +38,15 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/openai": "^4.0.0",
+    "@ai-sdk/provider": "^4.0.0",
     "@ai-sdk/react": "^4.0.0",
     "@ai-sdk/valibot": "3.0.6",
     "@cloudflare/codemode": "workspace:*",
+    "@earendil-works/pi-ai": "^1.0.0",
+    "@earendil-works/pi-durable": "^1.0.0",
+    "@earendil-works/pi-tui": "1.0.0",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.10",
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -50,6 +59,7 @@
     "ai": "^7.0.0",
     "chat": "^4.31.0",
     "glob": "^13.0.6",
+    "highlight.js": "11.12.0",
     "just-bash": "^3.0.2",
     "react": "^19.2.7",
     "teleproto": "^1.228.5",
@@ -57,8 +67,11 @@
     "zod": "^4.5.4"
   },
   "peerDependencies": {
+    "@ai-sdk/provider": "^4.0.0",
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
     "@cloudflare/codemode": ">=0.5.0",
+    "@earendil-works/pi-ai": "^1.0.0",
+    "@earendil-works/pi-durable": "^1.0.0",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
@@ -73,10 +86,19 @@
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
+    "@ai-sdk/provider": {
+      "optional": true
+    },
     "@ai-sdk/react": {
       "optional": true
     },
     "@cloudflare/codemode": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-durable": {
       "optional": true
     },
     "@tanstack/ai": {
@@ -151,6 +173,16 @@
       "import": "./dist/lifecycle/index.js",
       "require": "./dist/lifecycle/index.js"
     },
+    "./harness/ai-sdk": {
+      "types": "./dist/harness/ai-sdk/index.d.ts",
+      "import": "./dist/harness/ai-sdk/index.js",
+      "require": "./dist/harness/ai-sdk/index.js"
+    },
+    "./harness/pi": {
+      "types": "./dist/harness/pi/index.d.ts",
+      "import": "./dist/harness/pi/index.js",
+      "require": "./dist/harness/pi/index.js"
+    },
     "./agent-tools": {
       "types": "./dist/agent-tools.d.ts",
       "import": "./dist/agent-tools.js",
@@ -185,6 +217,16 @@
       "types": "./dist/observability/index.d.ts",
       "import": "./dist/observability/index.js",
       "require": "./dist/observability/index.js"
+    },
+    "./models/ai-sdk": {
+      "types": "./dist/models/ai-sdk/index.d.ts",
+      "import": "./dist/models/ai-sdk/index.js",
+      "require": "./dist/models/ai-sdk/index.js"
+    },
+    "./models/pi-ai": {
+      "types": "./dist/models/pi-ai/index.d.ts",
+      "import": "./dist/models/pi-ai/index.js",
+      "require": "./dist/models/pi-ai/index.js"
     },
     "./observability/ai": {
       "types": "./dist/observability/ai/index.d.ts",
@@ -296,6 +338,11 @@
       "import": "./dist/browser/ai.js",
       "require": "./dist/browser/ai.js"
     },
+    "./browser/ai-sdk": {
+      "types": "./dist/browser/ai-sdk.d.ts",
+      "import": "./dist/browser/ai-sdk.js",
+      "require": "./dist/browser/ai-sdk.js"
+    },
     "./browser/tanstack-ai": {
       "types": "./dist/browser/tanstack-ai.d.ts",
       "import": "./dist/browser/tanstack-ai.js",
@@ -341,40 +388,40 @@
       "import": "./dist/voice/text.js",
       "require": "./dist/voice/text.js"
     },
-    "./channels": {
-      "types": "./dist/channels/index.d.ts",
-      "import": "./dist/channels/index.js",
-      "require": "./dist/channels/index.js"
+    "./experimental/channels": {
+      "types": "./dist/experimental/channels/index.d.ts",
+      "import": "./dist/experimental/channels/index.js",
+      "require": "./dist/experimental/channels/index.js"
     },
-    "./channels/email": {
-      "types": "./dist/channels/email.d.ts",
-      "import": "./dist/channels/email.js",
-      "require": "./dist/channels/email.js"
+    "./experimental/channels/email": {
+      "types": "./dist/experimental/channels/email/index.d.ts",
+      "import": "./dist/experimental/channels/email/index.js",
+      "require": "./dist/experimental/channels/email/index.js"
     },
-    "./channels/slack": {
-      "types": "./dist/channels/slack.d.ts",
-      "import": "./dist/channels/slack.js",
-      "require": "./dist/channels/slack.js"
+    "./experimental/channels/slack": {
+      "types": "./dist/experimental/channels/slack/index.d.ts",
+      "import": "./dist/experimental/channels/slack/index.js",
+      "require": "./dist/experimental/channels/slack/index.js"
     },
-    "./channels/telegram": {
-      "types": "./dist/channels/telegram.d.ts",
-      "import": "./dist/channels/telegram.js",
-      "require": "./dist/channels/telegram.js"
+    "./experimental/channels/telegram": {
+      "types": "./dist/experimental/channels/telegram/index.d.ts",
+      "import": "./dist/experimental/channels/telegram/index.js",
+      "require": "./dist/experimental/channels/telegram/index.js"
     },
-    "./channels/voice": {
-      "types": "./dist/channels/voice.d.ts",
-      "import": "./dist/channels/voice.js",
-      "require": "./dist/channels/voice.js"
+    "./experimental/channels/web": {
+      "types": "./dist/experimental/channels/web/index.d.ts",
+      "import": "./dist/experimental/channels/web/index.js",
+      "require": "./dist/experimental/channels/web/index.js"
     },
-    "./channels/ai-sdk": {
-      "types": "./dist/channels/ai-sdk.d.ts",
-      "import": "./dist/channels/ai-sdk.js",
-      "require": "./dist/channels/ai-sdk.js"
+    "./experimental/channels/web/client": {
+      "types": "./dist/experimental/channels/web/client.d.ts",
+      "import": "./dist/experimental/channels/web/client.js",
+      "require": "./dist/experimental/channels/web/client.js"
     },
-    "./channels/tanstack-ai": {
-      "types": "./dist/channels/tanstack-ai.d.ts",
-      "import": "./dist/channels/tanstack-ai.js",
-      "require": "./dist/channels/tanstack-ai.js"
+    "./experimental/channels/web/ai-sdk": {
+      "types": "./dist/experimental/channels/web/ai-sdk.d.ts",
+      "import": "./dist/experimental/channels/web/ai-sdk.js",
+      "require": "./dist/experimental/channels/web/ai-sdk.js"
     },
     "./tsconfig": "./agents.tsconfig.json",
     "./vite": {
@@ -431,10 +478,10 @@
     "test:voice:workers": "vitest --project voice-workers",
     "test:voice:react": "vitest --project voice-react",
     "test:channels": "vitest --project channels",
-    "test:channels:live": "vitest --run -c src/channels/vitest.live.config.ts",
     "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",
+    "test:harness:pi": "vitest --project harness-pi",
     "test:webmcp": "vitest --project webmcp",
     "test:x402": "vitest --project x402",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts",

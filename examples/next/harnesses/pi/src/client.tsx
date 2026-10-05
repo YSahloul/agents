@@ -9,11 +9,11 @@ import {
 } from "@cloudflare/kumo";
 import {
   BrainIcon,
-  CalculatorIcon,
   CheckCircleIcon,
-  ClockIcon,
-  DiceFiveIcon,
+  CodeIcon,
+  FilePlusIcon,
   GearIcon,
+  GitBranchIcon,
   MoonIcon,
   PaperPlaneRightIcon,
   PlusIcon,
@@ -37,24 +37,22 @@ const MODEL = "@cf/moonshotai/kimi-k2.7-code";
 
 const SUGGESTIONS = [
   {
-    icon: <DiceFiveIcon size={15} />,
-    label: "Roll 4d12",
-    value: "Roll four 12-sided dice and tell me the total."
+    icon: <FilePlusIcon size={15} />,
+    label: "Write a file",
+    value:
+      "Write a haiku about Durable Objects to /workspace/haiku.txt, then read it back."
   },
   {
-    icon: <CalculatorIcon size={15} />,
-    label: "Calculate 47 × 19",
-    value: "Use the calculator to multiply 47 by 19."
+    icon: <CodeIcon size={15} />,
+    label: "Run JavaScript",
+    value:
+      "Use exec to run JavaScript that lists /workspace and returns the size of each file."
   },
   {
-    icon: <BrainIcon size={15} />,
-    label: "Remember a fact",
-    value: "Remember that my favourite launch snack is stroopwafels."
-  },
-  {
-    icon: <ClockIcon size={15} />,
-    label: "What time is it?",
-    value: "Use a tool to tell me the current UTC time."
+    icon: <GitBranchIcon size={15} />,
+    label: "Clone a repo",
+    value:
+      "Clone https://github.com/octocat/Hello-World into /workspace/hello, then show its git log."
   }
 ] satisfies Array<{ icon: ReactNode; label: string; value: string }>;
 
@@ -315,6 +313,14 @@ function Message({
       );
     case "tool":
       return <ToolMessage message={message} />;
+    case "notice":
+      return message.parts.length === 0 ? null : (
+        <p className="text-center text-xs text-kumo-inactive">
+          {message.parts
+            .map((part) => (part.type === "text" ? part.text : ""))
+            .join("")}
+        </p>
+      );
   }
 }
 
@@ -378,12 +384,15 @@ function App() {
     messages,
     live,
     running,
-    runningTools,
-    tools,
+    tools: running_,
+    catalog,
+    queued,
+    retry,
     error,
     submit: submitPrompt,
     abort
   } = usePiSession(session);
+  const runningTools = running_.map((tool) => tool.name);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -391,11 +400,12 @@ function App() {
 
   const connected = status === "open";
 
-  const submit = () => {
+  /** While a run is going, Enter queues a follow-up and Steer joins the run. */
+  const submit = (whenBusy: "followUp" | "steer" = "followUp") => {
     const text = prompt.trim();
-    if (!text || running || !connected) return;
+    if (!text || !connected) return;
     setPrompt("");
-    submitPrompt(text);
+    submitPrompt(text, whenBusy);
   };
 
   const newSession = () => {
@@ -452,7 +462,6 @@ function App() {
                 shape="square"
                 aria-label="New session"
                 onClick={newSession}
-                disabled={running}
                 icon={<PlusIcon size={16} />}
               />
               <ModeToggle />
@@ -506,12 +515,31 @@ function App() {
                 <Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
                   <div className="flex items-center gap-2 text-sm text-kumo-subtle">
                     <GearIcon size={15} className="animate-spin" />
-                    {runningTools.length > 0
-                      ? `Running ${runningTools.join(", ")}`
-                      : "Waking the durable operation"}
+                    {retry
+                      ? `Retrying: ${retry.error}`
+                      : runningTools.length > 0
+                        ? `Running ${runningTools.join(", ")}`
+                        : "Waiting for the model"}
                   </div>
                 </Surface>
               </div>
+            ) : null}
+
+            {running_.map((tool) =>
+              tool.output ? (
+                <pre
+                  key={tool.callId}
+                  className="ml-11 max-h-40 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs"
+                >
+                  {tool.output}
+                </pre>
+              ) : null
+            )}
+
+            {queued > 0 ? (
+              <p className="ml-11 text-xs text-kumo-subtle">
+                {queued} queued behind this run
+              </p>
             ) : null}
 
             {error ? (
@@ -545,22 +573,37 @@ function App() {
                     submit();
                   }
                 }}
-                placeholder="Ask Pi to use a tool"
+                placeholder={
+                  running
+                    ? "Queue a follow-up, or steer the running turn"
+                    : "Ask Pi to use a tool"
+                }
                 aria-label="Message Pi"
-                disabled={!connected || running}
+                disabled={!connected}
                 rows={2}
                 className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
               />
               {running ? (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  shape="square"
-                  aria-label="Stop"
-                  onClick={abort}
-                  icon={<StopIcon size={18} weight="fill" />}
-                  className="mb-0.5"
-                />
+                <div className="mb-0.5 flex gap-1.5">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    aria-label="Steer"
+                    disabled={prompt.trim() === ""}
+                    onClick={() => submit("steer")}
+                  >
+                    Steer
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    shape="square"
+                    aria-label="Stop"
+                    onClick={abort}
+                    icon={<StopIcon size={18} weight="fill" />}
+                  />
+                </div>
               ) : (
                 <Button
                   type="submit"
@@ -586,7 +629,7 @@ function App() {
 
       {toolsOpen ? (
         <Sidebar
-          tools={tools}
+          tools={catalog}
           activeTools={runningTools}
           onClose={() => setToolsOpen(false)}
         />

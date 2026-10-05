@@ -29,6 +29,10 @@
         "name": "RetryableStartObject"
       },
       {
+        "class_name": "ConcurrentStartObject",
+        "name": "ConcurrentStartObject"
+      },
+      {
         "class_name": "ScheduledLifecycleObject",
         "name": "ScheduledLifecycleObject"
       },
@@ -45,6 +49,14 @@
         "name": "QueueHarnessObject"
       },
       {
+        "class_name": "BrowserHarnessObject",
+        "name": "BrowserHarnessObject"
+      },
+      {
+        "class_name": "TestBrowserAgent",
+        "name": "TestBrowserAgent"
+      },
+      {
         "class_name": "TaskHarnessObject",
         "name": "TaskHarnessObject"
       },
@@ -55,6 +67,14 @@
       {
         "class_name": "StreamHarnessObject",
         "name": "StreamHarnessObject"
+      },
+      {
+        "class_name": "ChannelsHarnessObject",
+        "name": "ChannelsHarnessObject"
+      },
+      {
+        "class_name": "AiSdkHarnessObject",
+        "name": "AiSdkHarnessObject"
       },
       {
         "class_name": "CutoverHarnessObject",
@@ -255,6 +275,10 @@
         "name": "TestWaitConnectionsAgent"
       },
       {
+        "class_name": "TestNativeRpcAgent",
+        "name": "TestNativeRpcAgent"
+      },
+      {
         "class_name": "RoutingOwnerAgent",
         "name": "RoutingOwnerAgent"
       },
@@ -272,6 +296,12 @@
       },
       // Facet-only sub-agent fixtures. These bindings are test-harness-only;
       // production Workers only need to export child classes.
+      // The browser tool's codemode runtime facet (stays out of
+      // new_sqlite_classes; the host owns the SQLite store).
+      {
+        "class_name": "CodemodeRuntime",
+        "name": "CodemodeRuntime"
+      },
       {
         "class_name": "CounterSubAgent",
         "name": "CounterSubAgent"
@@ -279,6 +309,10 @@
       {
         "class_name": "OuterSubAgent",
         "name": "OuterSubAgent"
+      },
+      {
+        "class_name": "DenyingSubAgent",
+        "name": "DenyingSubAgent"
       },
       {
         "class_name": "InnerSubAgent",
@@ -415,13 +449,18 @@
         "PlainLifecycleObject",
         "StatefulPlainObject",
         "RetryableStartObject",
+        "ConcurrentStartObject",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
         "QueueHarnessObject",
+        "BrowserHarnessObject",
+        "TestBrowserAgent",
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",
+        "ChannelsHarnessObject",
+        "AiSdkHarnessObject",
         "CutoverHarnessObject",
         "SqliteStrategiesBench",
         "TaskStreamComposeObject",
@@ -469,6 +508,7 @@
         "TestKeepAliveAgent",
         "TestSessionAgent",
         "TestWaitConnectionsAgent",
+        "TestNativeRpcAgent",
         "RoutingOwnerAgent",
         "RoutedChatAgent",
         "TestSubAgentParent",

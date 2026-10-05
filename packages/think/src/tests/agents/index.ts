@@ -12,11 +12,19 @@ export {
   ThinkToolsTestAgent,
   ThinkSessionTestAgent,
   ThinkSystemPromptSkillsWarningAgent,
+  ThinkDefaultSystemPromptSkillsAgent,
+  ThinkInheritedSystemPromptSkillsAgent,
+  ThinkSystemPromptFieldSkillsAgent,
+  ThinkMissingClassifierWarningAgent,
+  ThinkClassifierMethodAgent,
+  ThinkInheritedClassifierAgent,
+  ThinkClassifierFieldAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkLegacyConfigMigrationAgent,
   ThinkConfigInSessionAgent,
   ThinkProgrammaticTestAgent,
+  ThinkContinueOverrideTestAgent,
   ThinkScheduledTasksTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
@@ -37,10 +45,17 @@ export { ThinkExecuteToolAgent } from "./execute-tool";
 export { ThinkExecuteHitlAgent } from "./execute-hitl";
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
-export { ThinkExtensionHookAgent } from "./extension-hooks";
-export { ThinkMessengerRouteTestAgent } from "./messengers";
+export {
+  ThinkExtensionHookAgent,
+  ThinkExtensionBeforeTurnModelAgent
+} from "./extension-hooks";
+export {
+  ThinkMessengerDeliveryTestAgent,
+  ThinkMessengerRouteTestAgent
+} from "./messengers";
 export {
   ThinkVoiceTestAgent,
   ThinkNoticeSurfaceTestAgent
 } from "./voice-think";
 export { ThinkMcpToolMaterializationAgent } from "./mcp-tool-materialization";
+export { ThinkPromptCacheTestAgent } from "./prompt-cache";

@@ -150,6 +150,8 @@ export class WebSockets extends LifecycleCapability {
   override readonly claims = "catch-all";
 
   readonly #handlers: WebSocketHandlers | undefined;
+  /** Handlers added with `use`, run before the configured ones. */
+  readonly #added: WebSocketHandlers[] = [];
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
   readonly #protocol: WebSocketsOptions["protocol"];
   readonly #readonly: WebSocketsOptions["readonly"];
@@ -241,6 +243,15 @@ export class WebSockets extends LifecycleCapability {
     }
   }
 
+  /**
+   * Add handlers for another component sharing these connections, such as
+   * a protocol of its own. They run before the configured handlers, and
+   * their `onMessage` can claim a message by returning true.
+   */
+  use(handlers: WebSocketHandlers): void {
+    this.#added.push(handlers);
+  }
+
   // ── Connections ────────────────────────────────────────────────────────
 
   /** Open connections on either wire, optionally by tag. */
@@ -287,21 +298,17 @@ export class WebSockets extends LifecycleCapability {
           ? this.#protocol(connection, ctx)
           : true;
       if (enabled) {
-        this.#connecting.add(connection);
-        try {
-          this.sendIdentity(connection);
-          this.sendState(connection);
-        } finally {
-          this.#connecting.delete(connection);
-        }
+        this.sendConnectFrames(connection);
       } else {
         setConnectionProtocolEnabled(connection, false);
       }
     }
-    await this.lifecycle.runInHostContext(
-      () => this.#handlers?.onConnect?.(connection, ctx),
-      { connection, request: ctx.request }
-    );
+    for (const handlers of [...this.#added, this.#handlers]) {
+      await this.lifecycle.runInHostContext(
+        () => handlers?.onConnect?.(connection, ctx),
+        { connection, request: ctx.request }
+      );
+    }
   }
 
   async #message(
@@ -330,6 +337,13 @@ export class WebSockets extends LifecycleCapability {
     ) {
       return;
     }
+    for (const handlers of this.#added) {
+      const claimed = await this.lifecycle.runInHostContext(
+        () => handlers.onMessage?.(connection, message),
+        { connection }
+      );
+      if (claimed === true) return;
+    }
     await this.lifecycle.runInHostContext(
       () => this.#handlers?.onMessage?.(connection, message),
       { connection }
@@ -342,17 +356,28 @@ export class WebSockets extends LifecycleCapability {
     reason: string,
     wasClean: boolean
   ): Promise<unknown> {
-    return this.lifecycle.runInHostContext(
-      () => this.#handlers?.onClose?.(connection, code, reason, wasClean),
-      { connection }
+    return this.#each((handlers) =>
+      this.lifecycle.runInHostContext(
+        () => handlers?.onClose?.(connection, code, reason, wasClean),
+        { connection }
+      )
     );
   }
 
   #error(connection: Connection, error: unknown): Promise<unknown> {
-    return this.lifecycle.runInHostContext(
-      () => this.#handlers?.onError?.(connection, error),
-      { connection }
+    return this.#each((handlers) =>
+      this.lifecycle.runInHostContext(
+        () => handlers?.onError?.(connection, error),
+        { connection }
+      )
     );
+  }
+
+  async #each(
+    run: (handlers: WebSocketHandlers | undefined) => Promise<unknown>
+  ): Promise<void> {
+    for (const handlers of [...this.#added, this.#handlers])
+      await run(handlers);
   }
 
   // ── Hibernating wire ───────────────────────────────────────────────────
@@ -432,17 +457,52 @@ export class WebSockets extends LifecycleCapability {
   // `protocol: false` the host calls these at the moments it chooses.
 
   /**
-   * Send the identity frame, unless the connection is no-protocol. The
-   * defaults are the Durable Object's routed name and host class; a host
-   * whose public identity differs — an `Agent` facet, whose routed name
-   * is an internal encoding of its logical name — passes its own.
+   * Send the connect sequence: the identity frame, then the current state
+   * when one is stored. The identity carries `stateFollows` in that case,
+   * so clients resolve `ready` only once the state has landed. Nothing is
+   * sent to a no-protocol connection. Identity defaults as for
+   * `sendIdentity()`.
+   */
+  sendConnectFrames(
+    connection: Connection,
+    identity: { name: string; agent: string } = this.#defaultIdentity()
+  ): void {
+    if (!isConnectionProtocolEnabled(connection)) return;
+    this.#connecting.add(connection);
+    try {
+      const current = this.#state?.get();
+      // Serialized first: a flagged identity must never go out without
+      // the state frame the client will wait for.
+      const stateFrame =
+        current === undefined
+          ? undefined
+          : JSON.stringify({
+              type: MessageType.CF_AGENT_STATE,
+              state: current
+            });
+      this.#sendFrame(connection, {
+        type: MessageType.CF_AGENT_IDENTITY,
+        name: identity.name,
+        agent: identity.agent,
+        ...(stateFrame !== undefined && { stateFollows: true })
+      });
+      if (stateFrame !== undefined) this.#send(connection, stateFrame);
+    } finally {
+      this.#connecting.delete(connection);
+    }
+  }
+
+  /**
+   * Send the identity frame alone, unless the connection is no-protocol.
+   * Clients resolve `ready` on it, so a host that also pushes state on
+   * connect should use `sendConnectFrames()`. The defaults are the Durable
+   * Object's routed name and host class; a host whose public identity
+   * differs — an `Agent` facet, whose routed name is an internal encoding
+   * of its logical name — passes its own.
    */
   sendIdentity(
     connection: Connection,
-    identity: { name: string; agent: string } = {
-      name: this.lifecycle.name,
-      agent: camelCaseToKebabCase(this.lifecycle.className)
-    }
+    identity: { name: string; agent: string } = this.#defaultIdentity()
   ): void {
     if (!isConnectionProtocolEnabled(connection)) return;
     this.#sendFrame(connection, {
@@ -450,6 +510,13 @@ export class WebSockets extends LifecycleCapability {
       name: identity.name,
       agent: identity.agent
     });
+  }
+
+  #defaultIdentity(): { name: string; agent: string } {
+    return {
+      name: this.lifecycle.name,
+      agent: camelCaseToKebabCase(this.lifecycle.className)
+    };
   }
 
   /**
