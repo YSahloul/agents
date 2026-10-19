@@ -3304,23 +3304,33 @@ describe("VoiceAgent — interrupt", () => {
     ws.close();
   });
 
-  it("does not count model-detected speech as interrupt while already listening", async () => {
+  it("clears queued transport audio after an unaligned response finishes", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");
+    sendJSON(ws, { type: "_set_audio_transport", value: true });
+    await waitForAck(ws, "_set_audio_transport");
+    await startCall(ws);
 
-    sendJSON(ws, { type: "start_call" });
-    await waitForStatus(ws, "listening");
+    const completed = waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "text_message", text: "finished response" });
+    await completed;
+    const history = await getHistory(ws);
+    expect(history).toEqual([
+      { role: "user", content: "finished response" },
+      { role: "assistant", content: "Echo: finished response" }
+    ]);
 
-    ws.send(new ArrayBuffer(5000));
-    await waitForType(ws, "transcript_interim");
-
-    sendJSON(ws, { type: "_get_counts" });
-    const counts = (await waitForType(ws, "_counts")) as Record<
-      string,
-      unknown
-    >;
-    expect(counts.interrupt).toBe(0);
-
+    const interrupted = waitForType(ws, "playback_interrupt");
+    sendJSON(ws, { type: "_emit_speech_start", text: "stop" });
+    await interrupted;
+    expect(await waitForTransportEventCount(ws, "interrupt", 1)).toEqual([
+      expect.stringMatching(/^start:/),
+      expect.stringMatching(/^send:/),
+      "flush",
+      "interrupt"
+    ]);
+    expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
+    expect(await getHistory(ws)).toEqual(history);
     ws.close();
   });
 
@@ -3993,6 +4003,7 @@ describe("VoiceAgent — server audio transport", () => {
     await listeningAfterTurn;
     expect(await getTransportEvents(ws)).toEqual([
       expect.stringMatching(/^start:/),
+      "interrupt",
       expect.stringMatching(/^send:/),
       "flush"
     ]);

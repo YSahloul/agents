@@ -1682,18 +1682,6 @@ export function withVoice<TBase extends AgentLike>(
     ): void {
       const activePipeline = this.#cm.hasActivePipeline(connection.id);
       const pendingPlayback = this.#playback.has(connection.id);
-      if (!activePipeline && !pendingPlayback) {
-        console.log("[VoiceTrace]", {
-          event: "interrupt_trigger",
-          connectionId: connection.id,
-          trigger,
-          transcript: transcript ?? null,
-          activePipeline,
-          pendingPlayback,
-          action: "no_interruptible_output"
-        });
-        return;
-      }
 
       const interruptContext = this.#consumeInterruptedPlayback(connection);
       this.#cancelSpeculativeTurn(connection.id, "speech_start");
@@ -1703,6 +1691,8 @@ export function withVoice<TBase extends AgentLike>(
         "barge_in"
       );
       this.#cm.abortPipeline(connection.id);
+      // The carrier may still have queued audio after local generation ends.
+      this.#cm.clearAudioBuffer(connection.id);
       console.log("[VoiceTrace]", {
         event: "interrupt_trigger",
         connectionId: connection.id,
@@ -1713,7 +1703,9 @@ export function withVoice<TBase extends AgentLike>(
         action: "interrupt"
       });
       this.#sendJSON(connection, { type: "playback_interrupt" });
-      this.#sendJSON(connection, { type: "status", status: "listening" });
+      if (activePipeline || pendingPlayback) {
+        this.#sendJSON(connection, { type: "status", status: "listening" });
+      }
       runBackground("barge_in", async () => {
         try {
           await this.#audioTransports
