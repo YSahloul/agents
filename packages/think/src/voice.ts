@@ -260,6 +260,7 @@ export function createVoiceThink<
     #activeVoiceInput:
       | {
           connectionId: string;
+          signal: AbortSignal;
           transcript: string;
           metadata?: Record<string, unknown>;
           parentId: string | null;
@@ -321,22 +322,28 @@ export function createVoiceThink<
       if (this.#activeVoiceStream?.connectionId === connection.id) {
         this.#activeVoiceStream.discard();
       }
-      if (context.spokenText === undefined) {
-        await super.onInterrupt(connection, context);
-        return;
-      }
-
-      const activeVoiceTurn = this.#activeVoiceTurn;
       const activeVoiceInput =
         this.#activeVoiceInput?.connectionId === connection.id
           ? this.#activeVoiceInput
           : undefined;
+      // Ignore rejected eager drafts and idle interrupts with no playback.
+      if (
+        !activeVoiceInput ||
+        (context.spokenText === undefined && !activeVoiceInput.signal.aborted)
+      ) {
+        await super.onInterrupt(connection, context);
+        return;
+      }
+      const activeVoiceTurn = this.#activeVoiceTurn;
       const interruption = this.#voiceInterruption.then(async () => {
         await activeVoiceTurn;
         await this.#finalizeInterruptedAssistant(
           context.spokenText ?? "",
           activeVoiceInput
         );
+        if (this.#activeVoiceInput === activeVoiceInput) {
+          this.#activeVoiceInput = undefined;
+        }
       });
       this.#voiceInterruption = interruption;
       await interruption;
@@ -366,6 +373,7 @@ export function createVoiceThink<
       const metadata = this.getVoiceTurnMetadata(transcript, context);
       const input = {
         connectionId: context.connection.id,
+        signal: context.signal,
         transcript,
         metadata,
         parentId: (await this.session.getLatestLeaf())?.id ?? null
@@ -408,22 +416,14 @@ export function createVoiceThink<
 
     async #finalizeInterruptedAssistant(
       spokenText: string,
-      input:
-        | {
-            transcript: string;
-            metadata?: Record<string, unknown>;
-            parentId: string | null;
-          }
-        | undefined
+      input: {
+        transcript: string;
+        metadata?: Record<string, unknown>;
+        parentId: string | null;
+      }
     ): Promise<void> {
       let leaf = await this.session.getLatestLeaf();
       const text = spokenText.trim();
-      if (!input) {
-        if (leaf?.role === "assistant") {
-          await this.#replaceInterruptedAssistant(leaf as UIMessage, text);
-        }
-        return;
-      }
 
       if (leaf?.id !== input.parentId && leaf?.role === "assistant") {
         await this.#replaceInterruptedAssistant(leaf as UIMessage, text);
