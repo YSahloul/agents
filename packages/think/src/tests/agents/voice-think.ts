@@ -119,6 +119,15 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
+function textOf(message: UIMessage): string {
+  return (message.parts ?? [])
+    .filter(
+      (part): part is { type: "text"; text: string } => part.type === "text"
+    )
+    .map((part) => part.text)
+    .join("");
+}
+
 const VoiceThink = createVoiceThink({ channel: "voice" });
 
 export class ThinkVoiceTestAgent extends VoiceThink {
@@ -235,9 +244,79 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     await this.onInterrupt(connection, {
       spokenText
     } satisfies VoiceInterruptContext);
+    await this.waitUntilStable({ timeout: 5_000 });
     const stored = await this.session.getHistory();
     await this.runVoiceOnTurnForTest("follow up", "https://example.com/voice");
     return JSON.stringify({ stored, nextPrompt: this._lastPrompt });
+  }
+  async interruptCompletedVoiceTurnWithNewerHistoryForTest(): Promise<string> {
+    const connection = {
+      id: "completed-voice-test",
+      uri: "https://example.com/voice"
+    } as Connection;
+    const controller = new AbortController();
+    this._modelStarted = deferred<void>();
+    const output = await this.onTurn("owning question", {
+      connection,
+      messages: [],
+      signal: controller.signal
+    });
+    await this._modelStarted.promise;
+
+    await this.waitUntilStable({ timeout: 5_000 });
+    const stored = await this.getMessages();
+    const owner = stored.find(
+      (message) =>
+        message.role === "assistant" && textOf(message) === "voice answer"
+    );
+    if (!owner) throw new Error("voice answer was not persisted");
+
+    const unrelatedId = "unrelated-newer-response";
+    await this.appendMessageToHistory({
+      id: unrelatedId,
+      role: "assistant",
+      parts: [{ type: "text", text: "unrelated newer response" }]
+    });
+    controller.abort("caller interrupted pending playback");
+    const interrupted = this.onInterrupt(connection, {
+      spokenText: "acknowledged speech"
+    });
+
+    this._modelStarted = deferred<void>();
+    const followUpPromise = this.onTurn("follow up", {
+      connection,
+      messages: [],
+      signal: new AbortController().signal
+    });
+    const [followUp] = await Promise.all([followUpPromise, interrupted]);
+    await this._modelStarted.promise;
+    const nextPrompt = this._lastPrompt;
+    if (
+      typeof output !== "object" ||
+      output === null ||
+      !(Symbol.asyncIterator in output)
+    ) {
+      throw new TypeError("Expected an async Voice Think stream");
+    }
+    const next = await output[Symbol.asyncIterator]().next();
+    if (
+      typeof followUp !== "object" ||
+      followUp === null ||
+      !(Symbol.asyncIterator in followUp)
+    ) {
+      throw new TypeError("Expected an async Voice Think stream");
+    }
+    for await (const _chunk of followUp) {
+      // Drain the follow-up stream so this helper leaves no active playback.
+    }
+    await this.waitUntilStable({ timeout: 5_000 });
+    return JSON.stringify({
+      stored: await this.session.getHistory(),
+      ownerId: owner.id,
+      unrelatedId,
+      outputDiscarded: next.done,
+      nextPrompt
+    });
   }
 
   async runIdleVoiceInterruptForTest(): Promise<string> {
@@ -333,9 +412,18 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     confirmation?.resolve(true);
     await gate.started.promise;
     controller.abort("caller spoke over the running tool");
-    const interrupted = this.onInterrupt(connection, { spokenText });
+    const interrupted = Promise.resolve(
+      this.onInterrupt(connection, { spokenText })
+    );
+    let interruptionResolved = false;
+    void interrupted.then(() => {
+      interruptionResolved = true;
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const resolvesBeforeToolRelease = interruptionResolved;
     gate.release.resolve();
     await interrupted;
+    await this.waitUntilStable({ timeout: 5_000 });
     if (
       typeof output !== "object" ||
       output === null ||
@@ -347,7 +435,8 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     return JSON.stringify({
       stored: await this.session.getHistory(),
       toolExecutions: this._toolExecutions,
-      outputDiscarded: next.done
+      outputDiscarded: next.done,
+      resolvesBeforeToolRelease
     });
   }
 

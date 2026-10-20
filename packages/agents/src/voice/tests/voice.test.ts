@@ -3141,6 +3141,30 @@ describe("VoiceAgent — speculative turn lifecycle", () => {
     ws.close();
   });
 
+  it.each(["_emit_speech_start", "interrupt"])(
+    "notifies interruption without waiting for transport clearing (%s)",
+    async (type) => {
+      const { ws } = await connectWS(uniquePath());
+      await waitForStatus(ws, "idle");
+      sendJSON(ws, { type: "_set_audio_transport", value: true });
+      await waitForAck(ws, "_set_audio_transport");
+      await startCall(ws);
+      sendJSON(ws, { type: "_hold_transport_interrupt" });
+      await waitForAck(ws, "_hold_transport_interrupt");
+
+      const interrupted = waitForType(ws, "playback_interrupt");
+      sendJSON(ws, { type, text: "stop" });
+      await interrupted;
+      expect((await waitForInterruptCount(ws, 1)).interrupt).toBe(1);
+      expect(await getTransportEvents(ws)).not.toContain("interrupt_settled");
+
+      sendJSON(ws, { type: "_release_transport_interrupt" });
+      await waitForAck(ws, "_release_transport_interrupt");
+      await waitForTransportEventCount(ws, "interrupt_settled", 1);
+      ws.close();
+    }
+  );
+
   it("rejects active assistant echo before accepting real barge-in", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");

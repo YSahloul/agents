@@ -101,15 +101,51 @@ class VoiceChannelTextStream implements AsyncIterable<unknown> {
   #pendingPosts = 0;
   #postTail: Promise<void> = Promise.resolve();
   #closed = false;
+  message?: UIMessage;
+  interruptedText?: string;
 
   constructor(
     callback: TextStreamCallback,
     policy: VoiceChannelDefinition["delivery"],
-    readonly connectionId: string
+    readonly connectionId: string,
+    readonly signal: AbortSignal
   ) {
     this.#callback = callback;
     this.#policy = policy;
     void this.#pump();
+  }
+
+  ownsRequest(requestId: string): boolean {
+    return this.#callback.requestId() === requestId;
+  }
+
+  prepareMessage(message: UIMessage): UIMessage | null {
+    this.message = message;
+    if (this.interruptedText === undefined) return message;
+    let insertedText = false;
+    const parts: UIMessage["parts"] = [];
+    for (const part of message.parts) {
+      if (part.type !== "text") {
+        parts.push(part);
+      } else if (!insertedText && this.interruptedText) {
+        parts.push({ type: "text", text: this.interruptedText });
+        insertedText = true;
+      }
+    }
+    if (!insertedText && this.interruptedText) {
+      parts.push({ type: "text", text: this.interruptedText });
+    }
+    if (!parts.some((part) => part.type !== "step-start")) return null;
+    return {
+      ...message,
+      parts,
+      metadata: {
+        ...(message.metadata && typeof message.metadata === "object"
+          ? message.metadata
+          : {}),
+        interrupted: true
+      }
+    };
   }
 
   async post(
@@ -253,19 +289,9 @@ export function createVoiceThink<
   const VoiceBase = withVoice(ThinkBase, voiceOptions);
 
   class VoiceThink extends VoiceBase {
-    #activeVoiceStream?: VoiceChannelTextStream;
+    #voiceOutputs = new Map<string, VoiceChannelTextStream>();
+    #voiceTurns = new Set<VoiceChannelTextStream>();
     #voiceConnections = new Set<string>();
-    #activeVoiceTurn: Promise<void> | null = null;
-    #voiceInterruption: Promise<void> = Promise.resolve();
-    #activeVoiceInput:
-      | {
-          connectionId: string;
-          signal: AbortSignal;
-          transcript: string;
-          metadata?: Record<string, unknown>;
-          parentId: string | null;
-        }
-      | undefined;
 
     override async beforeCallStart(
       connection: Parameters<VoiceAgentMixinMembers["beforeCallStart"]>[0]
@@ -285,13 +311,8 @@ export function createVoiceThink<
     override async onCallEnd(
       connection: Parameters<VoiceAgentMixinMembers["onCallEnd"]>[0]
     ): Promise<void> {
-      if (this.#activeVoiceStream?.connectionId === connection.id) {
-        this.#activeVoiceStream.discard();
-      }
-      this.#voiceInterruption = Promise.resolve();
-      if (this.#activeVoiceInput?.connectionId === connection.id) {
-        this.#activeVoiceInput = undefined;
-      }
+      this.#voiceOutputs.get(connection.id)?.discard();
+      this.#voiceOutputs.delete(connection.id);
       this.#voiceConnections.delete(connection.id);
       await super.onCallEnd(connection);
     }
@@ -299,13 +320,9 @@ export function createVoiceThink<
     onClose(
       connection: Parameters<VoiceAgentMixinMembers["beforeCallStart"]>[0]
     ): void {
-      if (this.#activeVoiceStream?.connectionId === connection.id) {
-        this.#activeVoiceStream.discard();
-      }
+      this.#voiceOutputs.get(connection.id)?.discard();
+      this.#voiceOutputs.delete(connection.id);
       this.#voiceConnections.delete(connection.id);
-      if (this.#activeVoiceInput?.connectionId === connection.id) {
-        this.#activeVoiceInput = undefined;
-      }
     }
 
     getVoiceTurnMetadata(
@@ -319,42 +336,49 @@ export function createVoiceThink<
       connection: Parameters<VoiceAgentMixinMembers["onInterrupt"]>[0],
       context: VoiceInterruptContext
     ): Promise<void> {
-      if (this.#activeVoiceStream?.connectionId === connection.id) {
-        this.#activeVoiceStream.discard();
-      }
-      const activeVoiceInput =
-        this.#activeVoiceInput?.connectionId === connection.id
-          ? this.#activeVoiceInput
-          : undefined;
-      // Ignore rejected eager drafts and idle interrupts with no playback.
+      const stream = this.#voiceOutputs.get(connection.id);
+      stream?.discard();
       if (
-        !activeVoiceInput ||
-        (context.spokenText === undefined && !activeVoiceInput.signal.aborted)
+        stream &&
+        (context.spokenText !== undefined || stream.signal.aborted)
       ) {
-        await super.onInterrupt(connection, context);
-        return;
-      }
-      const activeVoiceTurn = this.#activeVoiceTurn;
-      const interruption = this.#voiceInterruption.then(async () => {
-        await activeVoiceTurn;
-        await this.#finalizeInterruptedAssistant(
-          context.spokenText ?? "",
-          activeVoiceInput
-        );
-        if (this.#activeVoiceInput === activeVoiceInput) {
-          this.#activeVoiceInput = undefined;
+        this.#voiceOutputs.delete(connection.id);
+        stream.interruptedText = (context.spokenText ?? "").trim();
+        // An in-flight reply is prepared by Think's normal persistence path.
+        // If it already committed, update its own row, never the latest leaf.
+        if (stream.message) {
+          const stored = await this.session.getMessage(stream.message.id);
+          if (stored) {
+            const message = stream.prepareMessage(stored as UIMessage);
+            if (message) {
+              await this.updateMessageInHistory(message);
+            } else {
+              await this.session.deleteMessages([stored.id]);
+            }
+          }
         }
-      });
-      this.#voiceInterruption = interruption;
-      await interruption;
+      }
       await super.onInterrupt(connection, context);
+    }
+
+    protected override _strippedForPersist(
+      message: UIMessage
+    ): UIMessage | null {
+      const prepared = super._strippedForPersist(message);
+      const requestId = this.activeTurn?.requestId;
+      if (!prepared || !requestId) return prepared;
+      for (const stream of this.#voiceTurns) {
+        if (stream.ownsRequest(requestId)) {
+          return stream.prepareMessage(prepared);
+        }
+      }
+      return prepared;
     }
 
     async onTurn(
       transcript: string,
       context: VoiceTurnContext
     ): Promise<AsyncIterable<unknown>> {
-      await this.#voiceInterruption;
       const definition = voiceDefinition(
         this.getChannelDefinition(channel),
         channel
@@ -365,32 +389,15 @@ export function createVoiceThink<
       const stream = new VoiceChannelTextStream(
         callback,
         definition.delivery,
-        context.connection.id
+        context.connection.id,
+        context.signal
       );
-      const previous = this.#activeVoiceStream;
-      this.#activeVoiceStream = stream;
-      const restore = this.bindActiveDeliverySurface(stream);
+      this.#voiceOutputs.set(context.connection.id, stream);
+      this.#voiceTurns.add(stream);
       const metadata = this.getVoiceTurnMetadata(transcript, context);
-      const input = {
-        connectionId: context.connection.id,
-        signal: context.signal,
-        transcript,
-        metadata,
-        parentId: (await this.session.getLatestLeaf())?.id ?? null
-      };
-      this.#activeVoiceInput = undefined;
-      if (context.confirmation) {
-        void context.confirmation.then((confirmed) => {
-          if (confirmed && this.#activeVoiceStream === stream) {
-            this.#activeVoiceInput = input;
-          }
-        });
-      } else {
-        this.#activeVoiceInput = input;
-      }
       // The voice signal stops playback, not confirmed Think tools. A rejected
       // eager draft is canceled by its confirmation resolving false.
-      const activeVoiceTurn = this.runTurn({
+      void this.runTurn({
         input: transcript,
         channel,
         mode: "stream",
@@ -400,100 +407,9 @@ export function createVoiceThink<
       })
         .catch((error: unknown) => callback.fail(error))
         .finally(() => {
-          restore();
-          this.#activeVoiceStream = previous;
+          this.#voiceTurns.delete(stream);
         });
-      this.#activeVoiceTurn = activeVoiceTurn;
-      void activeVoiceTurn
-        .finally(() => {
-          if (this.#activeVoiceTurn === activeVoiceTurn) {
-            this.#activeVoiceTurn = null;
-          }
-        })
-        .catch(() => undefined);
       return stream;
-    }
-
-    async #finalizeInterruptedAssistant(
-      spokenText: string,
-      input: {
-        transcript: string;
-        metadata?: Record<string, unknown>;
-        parentId: string | null;
-      }
-    ): Promise<void> {
-      let leaf = await this.session.getLatestLeaf();
-      const text = spokenText.trim();
-
-      if (leaf?.id !== input.parentId && leaf?.role === "assistant") {
-        await this.#replaceInterruptedAssistant(leaf as UIMessage, text);
-        return;
-      }
-
-      if ((!leaf && input.parentId === null) || leaf?.id === input.parentId) {
-        leaf = await this.appendMessageToHistory(
-          {
-            id: crypto.randomUUID(),
-            role: "user",
-            parts: [{ type: "text", text: input.transcript }],
-            metadata: {
-              channel,
-              ...(input.metadata ? { turnMetadata: input.metadata } : {})
-            }
-          },
-          input.parentId
-        );
-      }
-      if (!text || leaf?.role !== "user") return;
-      await this.appendMessageToHistory(
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          parts: [{ type: "text", text }],
-          metadata: { interrupted: true }
-        },
-        leaf.id
-      );
-    }
-
-    async #replaceInterruptedAssistant(
-      message: UIMessage,
-      text: string
-    ): Promise<void> {
-      if (
-        !text &&
-        !message.parts.some(
-          (part) =>
-            part.type.startsWith("tool-") || part.type === "dynamic-tool"
-        )
-      ) {
-        await this.session.deleteMessages([message.id]);
-        return;
-      }
-      let insertedText = false;
-      const parts: UIMessage["parts"] = [];
-      for (const part of message.parts) {
-        if (part.type !== "text") {
-          parts.push(part);
-        } else if (!insertedText && text) {
-          parts.push({ type: "text", text });
-          insertedText = true;
-        }
-      }
-      if (!insertedText && text) parts.push({ type: "text", text });
-      await this.updateMessageInHistory({
-        ...message,
-        role: "assistant",
-        parts,
-        metadata: {
-          ...(message.metadata &&
-          typeof message.metadata === "object" &&
-          !Array.isArray(message.metadata)
-            ? message.metadata
-            : {}),
-          interrupted: true
-        }
-      } as UIMessage);
     }
 
     protected override async resolveChannelDeliverySurface(
@@ -502,6 +418,12 @@ export function createVoiceThink<
     ): Promise<ChannelDeliverySurface | undefined> {
       if (channelId !== channel) {
         return super.resolveChannelDeliverySurface(channelId, thread);
+      }
+      const requestId = this.activeTurn?.requestId;
+      if (requestId) {
+        for (const stream of this.#voiceTurns) {
+          if (stream.ownsRequest(requestId)) return stream;
+        }
       }
       if (this.#voiceConnections.size === 0) return undefined;
       return {

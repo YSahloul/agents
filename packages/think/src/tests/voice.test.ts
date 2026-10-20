@@ -102,6 +102,7 @@ describe("Think voice adapter", () => {
         stored: UIMessage[];
         toolExecutions: number;
         outputDiscarded: boolean;
+        resolvesBeforeToolRelease: boolean;
       };
 
       expect(result.toolExecutions).toBe(1);
@@ -120,15 +121,17 @@ describe("Think voice adapter", () => {
         ])
       );
       expect(textOf(result.stored[1])).toBe(spokenText ?? "");
+      expect(result.resolvesBeforeToolRelease).toBe(true);
     }
   );
 
   it("replaces an interrupted assistant response with acknowledged speech", async () => {
     const agent = await freshAgent(`voice-interrupted-${crypto.randomUUID()}`);
 
-    const { stored: messages } = JSON.parse(
+    const { stored: messages, nextPrompt } = JSON.parse(
       await agent.reconcileInterruptedVoiceTurnForTest("voice")
-    ) as { stored: UIMessage[] };
+    ) as { stored: UIMessage[]; nextPrompt: unknown };
+    const prompt = JSON.stringify(nextPrompt);
     expect(messages.map((message) => message.role)).toEqual([
       "user",
       "assistant"
@@ -136,6 +139,42 @@ describe("Think voice adapter", () => {
     expect(textOf(messages[0])).toBe("interrupted question");
     expect(textOf(messages[1])).toBe("voice");
     expect(messages[1].metadata).toMatchObject({ interrupted: true });
+    expect(prompt).toContain("interrupted question");
+    expect(prompt).toContain("voice");
+    expect(prompt).toContain("follow up");
+    expect(prompt).not.toContain("voice answer");
+  });
+  it("interrupts the owning completed response, not newer history", async () => {
+    const agent = await freshAgent(`voice-owner-${crypto.randomUUID()}`);
+    const result = JSON.parse(
+      await agent.interruptCompletedVoiceTurnWithNewerHistoryForTest()
+    ) as {
+      stored: UIMessage[];
+      ownerId: string;
+      unrelatedId: string;
+      outputDiscarded: boolean;
+      nextPrompt: unknown;
+    };
+
+    const owner = result.stored.find(
+      (message) => message.id === result.ownerId
+    );
+    const unrelated = result.stored.find(
+      (message) => message.id === result.unrelatedId
+    );
+    expect(owner).toBeDefined();
+    expect(textOf(owner)).toBe("acknowledged speech");
+    expect(owner?.metadata).toMatchObject({ interrupted: true });
+    expect(unrelated).toEqual({
+      id: result.unrelatedId,
+      role: "assistant",
+      parts: [{ type: "text", text: "unrelated newer response" }]
+    });
+    expect(result.outputDiscarded).toBe(true);
+    const nextPrompt = JSON.stringify(result.nextPrompt);
+    expect(nextPrompt).toContain("unrelated newer response");
+    expect(nextPrompt).toContain("acknowledged speech");
+    expect(nextPrompt).not.toContain("voice answer");
   });
 
   it.each([false, true])(

@@ -15687,7 +15687,7 @@ export class Think<
    * Shared by `_persistAssistantMessage` and the orphan-persist path so the rule
    * cannot drift between the live and recovery writes.
    */
-  private _strippedForPersist(msg: UIMessage): UIMessage | null {
+  protected _strippedForPersist(msg: UIMessage): UIMessage | null {
     const stripped = this._stripInternalFinalAnswerParts(msg);
     if (stripped === msg) return msg;
     const hasMeaningfulParts = stripped.parts.some(

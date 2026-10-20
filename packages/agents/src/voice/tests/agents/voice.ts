@@ -172,6 +172,7 @@ class ControlledTestStreamingTTS
 class TestAudioTransport implements VoiceServerAudioTransport {
   events: string[] = [];
   #onAudio: ((audio: ArrayBuffer) => void) | null = null;
+  interruptGate: ReturnType<typeof Promise.withResolvers<void>> | undefined;
 
   start(connectionId: string, onAudio: (audio: ArrayBuffer) => void): void {
     this.events.push(`start:${connectionId}`);
@@ -186,8 +187,12 @@ class TestAudioTransport implements VoiceServerAudioTransport {
     this.events.push("flush");
   }
 
-  interrupt(_connectionId: string): void {
+  async interrupt(_connectionId: string): Promise<void> {
     this.events.push("interrupt");
+    if (this.interruptGate) {
+      await this.interruptGate.promise;
+      this.events.push("interrupt_settled");
+    }
   }
 
   stop(_connectionId: string): void {
@@ -953,6 +958,18 @@ export class TestVoiceAgent extends VoiceBase {
         case "_set_audio_transport":
           this.#useAudioTransport = parsed.value === true;
           this.#audioTransport = new TestAudioTransport();
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_hold_transport_interrupt":
+          this.#audioTransport.interruptGate = Promise.withResolvers<void>();
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_release_transport_interrupt":
+          this.#audioTransport.interruptGate?.resolve();
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
           );

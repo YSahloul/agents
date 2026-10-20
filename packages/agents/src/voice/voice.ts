@@ -1666,13 +1666,11 @@ export function withVoice<TBase extends AgentLike>(
       this.#cm.clearAudioBuffer(connection.id);
       this.#sendJSON(connection, { type: "playback_interrupt" });
       this.#sendJSON(connection, { type: "status", status: "listening" });
-      try {
-        await this.#audioTransports
-          .get(connection.id)
-          ?.interrupt(connection.id);
-      } finally {
-        await this.onInterrupt(connection, interruptContext);
-      }
+      await Promise.all([
+        (async () => this.onInterrupt(connection, interruptContext))(),
+        (async () =>
+          this.#audioTransports.get(connection.id)?.interrupt(connection.id))()
+      ]);
     }
 
     #handleBargeIn(
@@ -1707,13 +1705,13 @@ export function withVoice<TBase extends AgentLike>(
         this.#sendJSON(connection, { type: "status", status: "listening" });
       }
       runBackground("barge_in", async () => {
-        try {
-          await this.#audioTransports
-            .get(connection.id)
-            ?.interrupt(connection.id);
-        } finally {
-          await this.onInterrupt(connection, interruptContext);
-        }
+        await Promise.all([
+          (async () => this.onInterrupt(connection, interruptContext))(),
+          (async () =>
+            this.#audioTransports
+              .get(connection.id)
+              ?.interrupt(connection.id))()
+        ]);
       });
     }
 

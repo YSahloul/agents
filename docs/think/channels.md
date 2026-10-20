@@ -80,10 +80,14 @@ transient transcript. The turn is not persisted or delivered, and tools cannot
 execute, until the transcriber confirms end-of-turn. A resumed or interrupted
 hypothesis is discarded without removing any previously stored messages.
 After confirmation, barge-in stops voice output without canceling Think's
-running tools. Before the next voice turn, Think waits for the interrupted turn
-to finish and replaces its assistant text with acknowledged speech, retaining
-completed tool parts. If playback acknowledgement is unavailable, Think removes
-the interrupted response text rather than treating generated text as heard.
+running tools. Think's normal turn queue orders subsequent input, and its
+assistant-persistence path retains completed tool parts while limiting
+interrupted text to acknowledged speech. An interrupted active response with
+no playback acknowledgement contributes no assistant text to history.
+If generation has already finished but acknowledged playback is still pending,
+the interruption updates that response's saved message by ID, not the latest
+message in the conversation. Interruption notification does not wait for tool
+execution or asynchronous transport clearing to finish.
 
 ### SFU WebRTC voice
 
