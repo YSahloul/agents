@@ -23,6 +23,7 @@
     "editor.defaultFormatter": "oxc.oxc-vscode"
   },
   "files.exclude": {
+    "**/.jj": true,
     "node_modules": true,
     ".vscode": true,
     ".husky": true,
