@@ -597,7 +597,42 @@ describe("WorkersAIFluxSTT", () => {
     ]);
   });
 
-  it("reports one fatal error for an unexpected socket error and close", async () => {
+  it("reopens the socket after an unexpected close and keeps transcribing", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ai = new MockAi();
+    const fatalErrors: unknown[] = [];
+    const utterances: string[] = [];
+    try {
+      const session = new WorkersAIFluxSTT(ai).createSession({
+        onFatalError: (error) => fatalErrors.push(error),
+        onUtterance: (text) => utterances.push(text)
+      });
+      await session.waitUntilReady?.();
+      const dropped = ai.sockets[0];
+
+      dropped.dispatch("close", { code: 1011, reason: "NET-0001" } as never);
+      const chunk = new ArrayBuffer(4);
+      session.feed(chunk);
+      await vi.waitFor(() => expect(ai.sockets[1]?.sent).toEqual([chunk]));
+
+      dropped.message(
+        JSON.stringify({ event: "EndOfTurn", transcript: "stale" })
+      );
+      ai.sockets[1].message(
+        JSON.stringify({ event: "EndOfTurn", transcript: "two tacos" })
+      );
+
+      expect(utterances).toEqual(["two tacos"]);
+      expect(fatalErrors).toEqual([]);
+      expect(JSON.stringify(errorLog.mock.calls)).toContain(
+        "code 1011: NET-0001"
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("reports one fatal error after the reconnect limit, counting error-then-close once", async () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const ai = new MockAi();
     const fatalErrors: unknown[] = [];
@@ -606,14 +641,18 @@ describe("WorkersAIFluxSTT", () => {
         onFatalError: (error) => fatalErrors.push(error)
       });
       await session.waitUntilReady?.();
-      const socket = ai.sockets[0];
 
-      socket.dispatch("error", {});
-      socket.close();
+      for (let lost = 1; lost <= 4; lost++) {
+        await vi.waitFor(() => expect(ai.sockets).toHaveLength(lost));
+        const socket = ai.sockets[lost - 1];
+        await vi.waitFor(() => expect(socket.accepted).toBe(true));
+        socket.dispatch("error", {});
+        socket.close();
+      }
       session.close();
 
+      expect(ai.sockets).toHaveLength(4);
       expect(fatalErrors).toHaveLength(1);
-      expect(fatalErrors[0]).toBeInstanceOf(Error);
       expect((fatalErrors[0] as Error).message).toBe(
         "Workers AI Flux STT WebSocket error"
       );
@@ -622,7 +661,7 @@ describe("WorkersAIFluxSTT", () => {
     }
   });
 
-  it("reports one fatal error for an unexpected socket error and close", async () => {
+  it("reports a fatal error when reopening the socket fails", async () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const ai = new MockAi();
     const fatalErrors: unknown[] = [];
@@ -631,17 +670,12 @@ describe("WorkersAIFluxSTT", () => {
         onFatalError: (error) => fatalErrors.push(error)
       });
       await session.waitUntilReady?.();
-      const socket = ai.sockets[0];
 
-      socket.dispatch("error", {});
-      socket.close();
-      session.close();
+      ai.mode = "throw";
+      ai.sockets[0].close();
 
-      expect(fatalErrors).toHaveLength(1);
-      expect(fatalErrors[0]).toBeInstanceOf(Error);
-      expect((fatalErrors[0] as Error).message).toBe(
-        "Workers AI Flux STT WebSocket error"
-      );
+      await vi.waitFor(() => expect(fatalErrors).toHaveLength(1));
+      expect((fatalErrors[0] as Error).message).toBe("run failed");
     } finally {
       errorLog.mockRestore();
     }

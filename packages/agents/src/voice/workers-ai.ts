@@ -843,6 +843,8 @@ interface FluxEvent {
   transcript?: string;
 }
 
+const MAX_FLUX_RECONNECTS = 3;
+
 /**
  * Per-call Flux transcription session. Lives for the entire call.
  *
@@ -866,6 +868,7 @@ class FluxSession implements TranscriberSession {
   #connected = false;
   #closed = false;
   #fatalReported = false;
+  #reconnects = 0;
 
   #pendingChunks: ArrayBuffer[] = [];
 
@@ -948,36 +951,28 @@ class FluxSession implements TranscriberSession {
       this.#connected = true;
 
       ws.addEventListener("message", (event: MessageEvent) => {
+        if (this.#ws !== ws) return;
         this.#handleMessage(event);
       });
 
-      ws.addEventListener("close", () => {
-        this.#connected = false;
-        if (this.#closed) return;
-        const error = new Error(
-          "Workers AI Flux STT WebSocket closed unexpectedly"
+      ws.addEventListener("close", (event: CloseEvent) => {
+        const detail = event.reason
+          ? `${event.code}: ${event.reason}`
+          : `${event.code}`;
+        this.#socketLost(
+          ws,
+          "websocket_close",
+          `Workers AI Flux STT WebSocket closed unexpectedly (code ${detail})`
         );
-        logVoiceError({
-          component: "FluxSTT",
-          stage: "websocket_close",
-          message: "Flux STT WebSocket closed unexpectedly",
-          error
-        });
-        this.#reportFatal(error);
       });
 
       ws.addEventListener("error", (event: Event) => {
-        const error = new Error("Workers AI Flux STT WebSocket error", {
-          cause: event
-        });
-        logVoiceError({
-          component: "FluxSTT",
-          stage: "websocket",
-          message: "Flux STT WebSocket error",
-          error
-        });
-        this.#connected = false;
-        this.#reportFatal(error);
+        this.#socketLost(
+          ws,
+          "websocket",
+          "Workers AI Flux STT WebSocket error",
+          event
+        );
       });
 
       for (const chunk of this.#pendingChunks) {
@@ -1038,6 +1033,41 @@ class FluxSession implements TranscriberSession {
     this.#resolveReady = null;
     this.#rejectReady = null;
     reject(reason);
+  }
+
+  // Workers AI can drop a Flux socket mid-call. Losing transcription must not end the call, so
+  // open a new socket; audio fed meanwhile waits in #pendingChunks. Only a failed reopen is fatal.
+  // ponytail: fixed per-session cap, no backoff; add backoff if Workers AI refuses fast retries.
+  #socketLost(
+    ws: WebSocket,
+    stage: string,
+    message: string,
+    cause?: unknown
+  ): void {
+    if (this.#ws !== ws) return;
+    this.#ws = null;
+    this.#connected = false;
+    if (this.#closed) return;
+    const error = new Error(message, cause ? { cause } : undefined);
+    const reconnect = this.#reconnects < MAX_FLUX_RECONNECTS;
+    logVoiceError({
+      component: "FluxSTT",
+      stage,
+      message: reconnect
+        ? `${message}; reconnecting (${++this.#reconnects}/${MAX_FLUX_RECONNECTS})`
+        : message,
+      error
+    });
+    if (!reconnect) {
+      this.#reportFatal(error);
+      return;
+    }
+    try {
+      ws.close();
+    } catch {
+      // already closed
+    }
+    void this.#connect();
   }
 
   #reportFatal(error: Error): void {
