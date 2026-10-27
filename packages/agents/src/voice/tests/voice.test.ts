@@ -216,7 +216,7 @@ async function setTurnMode(
 
 async function setTtsMode(
   ws: WebSocket,
-  value: "normal" | "controlled" | "aligned"
+  value: "normal" | "controlled" | "aligned" | "unaligned"
 ): Promise<void> {
   sendJSON(ws, { type: "_set_tts_mode", value });
   await waitForAck(ws, "_set_tts_mode");
@@ -3302,6 +3302,49 @@ describe("VoiceAgent — interrupt", () => {
       { role: "user", content: "question" },
       { role: "assistant", content: "Echo:" }
     ]);
+    ws.close();
+  });
+
+  it("keeps the carrier-acknowledged part of unaligned speech after barge-in", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+    await setTtsMode(ws, "unaligned");
+    sendJSON(ws, { type: "start_call", playback_checkpoints: true });
+    await waitForStatus(ws, "listening");
+    const recording = recordSocket(ws);
+
+    // "Echo: One two three." (20 bytes) then "Four five six seven eight nine ten."
+    // (35 bytes), streamed in 8-byte chunks: checkpoints 1-3, then 4-8.
+    const text = "One two three. Four five six seven eight nine ten.";
+    const replied = waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "text_message", text });
+    await replied;
+    const checkpoints = recording.messages.filter(
+      (message) => message.type === "playback_checkpoint"
+    );
+    expect(checkpoints.map((message) => message.sequence)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8
+    ]);
+
+    // The carrier has played the first sentence and 16 of the second's 35 bytes.
+    sendJSON(ws, {
+      type: "playback_checkpoint_ack",
+      playback_id: checkpoints[4].playback_id,
+      sequence: 5
+    });
+    const interrupted = waitForType(ws, "playback_interrupt");
+    sendJSON(ws, { type: "_emit_speech_start", text: "stop" });
+    await interrupted;
+    const counts = await waitForInterruptCount(ws, 1);
+
+    expect(counts.interruptedText).toEqual([
+      "Echo: One two three. Four five six"
+    ]);
+    expect(await getHistory(ws)).toEqual([
+      { role: "user", content: text },
+      { role: "assistant", content: "Echo: One two three. Four five six" }
+    ]);
+    recording.stop();
     ws.close();
   });
 
