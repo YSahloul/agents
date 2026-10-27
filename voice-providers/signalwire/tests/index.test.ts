@@ -247,6 +247,14 @@ describe("SignalWireAdapter.handleRequest", () => {
     ]);
   });
 
+  it("marks start_call resumed when the stream continues a call", async () => {
+    const harness = createHarness({ resumed: true });
+    await startCall(harness);
+    expect(harness.agentSocket.jsonSent).toEqual([
+      { type: "start_call", playback_checkpoints: true, resumed: true }
+    ]);
+  });
+
   it("uses the SignalWire callSid as the agent instance name by default", async () => {
     const harness = createHarness();
     await startCall(harness, "call-abc");

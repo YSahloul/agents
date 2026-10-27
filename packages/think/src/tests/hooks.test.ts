@@ -129,6 +129,18 @@ describe("Think — beforeTurn hook", () => {
     expect(log[0].toolNames).toContain("write");
   });
 
+  it("sends the authored system prompt alone when includeCapabilityPrompt is false", async () => {
+    const agent = await freshAgent("hook-bt-no-capability");
+    await agent.setIncludeCapabilityPromptForTest(false);
+    await agent.testChat("Hello");
+
+    const log = await agent.getBeforeTurnLog();
+    expect(log[0].system).toContain("You are a careful, capable assistant");
+    expect(log[0].system).not.toContain(
+      "You are running inside a Think agent."
+    );
+  });
+
   it("fires on every turn", async () => {
     const agent = await freshAgent("hook-bt-multi");
     await agent.testChat("First");

@@ -138,7 +138,9 @@ SignalWireAdapter.handleRequest(request, env, "MyAgent", {
   ambientAudio: new Uint8Array(
     await env.AMBIENCE.get("office.ulaw").then((r) => r!.arrayBuffer())
   ),
-  ambientVolume: 0.15
+  ambientVolume: 0.15,
+  // This stream continues an existing call (e.g. caller returning from a transfer).
+  resumed: true
 });
 ```
 
@@ -149,3 +151,7 @@ stopping the ambient bed.
 
 Without `instanceName`, each SignalWire Call SID maps to a separate Durable
 Object instance. Without `ambientAudio`, outbound behavior is unchanged.
+
+With `resumed: true`, `start_call` carries `resumed: true`, so the agent's
+`onCallStart(connection, { resumed })` continues the same call instead of
+starting a new one.

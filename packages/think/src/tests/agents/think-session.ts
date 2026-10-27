@@ -1823,6 +1823,10 @@ export class ThinkTestAgent extends Think {
     this.sendReasoning = sendReasoning;
   }
 
+  async setIncludeCapabilityPromptForTest(include: boolean): Promise<void> {
+    this.includeCapabilityPrompt = include;
+  }
+
   /**
    * Set a `TurnConfig.output` override using the AI SDK's `Output.text()`
    * helper. The Output spec contains promises and other non-cloneable

@@ -3531,6 +3531,15 @@ export class Think<
   includeMcpTools = true;
 
   /**
+   * Whether Think appends its "You are running inside a Think agent" capability
+   * block to the system prompt. Set to `false` to send the authored prompt
+   * byte-for-byte.
+   *
+   * @default true
+   */
+  includeCapabilityPrompt = true;
+
+  /**
    * Wait for MCP server connections to be ready before the inference loop.
    * When {@link includeMcpTools} is enabled, their tools are then auto-merged
    * into the tool set.
@@ -6135,7 +6144,10 @@ export class Think<
   }
 
   private _systemPromptForTurn(baseSystem: string, tools: ToolSet): string {
-    if (baseSystem.includes("You are running inside a Think agent.")) {
+    if (
+      !this.includeCapabilityPrompt ||
+      baseSystem.includes("You are running inside a Think agent.")
+    ) {
       return baseSystem;
     }
 

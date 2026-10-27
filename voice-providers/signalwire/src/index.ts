@@ -54,6 +54,8 @@ export interface SignalWireAdapterOptions {
   ambientAudio?: Uint8Array;
   /** Ambient mix level from 0 to 1. Defaults to 0.15. */
   ambientVolume?: number;
+  /** Send `start_call` with `resumed: true`: the agent continues the same call. */
+  resumed?: boolean;
 }
 
 /**
@@ -418,7 +420,11 @@ export class SignalWireAdapter {
       });
 
       ws.send(
-        JSON.stringify({ type: "start_call", playback_checkpoints: true })
+        JSON.stringify({
+          type: "start_call",
+          playback_checkpoints: true,
+          ...(options?.resumed ? { resumed: true } : {})
+        })
       );
     };
 
