@@ -1685,16 +1685,12 @@ export function withVoice<TBase extends AgentLike>(
       connection: Connection,
       trigger: string
     ): Promise<void> {
-      const activePipeline = this.#cm.hasActivePipeline(connection.id);
-      const pendingPlayback = this.#playback.has(connection.id);
       const interruptContext = this.#consumeInterruptedPlayback(connection);
       console.log("[VoiceTrace]", {
         event: "interrupt_trigger",
         connectionId: connection.id,
         trigger,
         transcript: null,
-        activePipeline,
-        pendingPlayback,
         action: "interrupt"
       });
       this.#abortInputTurn(connection, "client_interrupt");
@@ -1720,9 +1716,6 @@ export function withVoice<TBase extends AgentLike>(
       trigger: "onSpeechStart",
       transcript?: string
     ): void {
-      const activePipeline = this.#cm.hasActivePipeline(connection.id);
-      const pendingPlayback = this.#playback.has(connection.id);
-
       const interruptContext = this.#consumeInterruptedPlayback(connection);
       this.#cancelSpeculativeTurn(connection.id, "speech_start");
       this.#requestActiveTurnAbort(
@@ -1738,14 +1731,10 @@ export function withVoice<TBase extends AgentLike>(
         connectionId: connection.id,
         trigger,
         transcript: transcript ?? null,
-        activePipeline,
-        pendingPlayback,
         action: "interrupt"
       });
       this.#sendJSON(connection, { type: "playback_interrupt" });
-      if (activePipeline || pendingPlayback) {
-        this.#sendJSON(connection, { type: "status", status: "listening" });
-      }
+      this.#sendJSON(connection, { type: "status", status: "listening" });
       runBackground("barge_in", async () => {
         await Promise.all([
           (async () => this.onInterrupt(connection, interruptContext))(),

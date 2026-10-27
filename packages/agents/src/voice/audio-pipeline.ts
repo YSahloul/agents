@@ -178,10 +178,6 @@ export class AudioConnectionManager {
   }
 
   // --- Pipeline abort ---
-  hasActivePipeline(connectionId: string): boolean {
-    return this.#activePipeline.has(connectionId);
-  }
-
   /**
    * Abort any in-flight pipeline and create a new AbortController.
    * Returns the new AbortSignal.
