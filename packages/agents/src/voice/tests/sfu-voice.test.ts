@@ -40,7 +40,7 @@ function post(path: string, body?: unknown): Request {
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("withSFUVoice", () => {
+describe("withSFUVoiceTransport", () => {
   it("composes transport-only SFU after one Voice mixin", async () => {
     const name = crypto.randomUUID();
     const stub = transportVoiceStub(name);

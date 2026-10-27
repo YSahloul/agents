@@ -13,7 +13,7 @@ import {
   type TextSource,
   type VoiceInterruptContext,
   type VoiceTurnContext
-} from "../../voice";
+} from "../..";
 import type {
   TTSProvider,
   StreamingTTSProvider,

@@ -1,19 +1,10 @@
 import type { Connection } from "../index";
-import {
-  withVoice,
-  type VoiceAgentBase,
-  type VoiceAgentMixinMembers,
-  type VoiceAgentOptions
-} from "./voice";
+import type { VoiceAgentBase, VoiceAgentMixinMembers } from "./index";
 import { SFUVoiceTransport, type SFUVoiceState } from "./sfu-transport";
 import type { SFUConfig } from "./sfu";
 import type { VoiceServerAudioTransport } from "./types";
 
 const SFU_STATE_KEY = "cf_voice_sfu_state";
-
-export type SFUVoiceAgentOptions = Omit<VoiceAgentOptions, "audioFormat"> & {
-  routePrefix?: string;
-};
 
 export interface SFUVoiceTransportOptions {
   routePrefix?: string;
@@ -125,20 +116,4 @@ export function withSFUVoiceTransport<TBase extends SFUVoiceAgentLike>(
   }
 
   return SFUVoiceAgentMixin as SFUVoiceAgentMixinReturn<TBase>;
-}
-
-export function withSFUVoice<TBase extends Constructor<SFUCapableAgent>>(
-  Base: TBase,
-  options?: SFUVoiceAgentOptions
-): SFUVoiceAgentMixinReturn<TBase> {
-  const { routePrefix, sampleRate, ...voiceOptions } = options ?? {};
-  const VoiceBase = withVoice(Base, {
-    ...voiceOptions,
-    audioFormat: "pcm16",
-    sampleRate: sampleRate ?? 24000
-  });
-  return withSFUVoiceTransport(VoiceBase, {
-    routePrefix,
-    inputSampleRate: sampleRate ?? 24000
-  });
 }

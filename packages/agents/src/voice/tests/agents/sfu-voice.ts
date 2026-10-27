@@ -1,10 +1,12 @@
 import { Agent } from "agents";
-import { withSFUVoice, withSFUVoiceTransport } from "../../sfu-voice";
-import { withVoice } from "../../voice";
+import { withSFUVoiceTransport } from "../../sfu-voice";
+import { withVoice } from "../..";
 import type { SFUVoiceState } from "../../sfu-transport";
 import type { SFUConfig } from "../../sfu";
 
-const SFUBase = withSFUVoice(Agent);
+const SFUBase = withSFUVoiceTransport(
+  withVoice(Agent, { audioFormat: "pcm16", sampleRate: 24000 })
+);
 const SFUTransportBase = withSFUVoiceTransport(withVoice(Agent));
 
 export class TestSFUVoiceAgent extends SFUBase {
@@ -39,7 +41,7 @@ export class TestSFUTransportVoiceAgent extends SFUTransportBase {
   }
 }
 
-export class TestMissingSFUConfigAgent extends withSFUVoice(Agent) {
+export class TestMissingSFUConfigAgent extends SFUBase {
   async getStoredSFUStateForTest(): Promise<SFUVoiceState | null> {
     return (
       (await this.ctx.storage.get<SFUVoiceState>("cf_voice_sfu_state")) ?? null
