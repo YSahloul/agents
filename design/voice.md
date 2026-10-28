@@ -69,6 +69,8 @@ Voice-only options: `historyLimit`, `audioFormat`, `maxMessageCount`.
 
 7. **Interruption** — client or telephony transport detects speech during playback → aborts the active pipeline and stops queued audio. For raw `pcm16`/`mulaw` output, a virtual playback clock (`PlaybackTimeline`) assumes sent audio plays back to back in real time and maps played time to text: whole sentences played plus whole words of the current sentence's played share; word-timed chunks count only when fully played. The interrupted reply in history is replaced with that heard text (or removed when nothing played), and `onInterrupt(connection, { heardText })` receives it. Encoded formats (mp3/wav/opus) get `heardText: undefined`.
 
+8. **Turn latency** — every speech turn that produces audio logs one `[VoiceLatency]` record (`turn-latency.ts`), on the agent's clock only. It is anchored like Pipecat's `UserBotLatencyObserver` and LiveKit's `e2e_latency`: from the user stopping speaking (last inbound PCM frame above the browser client's default speech RMS, 0.04) to the agent's first audio sent. Fields use LiveKit's names: `e2e_latency_ms`, `end_of_turn_delay_ms` (stopped speaking → STT end of turn), `llm_ttft_ms` (onTurn → first text), `tts_ttfb_ms` (first text to TTS → first audio), plus `stages` (`end_of_turn`, `before_llm`, `llm_ttft`, `sentence`, `tts_ttfb`) that add up to the total. Playback on the phone is not measurable here, so it is not included.
+
 ## Key decisions
 
 ### Mixin pattern

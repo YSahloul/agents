@@ -47,6 +47,7 @@ import {
   type TurnDiagnostics
 } from "./diagnostics";
 import { isEchoOf, PlaybackTimeline } from "./voice-interruption";
+import { isSpeech, TurnLatency, type UserTurnEnd } from "./turn-latency";
 import {
   iterateTextEvents,
   type TextSource,
@@ -480,6 +481,11 @@ export function withVoice<TBase extends AgentLike>(
     #callStartInputSuppressed = new Set<string>();
     // Client-captured microphone energy for the current STT turn.
     #clientSpeechEnergy = new Map<string, ClientSpeechEnergy>();
+    // Turn latency: last inbound frame loud enough to be speech, the user's side of
+    // the current turn, and the measurement of the reply being produced.
+    #lastSpeechAt = new Map<string, number>();
+    #userTurnEnd = new Map<string, UserTurnEnd>();
+    #turnLatency = new Map<string, TurnLatency>();
     // Output audio format per connection, declared in audio_config.
     #outputAudio = new Map<
       string,
@@ -572,6 +578,9 @@ export function withVoice<TBase extends AgentLike>(
         this.#clientSpeechEnergy.delete(connection.id);
         this.#outputAudio.delete(connection.id);
         this.#playback.delete(connection.id);
+        this.#lastSpeechAt.delete(connection.id);
+        this.#userTurnEnd.delete(connection.id);
+        this.#turnLatency.delete(connection.id);
         this.#callTokens.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
         this.#cm.cleanup(connection.id);
@@ -718,6 +727,7 @@ export function withVoice<TBase extends AgentLike>(
 
     receiveAudio(connectionId: string, audio: ArrayBuffer): void {
       if (this.#callStartInputSuppressed.has(connectionId)) return;
+      if (isSpeech(audio)) this.#lastSpeechAt.set(connectionId, Date.now());
       this.#cm.bufferAudio(connectionId, audio);
     }
 
@@ -1238,6 +1248,7 @@ export function withVoice<TBase extends AgentLike>(
           },
           onSpeechStart: (transcript?: string) => {
             if (this.#callTokens.get(connection.id) !== startupToken) return;
+            this.#userTurnEnd.delete(connection.id);
             const turn = this.#replaceInputTurn(connection);
             turn.speechStarted();
             const echoed =
@@ -1274,10 +1285,12 @@ export function withVoice<TBase extends AgentLike>(
             if (echoed) return;
             const turn = this.#takeInputTurn(connection);
             turn.finalInput(transcript.length);
+            this.#endUserTurn(connection.id);
             this.#startSpeculativeTurn(connection, transcript, turn);
           },
           onTurnResumed: () => {
             if (this.#callTokens.get(connection.id) !== startupToken) return;
+            this.#userTurnEnd.delete(connection.id);
             const speculative = this.#cancelSpeculativeTurn(
               connection.id,
               "turn_resumed"
@@ -1321,6 +1334,7 @@ export function withVoice<TBase extends AgentLike>(
               turn.finish("skipped");
               return;
             }
+            this.#endUserTurn(connection.id);
             if (speculative) {
               this.#speculativeTurns.delete(connection.id);
               speculative.settle(true);
@@ -1512,6 +1526,9 @@ export function withVoice<TBase extends AgentLike>(
       this.#clientSpeechEnergy.delete(connection.id);
       this.#outputAudio.delete(connection.id);
       this.#playback.delete(connection.id);
+      this.#lastSpeechAt.delete(connection.id);
+      this.#userTurnEnd.delete(connection.id);
+      this.#turnLatency.delete(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "end_call");
       this.#cm.cleanup(connection.id);
       try {
@@ -1521,6 +1538,41 @@ export function withVoice<TBase extends AgentLike>(
         this.#diagnose(connection, "cleanup.completed");
         this.#sendJSON(connection, { type: "status", status: "idle" });
         await this.onCallEnd(connection);
+      }
+    }
+
+    // --- Turn latency ---
+
+    // Called when speech recognition ends the user's turn (eager or final); the first call wins.
+    #endUserTurn(connectionId: string): void {
+      if (this.#userTurnEnd.has(connectionId)) return;
+      this.#userTurnEnd.set(connectionId, {
+        stoppedSpeakingAt: this.#lastSpeechAt.get(connectionId) ?? null,
+        turnDetectedAt: Date.now()
+      });
+      // The next turn must be anchored by its own speech.
+      this.#lastSpeechAt.delete(connectionId);
+    }
+
+    #markLatency(
+      connectionId: string,
+      signal: AbortSignal,
+      name: "llmFirstToken" | "ttsStart"
+    ): void {
+      const latency = this.#turnLatency.get(connectionId);
+      if (latency?.signal === signal) latency.mark(name);
+    }
+
+    #reportLatency(connection: Connection, signal: AbortSignal): void {
+      const latency = this.#turnLatency.get(connection.id);
+      if (latency?.signal !== signal) return;
+      this.#turnLatency.delete(connection.id);
+      const report = latency.firstAudio();
+      if (report) {
+        console.log("[VoiceLatency]", {
+          connectionId: connection.id,
+          ...report
+        });
       }
     }
 
@@ -2029,6 +2081,12 @@ export function withVoice<TBase extends AgentLike>(
           ...(speculative && { confirmation: speculative.outcome })
         };
 
+        const latency = new TurnLatency(
+          signal,
+          this.#userTurnEnd.get(connection.id) ?? null
+        );
+        latency.mark("llmStart");
+        this.#turnLatency.set(connection.id, latency);
         const model = turn.startModel();
         active.model = model;
         const pendingTurnResult = Promise.resolve()
@@ -2221,6 +2279,7 @@ export function withVoice<TBase extends AgentLike>(
           };
         }
 
+        this.#markLatency(connection.id, signal, "llmFirstToken");
         model.observe({ type: "text", text: response });
         model.complete("output");
         this.#sendJSON(connection, {
@@ -2233,6 +2292,7 @@ export function withVoice<TBase extends AgentLike>(
         });
 
         const ttsStart = Date.now();
+        this.#markLatency(connection.id, signal, "ttsStart");
         let audio: ArrayBuffer | null;
         try {
           audio = await this.#synthesizeWithHooks(
@@ -2250,6 +2310,7 @@ export function withVoice<TBase extends AgentLike>(
         if (audio && !signal.aborted) {
           this.#sendJSON(connection, { type: "status", status: "speaking" });
           firstAudioMs = Date.now() - pipelineStart;
+          this.#reportLatency(connection, signal);
           turn.emit("audio.first_sent", {
             bytes: audio.byteLength,
             elapsed_ms: firstAudioMs
@@ -2365,6 +2426,7 @@ export function withVoice<TBase extends AgentLike>(
           if (firstAudioSentAt === null) {
             this.#sendJSON(connection, { type: "status", status: "speaking" });
             firstAudioSentAt = Date.now();
+            this.#reportLatency(connection, signal);
             turn.emit("audio.first_sent", {
               bytes: audio.byteLength,
               elapsed_ms: firstAudioSentAt - pipelineStart
@@ -2394,7 +2456,11 @@ export function withVoice<TBase extends AgentLike>(
           }
           if (event.type !== "text") continue;
 
-          if (firstModelDeltaAt === null) firstModelDeltaAt = Date.now();
+          if (firstModelDeltaAt === null) {
+            firstModelDeltaAt = Date.now();
+            this.#markLatency(connection.id, signal, "llmFirstToken");
+            this.#markLatency(connection.id, signal, "ttsStart");
+          }
           fullText += event.text;
           this.#activeAssistantText.set(connection.id, {
             signal,
@@ -2564,6 +2630,7 @@ export function withVoice<TBase extends AgentLike>(
                   status: "speaking"
                 });
                 firstAudioSentAt = Date.now();
+                this.#reportLatency(connection, signal);
                 turn.emit("audio.first_sent", {
                   bytes: audio.byteLength,
                   elapsed_ms: firstAudioSentAt - pipelineStart
@@ -2622,6 +2689,7 @@ export function withVoice<TBase extends AgentLike>(
             const hasStreamingTTS = typeof tts.synthesizeStream === "function";
             if (firstTtsStartedAt === null) {
               firstTtsStartedAt = Date.now();
+              self.#markLatency(connection.id, signal, "ttsStart");
               turn.emit("tts.started", {
                 mode: hasStreamingTTS ? "streaming" : "buffered",
                 characters: text.length
@@ -2631,7 +2699,6 @@ export function withVoice<TBase extends AgentLike>(
             console.log("[VoiceTrace]", {
               event: "tts_enqueued",
               connectionId: connection.id,
-              elapsedMs: Date.now() - pipelineStart,
               text
             });
             if (hasStreamingTTS) {
@@ -2729,6 +2796,7 @@ export function withVoice<TBase extends AgentLike>(
         const token = event.text;
         if (firstModelDeltaAt === null) {
           firstModelDeltaAt = Date.now();
+          this.#markLatency(connection.id, signal, "llmFirstToken");
         }
 
         fullText += token;
