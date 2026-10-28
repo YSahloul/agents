@@ -228,12 +228,12 @@ For eager turns, model inference may start immediately, but do not persist the t
 
 ### Lifecycle Hooks
 
-| Method                             | Description                                 |
-| ---------------------------------- | ------------------------------------------- |
-| `beforeCallStart(connection)`      | Return `false` to reject the call           |
-| `onCallStart(connection)`          | Called after a call is accepted             |
-| `onCallEnd(connection)`            | Called when a call ends                     |
-| `onInterrupt(connection)`          | Called when user interrupts during playback |
+| Method                        | Description                                 |
+| ----------------------------- | ------------------------------------------- |
+| `beforeCallStart(connection)` | Return `false` to reject the call           |
+| `onCallStart(connection)`     | Called after a call is accepted             |
+| `onCallEnd(connection)`       | Called when a call ends                     |
+| `onInterrupt(connection)`     | Called when user interrupts during playback |
 
 If startup is rejected or fails, the server sends the client back to `idle` and calls `onCallEnd()` so cleanup logic can run.
 

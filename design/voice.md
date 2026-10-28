@@ -211,13 +211,13 @@ Phone → Twilio → WebSocket → TwilioAdapter → WebSocket → VoiceAgent DO
 
 Both mixins support:
 
-| Hook                                | Purpose                                          |
-| ----------------------------------- | ------------------------------------------------ |
-| `beforeCallStart(connection)`       | Return `false` to reject the call                |
-| `onCallStart(connection)`           | Called after call is accepted                    |
-| `onCallEnd(connection)`             | Called when call ends                            |
-| `onInterrupt(connection)`           | Called when user interrupts during playback      |
-| `afterTranscribe(text, connection)` | Transform transcript after STT; `null` skips     |
+| Hook                                | Purpose                                      |
+| ----------------------------------- | -------------------------------------------- |
+| `beforeCallStart(connection)`       | Return `false` to reject the call            |
+| `onCallStart(connection)`           | Called after call is accepted                |
+| `onCallEnd(connection)`             | Called when call ends                        |
+| `onInterrupt(connection)`           | Called when user interrupts during playback  |
+| `afterTranscribe(text, connection)` | Transform transcript after STT; `null` skips |
 
 `withVoice` adds:
 
