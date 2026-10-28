@@ -46,7 +46,7 @@ import {
   type ModelDiagnosticTracker,
   type TurnDiagnostics
 } from "./diagnostics";
-import { heardText, isEchoOf } from "./voice-interruption";
+import { isEchoOf } from "./voice-interruption";
 import {
   iterateTextEvents,
   type TextSource,
@@ -279,22 +279,12 @@ interface ActiveAssistantText {
 interface PlaybackState {
   playbackId: string;
   sourceText: string;
-  /** Text whose audio has been sent: aligned chunk text, or whole sentences for unaligned TTS. */
   alignedText: string;
   acknowledgedText: string;
   acknowledgedSequence: number;
   nextSequence: number;
   finalSequence?: number;
-  /** Heard text per checkpoint, read when the transport confirms playback. */
-  checkpoints: Map<number, () => string>;
-}
-
-/** One sentence of TTS audio without word timing, and how many of its bytes have been sent. */
-interface UnalignedSpeech {
-  text: string;
-  bytes: number;
-  /** Set once the sentence's audio is complete. */
-  totalBytes?: number;
+  checkpoints: Map<number, string>;
 }
 
 function isTextAlignedAudioChunk(
@@ -911,7 +901,7 @@ export function withVoice<TBase extends AgentLike>(
       ) {
         return;
       }
-      const text = state.checkpoints.get(sequence)?.();
+      const text = state.checkpoints.get(sequence);
       if (text === undefined) return;
       state.acknowledgedSequence = sequence;
       state.acknowledgedText = text;
@@ -942,25 +932,17 @@ export function withVoice<TBase extends AgentLike>(
       return { spokenText };
     }
 
-    // Checkpoints tell the transport to confirm when audio has played, so an interruption keeps
-    // only what the caller heard. Aligned TTS names the words in each chunk. Without word timing
-    // (`speech`), a checkpoint counts the sentences already sent plus the played share of the
-    // current one; that share is known once the sentence's audio is complete.
     async #sendStreamChunk(
       connection: Connection,
       chunk: TTSStreamChunk,
-      sourceText: string,
-      speech?: UnalignedSpeech
+      sourceText: string
     ): Promise<number> {
       const aligned = isTextAlignedAudioChunk(chunk) ? chunk : null;
       const audio: ArrayBuffer = isTextAlignedAudioChunk(chunk)
         ? chunk.audio
         : chunk;
       await this.#sendAudio(connection, audio);
-      if (
-        (!aligned && !speech) ||
-        !this.#playbackCheckpointConnections.has(connection.id)
-      ) {
+      if (!aligned || !this.#playbackCheckpointConnections.has(connection.id)) {
         return audio.byteLength;
       }
 
@@ -978,36 +960,15 @@ export function withVoice<TBase extends AgentLike>(
         this.#playback.set(connection.id, state);
       }
       state.sourceText = sourceText;
+      state.alignedText += aligned.text;
       const sequence = state.nextSequence++;
-      if (aligned) {
-        state.alignedText += aligned.text;
-        const text = state.alignedText;
-        state.checkpoints.set(sequence, () => text);
-      } else if (speech) {
-        speech.bytes += audio.byteLength;
-        const sent = state.alignedText;
-        const played = speech.bytes;
-        state.checkpoints.set(sequence, () =>
-          [sent, heardText(speech.text, played, speech.totalBytes)]
-            .filter(Boolean)
-            .join(" ")
-        );
-      }
+      state.checkpoints.set(sequence, state.alignedText);
       this.#sendJSON(connection, {
         type: "playback_checkpoint",
         playback_id: state.playbackId,
         sequence
       });
       return audio.byteLength;
-    }
-
-    #finishUnalignedSpeech(connectionId: string, speech: UnalignedSpeech) {
-      speech.totalBytes = speech.bytes;
-      const state = this.#playback.get(connectionId);
-      if (!state || speech.bytes === 0) return;
-      state.alignedText = [state.alignedText, speech.text.trim()]
-        .filter(Boolean)
-        .join(" ");
     }
 
     // --- Audio transport helpers ---
@@ -1237,7 +1198,6 @@ export function withVoice<TBase extends AgentLike>(
           mode: "streaming",
           characters: textToSpeak.length
         });
-        const speech: UnalignedSpeech = { text: textToSpeak, bytes: 0 };
         try {
           for await (const chunk of tts.synthesizeStream(textToSpeak, signal)) {
             if (signal.aborted) return;
@@ -1260,12 +1220,10 @@ export function withVoice<TBase extends AgentLike>(
             totalBytes += await this.#sendStreamChunk(
               connection,
               aligned ? { ...aligned, audio: processed } : processed,
-              textToSpeak,
-              speech
+              textToSpeak
             );
           }
           if (!signal.aborted) {
-            this.#finishUnalignedSpeech(connection.id, speech);
             this.#finalizePlayback(connection.id, textToSpeak);
             await this.#flushAudio(connection);
           }
@@ -2583,7 +2541,6 @@ export function withVoice<TBase extends AgentLike>(
           : Number.POSITIVE_INFINITY
       );
       const ttsQueue: AsyncIterable<TTSStreamChunk>[] = [];
-      const sentences: string[] = [];
       let fullText = "";
       let pendingTranscriptText = "";
       let transcriptStarted = false;
@@ -2648,7 +2605,6 @@ export function withVoice<TBase extends AgentLike>(
 
           if (signal.aborted) return;
 
-          const speech: UnalignedSpeech = { text: sentences[i], bytes: 0 };
           try {
             for await (const chunk of ttsQueue[i]) {
               if (signal.aborted) return;
@@ -2669,13 +2625,10 @@ export function withVoice<TBase extends AgentLike>(
               totalAudioBytes += await this.#sendStreamChunk(
                 connection,
                 chunk,
-                fullText,
-                speech
+                fullText
               );
               turn.audioSent();
             }
-            if (!signal.aborted)
-              this.#finishUnalignedSpeech(connection.id, speech);
           } catch (error) {
             if (signal.aborted) return;
             const voiceError = toVoiceError(error, "TTS sentence failed");
@@ -2768,7 +2721,6 @@ export function withVoice<TBase extends AgentLike>(
       const enqueueSentence = (sentence: string) => {
         firstSentenceAt ??= Date.now();
         ttsQueue.push(makeSentenceTTS(sentence));
-        sentences.push(sentence);
         notifyDrain();
       };
 

@@ -124,15 +124,6 @@ class ControlledAlignedTTS extends TestTTS implements StreamingTextTTSProvider {
     reader.releaseLock();
   }
 }
-/** Streams each sentence in 8-byte chunks with no word timing, like Workers AI Aura. */
-class ChunkedUnalignedTTS extends TestTTS implements StreamingTTSProvider {
-  async *synthesizeStream(text: string): AsyncGenerator<ArrayBuffer> {
-    const audio = new TextEncoder().encode(text);
-    for (let start = 0; start < audio.length; start += 8) {
-      yield audio.slice(start, start + 8).buffer;
-    }
-  }
-}
 class ControlledTestStreamingTTS
   extends TestTTS
   implements StreamingTTSProvider
@@ -887,9 +878,6 @@ export class TestVoiceAgent extends VoiceBase {
             this.#streamTurns = true;
           } else if (parsed.value === "aligned") {
             this.tts = this.#alignedTTS;
-            this.#streamTurns = true;
-          } else if (parsed.value === "unaligned") {
-            this.tts = new ChunkedUnalignedTTS();
             this.#streamTurns = true;
           } else if (parsed.value === "normal") {
             this.tts = new TestTTS();
