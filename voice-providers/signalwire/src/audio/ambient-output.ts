@@ -5,8 +5,6 @@ const FRAME_MS = 20;
 
 export interface AmbientPlaybackMark {
   name: string;
-  playbackId?: string;
-  sequence?: number;
 }
 
 type QueueEntry =

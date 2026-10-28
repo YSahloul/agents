@@ -218,15 +218,6 @@ export interface VoiceTurnContext {
   confirmation?: Promise<boolean>;
 }
 
-/** Playback known to have reached the listener when speech was interrupted. */
-export interface VoiceInterruptContext {
-  /**
-   * Aligned spoken text, or undefined when the active TTS/transport cannot
-   * acknowledge playback.
-   */
-  spokenText?: string;
-}
-
 /** Configuration options for the voice mixin. Passed to `withVoice()`. */
 export interface VoiceAgentOptions {
   /** Max conversation history messages loaded for context. @default 20 */
@@ -275,16 +266,6 @@ interface SpeculativeTurn {
 interface ActiveAssistantText {
   signal: AbortSignal;
   text: string;
-}
-interface PlaybackState {
-  playbackId: string;
-  sourceText: string;
-  alignedText: string;
-  acknowledgedText: string;
-  acknowledgedSequence: number;
-  nextSequence: number;
-  finalSequence?: number;
-  checkpoints: Map<number, string>;
 }
 
 function isTextAlignedAudioChunk(
@@ -389,10 +370,7 @@ export interface VoiceAgentMixinMembers {
     context: VoiceCallStartContext
   ): void | Promise<void>;
   onCallEnd(connection: Connection): void | Promise<void>;
-  onInterrupt(
-    connection: Connection,
-    context: VoiceInterruptContext
-  ): void | Promise<void>;
+  onInterrupt(connection: Connection): void | Promise<void>;
   afterTranscribe(
     transcript: string,
     connection: Connection
@@ -484,9 +462,6 @@ export function withVoice<TBase extends AgentLike>(
     #speculativeTurns = new Map<string, SpeculativeTurn>();
     // Text currently being spoken, used to reject live speakerphone echo.
     #activeAssistantText = new Map<string, ActiveAssistantText>();
-    // Alignment is retained only for transports that acknowledge playback.
-    #playbackCheckpointConnections = new Set<string>();
-    #playback = new Map<string, PlaybackState>();
     // Connections whose opening hook should not feed inbound audio to STT.
     #callStartInputSuppressed = new Set<string>();
     // Client-captured microphone energy for the current STT turn.
@@ -508,7 +483,6 @@ export function withVoice<TBase extends AgentLike>(
       "start_of_speech",
       "end_of_speech",
       "interrupt",
-      "playback_checkpoint_ack",
       "text_message"
     ]);
 
@@ -571,8 +545,6 @@ export function withVoice<TBase extends AgentLike>(
         this.#startupTokens.delete(connection.id);
         this.#activeAssistantText.delete(connection.id);
         this.#callStartInputSuppressed.delete(connection.id);
-        this.#playbackCheckpointConnections.delete(connection.id);
-        this.#playback.delete(connection.id);
         this.#clientSpeechEnergy.delete(connection.id);
         this.#callTokens.delete(connection.id);
         this.#releaseKeepAlive(connection.id);
@@ -635,14 +607,6 @@ export function withVoice<TBase extends AgentLike>(
                   ? parsed.preferred_format
                   : undefined;
               const resumed = "resumed" in parsed && parsed.resumed === true;
-              if (
-                "playback_checkpoints" in parsed &&
-                parsed.playback_checkpoints === true
-              ) {
-                this.#playbackCheckpointConnections.add(connection.id);
-              } else {
-                this.#playbackCheckpointConnections.delete(connection.id);
-              }
               runBackground("start_call", () =>
                 this.#handleStartCall(connection, preferredFormat, resumed)
               );
@@ -678,20 +642,6 @@ export function withVoice<TBase extends AgentLike>(
               runBackground("interrupt", () =>
                 this.#handleInterrupt(connection, source)
               );
-              break;
-            }
-            case "playback_checkpoint_ack": {
-              const playbackId =
-                "playback_id" in parsed ? parsed.playback_id : undefined;
-              const sequence =
-                "sequence" in parsed ? parsed.sequence : undefined;
-              if (
-                typeof playbackId === "string" &&
-                typeof sequence === "number" &&
-                Number.isInteger(sequence)
-              ) {
-                this.#acknowledgePlayback(connection.id, playbackId, sequence);
-              }
               break;
             }
             case "text_message": {
@@ -754,10 +704,7 @@ export function withVoice<TBase extends AgentLike>(
       _context: VoiceCallStartContext
     ): void | Promise<void> {}
     onCallEnd(_connection: Connection): void | Promise<void> {}
-    onInterrupt(
-      _connection: Connection,
-      _context: VoiceInterruptContext
-    ): void | Promise<void> {}
+    onInterrupt(_connection: Connection): void | Promise<void> {}
 
     afterTranscribe(
       transcript: string,
@@ -845,129 +792,12 @@ export function withVoice<TBase extends AgentLike>(
       }));
     }
 
-    #reconcileInterruptedHistory(state: PlaybackState): string {
-      const spokenText = state.acknowledgedText.trim();
-      if (!opt("persistMessages", true)) {
-        const latest = this.#conversationHistory.at(-1);
-        if (
-          latest?.role === "assistant" &&
-          latest.content === state.sourceText
-        ) {
-          if (spokenText) {
-            latest.content = spokenText;
-          } else {
-            this.#conversationHistory.pop();
-          }
-        } else if (spokenText) {
-          this.saveMessage("assistant", spokenText);
-        }
-        return spokenText;
-      }
-
-      this.#ensureMessageSchema();
-      const latest = this.sql<{
-        id: number;
-        role: VoiceRole;
-        text: string;
-      }>`
-        SELECT id, role, text FROM cf_voice_messages
-        ORDER BY id DESC LIMIT 1
-      `[0];
-      if (latest?.role === "assistant" && latest.text === state.sourceText) {
-        if (spokenText) {
-          this.sql`
-            UPDATE cf_voice_messages SET text = ${spokenText}
-            WHERE id = ${latest.id}
-          `;
-        } else {
-          this.sql`DELETE FROM cf_voice_messages WHERE id = ${latest.id}`;
-        }
-      } else if (spokenText) {
-        this.saveMessage("assistant", spokenText);
-      }
-      return spokenText;
-    }
-
-    #acknowledgePlayback(
-      connectionId: string,
-      playbackId: string,
-      sequence: number
-    ): void {
-      const state = this.#playback.get(connectionId);
-      if (
-        !state ||
-        state.playbackId !== playbackId ||
-        sequence <= state.acknowledgedSequence
-      ) {
-        return;
-      }
-      const text = state.checkpoints.get(sequence);
-      if (text === undefined) return;
-      state.acknowledgedSequence = sequence;
-      state.acknowledgedText = text;
-      for (const checkpoint of state.checkpoints.keys()) {
-        if (checkpoint <= sequence) state.checkpoints.delete(checkpoint);
-      }
-      if (state.finalSequence === sequence) {
-        this.#playback.delete(connectionId);
-      }
-    }
-
-    #finalizePlayback(connectionId: string, sourceText: string): void {
-      const state = this.#playback.get(connectionId);
-      if (!state) return;
-      state.sourceText = sourceText;
-      state.finalSequence = state.nextSequence - 1;
-      if (state.acknowledgedSequence === state.finalSequence) {
-        this.#playback.delete(connectionId);
-      }
-    }
-
-    #consumeInterruptedPlayback(connection: Connection): VoiceInterruptContext {
-      const state = this.#playback.get(connection.id);
-      if (!state) return {};
-      this.#playback.delete(connection.id);
-      const spokenText = this.#reconcileInterruptedHistory(state);
-      if (spokenText) this.#cm.updateAgentContext(connection.id, spokenText);
-      return { spokenText };
-    }
-
     async #sendStreamChunk(
       connection: Connection,
-      chunk: TTSStreamChunk,
-      sourceText: string
+      chunk: TTSStreamChunk
     ): Promise<number> {
-      const aligned = isTextAlignedAudioChunk(chunk) ? chunk : null;
-      const audio: ArrayBuffer = isTextAlignedAudioChunk(chunk)
-        ? chunk.audio
-        : chunk;
+      const audio = isTextAlignedAudioChunk(chunk) ? chunk.audio : chunk;
       await this.#sendAudio(connection, audio);
-      if (!aligned || !this.#playbackCheckpointConnections.has(connection.id)) {
-        return audio.byteLength;
-      }
-
-      let state = this.#playback.get(connection.id);
-      if (!state) {
-        state = {
-          playbackId: crypto.randomUUID(),
-          sourceText,
-          alignedText: "",
-          acknowledgedText: "",
-          acknowledgedSequence: 0,
-          nextSequence: 1,
-          checkpoints: new Map()
-        };
-        this.#playback.set(connection.id, state);
-      }
-      state.sourceText = sourceText;
-      state.alignedText += aligned.text;
-      const sequence = state.nextSequence++;
-      state.checkpoints.set(sequence, state.alignedText);
-      this.#sendJSON(connection, {
-        type: "playback_checkpoint",
-        playback_id: state.playbackId,
-        sequence
-      });
       return audio.byteLength;
     }
 
@@ -1217,14 +1047,9 @@ export function withVoice<TBase extends AgentLike>(
                 bytes: processed.byteLength
               });
             }
-            totalBytes += await this.#sendStreamChunk(
-              connection,
-              aligned ? { ...aligned, audio: processed } : processed,
-              textToSpeak
-            );
+            totalBytes += await this.#sendStreamChunk(connection, processed);
           }
           if (!signal.aborted) {
-            this.#finalizePlayback(connection.id, textToSpeak);
             await this.#flushAudio(connection);
           }
           this.#diagnose(connection, "tts.completed", {
@@ -1652,7 +1477,6 @@ export function withVoice<TBase extends AgentLike>(
       this.#callTokens.delete(connection.id);
       this.#abortInputTurn(connection, "call_ended");
       this.#clientSpeechEnergy.delete(connection.id);
-      this.#playback.delete(connection.id);
       this.#cancelSpeculativeTurn(connection.id, "end_call");
       this.#cm.cleanup(connection.id);
       try {
@@ -1671,7 +1495,6 @@ export function withVoice<TBase extends AgentLike>(
       connection: Connection,
       trigger: string
     ): Promise<void> {
-      const interruptContext = this.#consumeInterruptedPlayback(connection);
       console.log("[VoiceTrace]", {
         event: "interrupt_trigger",
         connectionId: connection.id,
@@ -1691,7 +1514,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#sendJSON(connection, { type: "playback_interrupt" });
       this.#sendJSON(connection, { type: "status", status: "listening" });
       await Promise.all([
-        (async () => this.onInterrupt(connection, interruptContext))(),
+        (async () => this.onInterrupt(connection))(),
         (async () =>
           this.#audioTransports.get(connection.id)?.interrupt(connection.id))()
       ]);
@@ -1702,7 +1525,6 @@ export function withVoice<TBase extends AgentLike>(
       trigger: "onSpeechStart",
       transcript?: string
     ): void {
-      const interruptContext = this.#consumeInterruptedPlayback(connection);
       this.#cancelSpeculativeTurn(connection.id, "speech_start");
       this.#requestActiveTurnAbort(
         connection,
@@ -1723,7 +1545,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#sendJSON(connection, { type: "status", status: "listening" });
       runBackground("barge_in", async () => {
         await Promise.all([
-          (async () => this.onInterrupt(connection, interruptContext))(),
+          (async () => this.onInterrupt(connection))(),
           (async () =>
             this.#audioTransports
               .get(connection.id)
@@ -2427,11 +2249,7 @@ export function withVoice<TBase extends AgentLike>(
               elapsed_ms: firstAudioSentAt - pipelineStart
             });
           }
-          totalAudioBytes += await this.#sendStreamChunk(
-            connection,
-            chunk,
-            fullText
-          );
+          totalAudioBytes += await this.#sendStreamChunk(connection, chunk);
           turn.audioSent();
         }
       })();
@@ -2493,7 +2311,6 @@ export function withVoice<TBase extends AgentLike>(
           });
         }
         if (!signal.aborted) {
-          this.#finalizePlayback(connection.id, fullText);
           await this.#flushAudio(connection);
         }
       }
@@ -2622,11 +2439,7 @@ export function withVoice<TBase extends AgentLike>(
                   elapsed_ms: firstAudioSentAt - pipelineStart
                 });
               }
-              totalAudioBytes += await this.#sendStreamChunk(
-                connection,
-                chunk,
-                fullText
-              );
+              totalAudioBytes += await this.#sendStreamChunk(connection, chunk);
               turn.audioSent();
             }
           } catch (error) {
@@ -2813,7 +2626,6 @@ export function withVoice<TBase extends AgentLike>(
 
       await drainPromise;
       if (!signal.aborted) {
-        this.#finalizePlayback(connection.id, fullText);
         await this.#flushAudio(connection);
       }
 

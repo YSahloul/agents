@@ -91,12 +91,7 @@ export class SignalWireAdapter {
     let outboundBytes = 0;
     const pendingPlaybackMarks = new Map<
       string,
-      {
-        frames: number;
-        bytes: number;
-        playbackId?: string;
-        sequence?: number;
-      }
+      { frames: number; bytes: number }
     >();
     let agentMessageChain: Promise<void> = Promise.resolve();
     let nextOutboundMediaAt = 0;
@@ -115,7 +110,7 @@ export class SignalWireAdapter {
     };
 
     const sendPlaybackMark = (
-      mark: AmbientPlaybackMark & { playbackId?: string; sequence?: number },
+      mark: AmbientPlaybackMark,
       metrics: { frames: number; bytes: number }
     ) => {
       if (!streamSid || serverSocket.readyState !== WebSocket.OPEN) return;
@@ -126,11 +121,7 @@ export class SignalWireAdapter {
           mark: { name: mark.name }
         })
       );
-      pendingPlaybackMarks.set(mark.name, {
-        ...metrics,
-        ...(mark.playbackId ? { playbackId: mark.playbackId } : {}),
-        ...(mark.sequence === undefined ? {} : { sequence: mark.sequence })
-      });
+      pendingPlaybackMarks.set(mark.name, metrics);
       console.log("[VoiceTrace]", {
         event: "tts_sent",
         streamSid,
@@ -237,30 +228,6 @@ export class SignalWireAdapter {
                 agentAudio = { format, sampleRate };
               } else {
                 rejectAgentAudio(format, sampleRate);
-              }
-              return;
-            }
-
-            if (
-              msg.type === "playback_checkpoint" &&
-              typeof msg.playback_id === "string" &&
-              typeof msg.sequence === "number" &&
-              Number.isInteger(msg.sequence)
-            ) {
-              const mark = {
-                name: `playback:${++nextPlaybackMark}`,
-                playbackId: msg.playback_id,
-                sequence: msg.sequence
-              };
-              if (ambientOutput) {
-                ambientOutput.enqueueMark(mark);
-              } else if (outboundFrames > 0) {
-                sendPlaybackMark(mark, {
-                  frames: outboundFrames,
-                  bytes: outboundBytes
-                });
-                outboundFrames = 0;
-                outboundBytes = 0;
               }
               return;
             }
@@ -422,7 +389,6 @@ export class SignalWireAdapter {
       ws.send(
         JSON.stringify({
           type: "start_call",
-          playback_checkpoints: true,
           ...(options?.resumed ? { resumed: true } : {})
         })
       );
@@ -497,19 +463,6 @@ export class SignalWireAdapter {
               mark: markName,
               ...metrics
             });
-            if (
-              metrics.playbackId &&
-              metrics.sequence !== undefined &&
-              agentSocket?.readyState === WebSocket.OPEN
-            ) {
-              agentSocket.send(
-                JSON.stringify({
-                  type: "playback_checkpoint_ack",
-                  playback_id: metrics.playbackId,
-                  sequence: metrics.sequence
-                })
-              );
-            }
           }
           break;
         }

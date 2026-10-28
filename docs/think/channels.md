@@ -81,11 +81,10 @@ execute, until the transcriber confirms end-of-turn. A resumed or interrupted
 hypothesis is discarded without removing any previously stored messages.
 After confirmation, barge-in stops voice output without canceling Think's
 running tools. Think's normal turn queue orders subsequent input, and its
-assistant-persistence path retains completed tool parts while limiting
-interrupted text to acknowledged speech. An interrupted active response with
-no playback acknowledgement contributes no assistant text to history.
-If generation has already finished but acknowledged playback is still pending,
-the interruption updates that response's saved message by ID, not the latest
+assistant-persistence path retains completed tool parts. Voice does not
+measure how much of an interrupted response was heard, so the interrupted
+response's text is removed from history; if it was already saved, the
+interruption updates that response's saved message by ID, not the latest
 message in the conversation. Interruption notification does not wait for tool
 execution or asynchronous transport clearing to finish.
 

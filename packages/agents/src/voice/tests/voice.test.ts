@@ -216,7 +216,7 @@ async function setTurnMode(
 
 async function setTtsMode(
   ws: WebSocket,
-  value: "normal" | "controlled" | "aligned"
+  value: "normal" | "controlled"
 ): Promise<void> {
   sendJSON(ws, { type: "_set_tts_mode", value });
   await waitForAck(ws, "_set_tts_mode");
@@ -2932,39 +2932,6 @@ describe("VoiceAgent — interrupt", () => {
       "utterance 1 (20000 bytes)"
     );
 
-    ws.close();
-  });
-
-  it("keeps only carrier-acknowledged aligned text after barge-in", async () => {
-    const { ws } = await connectWS(uniquePath());
-    await waitForStatus(ws, "idle");
-    await setTtsMode(ws, "aligned");
-    sendJSON(ws, { type: "start_call", playback_checkpoints: true });
-    await waitForStatus(ws, "listening");
-
-    const checkpointPromise = waitForType(ws, "playback_checkpoint");
-    sendJSON(ws, { type: "text_message", text: "question" });
-    const checkpoint = (await checkpointPromise) as Record<string, unknown>;
-    expect(checkpoint).toMatchObject({
-      type: "playback_checkpoint",
-      sequence: 1
-    });
-    sendJSON(ws, {
-      type: "playback_checkpoint_ack",
-      playback_id: checkpoint.playback_id,
-      sequence: checkpoint.sequence
-    });
-
-    const interrupted = waitForType(ws, "playback_interrupt");
-    sendJSON(ws, { type: "_emit_speech_start", text: "stop" });
-    await interrupted;
-    const counts = await waitForInterruptCount(ws, 1);
-
-    expect(counts.interruptedText).toEqual(["Echo:"]);
-    expect(await getHistory(ws)).toEqual([
-      { role: "user", content: "question" },
-      { role: "assistant", content: "Echo:" }
-    ]);
     ws.close();
   });
 

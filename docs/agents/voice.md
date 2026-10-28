@@ -233,9 +233,8 @@ For eager turns, model inference may start immediately, but do not persist the t
 | `beforeCallStart(connection)`      | Return `false` to reject the call           |
 | `onCallStart(connection)`          | Called after a call is accepted             |
 | `onCallEnd(connection)`            | Called when a call ends                     |
-| `onInterrupt(connection, context)` | Called when user interrupts during playback |
+| `onInterrupt(connection)`          | Called when user interrupts during playback |
 
-`context.spokenText` contains the aligned text acknowledged as played by a checkpoint-aware transport. An empty string means no aligned text was acknowledged. It is `undefined` when the TTS provider or transport cannot report playback progress.
 If startup is rejected or fails, the server sends the client back to `idle` and calls `onCallEnd()` so cleanup logic can run.
 
 ### Pipeline Hooks

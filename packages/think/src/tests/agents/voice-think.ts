@@ -7,7 +7,6 @@ import type {
   TranscriberSession,
   TranscriberSessionOptions,
   TTSProvider,
-  VoiceInterruptContext,
   VoiceTurnContext
 } from "agents/voice";
 import { Think } from "../../think";
@@ -223,10 +222,7 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     }
     return text;
   }
-  async reconcileInterruptedVoiceTurnForTest(
-    spokenText?: string,
-    eager = false
-  ): Promise<string> {
+  async reconcileInterruptedVoiceTurnForTest(eager = false): Promise<string> {
     const connection = {
       id: "interrupted-voice-test",
       uri: "https://example.com/voice"
@@ -241,9 +237,7 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     });
     await this._modelStarted.promise;
     controller.abort("caller interrupted playback");
-    await this.onInterrupt(connection, {
-      spokenText
-    } satisfies VoiceInterruptContext);
+    await this.onInterrupt(connection);
     await this.waitUntilStable({ timeout: 5_000 });
     const stored = await this.session.getHistory();
     await this.runVoiceOnTurnForTest("follow up", "https://example.com/voice");
@@ -278,9 +272,7 @@ export class ThinkVoiceTestAgent extends VoiceThink {
       parts: [{ type: "text", text: "unrelated newer response" }]
     });
     controller.abort("caller interrupted pending playback");
-    const interrupted = this.onInterrupt(connection, {
-      spokenText: "acknowledged speech"
-    });
+    const interrupted = this.onInterrupt(connection);
 
     this._modelStarted = deferred<void>();
     const followUpPromise = this.onTurn("follow up", {
@@ -325,7 +317,7 @@ export class ThinkVoiceTestAgent extends VoiceThink {
       "https://example.com/voice"
     );
     const before = await this.session.getHistory();
-    await this.onInterrupt({ id: "voice-test" } as Connection, {});
+    await this.onInterrupt({ id: "voice-test" } as Connection);
     return JSON.stringify({ before, after: await this.session.getHistory() });
   }
   async runEagerVoiceTurnForTest(
@@ -353,9 +345,7 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     outcome.resolve(confirmed);
     if (!confirmed) {
       controller.abort("eager transcript rejected");
-      await this.onInterrupt({ id: "eager-voice-test" } as Connection, {
-        spokenText: ""
-      });
+      await this.onInterrupt({ id: "eager-voice-test" } as Connection);
     }
     let text = "";
     if (
@@ -387,10 +377,7 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     });
   }
 
-  async runInterruptedToolVoiceTurnForTest(
-    eager: boolean,
-    spokenText?: string
-  ): Promise<string> {
+  async runInterruptedToolVoiceTurnForTest(eager: boolean): Promise<string> {
     this._toolMode = true;
     const gate = {
       started: deferred<void>(),
@@ -412,9 +399,7 @@ export class ThinkVoiceTestAgent extends VoiceThink {
     confirmation?.resolve(true);
     await gate.started.promise;
     controller.abort("caller spoke over the running tool");
-    const interrupted = Promise.resolve(
-      this.onInterrupt(connection, { spokenText })
-    );
+    const interrupted = Promise.resolve(this.onInterrupt(connection));
     let interruptionResolved = false;
     void interrupted.then(() => {
       interruptionResolved = true;

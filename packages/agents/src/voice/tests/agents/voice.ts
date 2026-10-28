@@ -8,12 +8,7 @@ import {
 } from "ai";
 import { z } from "zod";
 import { VoiceProviderError } from "../../errors";
-import {
-  withVoice,
-  type TextSource,
-  type VoiceInterruptContext,
-  type VoiceTurnContext
-} from "../..";
+import { withVoice, type TextSource, type VoiceTurnContext } from "../..";
 import type {
   TTSProvider,
   StreamingTTSProvider,
@@ -93,35 +88,6 @@ class TestStreamingTTS implements TTSProvider, StreamingTextTTSProvider {
     } finally {
       reader.releaseLock();
     }
-  }
-}
-class ControlledAlignedTTS extends TestTTS implements StreamingTextTTSProvider {
-  #getSignal: () => AbortSignal | null;
-
-  constructor(getSignal: () => AbortSignal | null) {
-    super();
-    this.#getSignal = getSignal;
-  }
-
-  async *synthesizeTextStream(text: ReadableStream<string>): AsyncGenerator<{
-    audio: ArrayBuffer;
-    text: string;
-  }> {
-    const reader = text.getReader();
-    const first = await reader.read();
-    if (!first.done) {
-      yield {
-        audio: new TextEncoder().encode(first.value).buffer,
-        text: "Echo:"
-      };
-    }
-    const signal = this.#getSignal();
-    if (!signal?.aborted) {
-      await new Promise<void>((resolve) =>
-        signal?.addEventListener("abort", () => resolve(), { once: true })
-      );
-    }
-    reader.releaseLock();
   }
 }
 class ControlledTestStreamingTTS
@@ -640,7 +606,6 @@ export class TestVoiceAgent extends VoiceBase {
   #callStartCount = 0;
   #callEndCount = 0;
   #interruptCount = 0;
-  #interruptedText: Array<string | undefined> = [];
   #callStartResumed: boolean[] = [];
   #beforeCallStartResult: boolean | "throw" = true;
   #keepAliveShouldThrow = false;
@@ -663,7 +628,6 @@ export class TestVoiceAgent extends VoiceBase {
   #controlledTTS = new ControlledTestStreamingTTS(
     () => this.#currentTurnSignal
   );
-  #alignedTTS = new ControlledAlignedTTS(() => this.#currentTurnSignal);
 
   async keepAlive(): Promise<() => void> {
     if (this.#keepAliveShouldThrow) {
@@ -799,9 +763,8 @@ export class TestVoiceAgent extends VoiceBase {
     this.#callEndCount++;
   }
 
-  onInterrupt(_connection: Connection, context: VoiceInterruptContext) {
+  onInterrupt(_connection: Connection) {
     this.#interruptCount++;
-    this.#interruptedText.push(context.spokenText);
   }
 
   onClose(_connection: Connection): void {}
@@ -875,9 +838,6 @@ export class TestVoiceAgent extends VoiceBase {
         case "_set_tts_mode":
           if (parsed.value === "controlled") {
             this.tts = this.#controlledTTS;
-            this.#streamTurns = true;
-          } else if (parsed.value === "aligned") {
-            this.tts = this.#alignedTTS;
             this.#streamTurns = true;
           } else if (parsed.value === "normal") {
             this.tts = new TestTTS();
@@ -1012,8 +972,7 @@ export class TestVoiceAgent extends VoiceBase {
               callEnd: this.#callEndCount,
               interrupt: this.#interruptCount,
               keepAliveAcquired: this.#keepAliveAcquiredCount,
-              keepAliveReleased: this.#keepAliveReleasedCount,
-              interruptedText: this.#interruptedText
+              keepAliveReleased: this.#keepAliveReleasedCount
             })
           );
           break;

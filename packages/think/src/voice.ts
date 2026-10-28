@@ -18,7 +18,6 @@ import type {
   Transcriber,
   VoiceAgentMixinMembers,
   VoiceAgentOptions,
-  VoiceInterruptContext,
   VoiceTurnContext,
   TTSProvider
 } from "agents/voice";
@@ -102,7 +101,7 @@ class VoiceChannelTextStream implements AsyncIterable<unknown> {
   #postTail: Promise<void> = Promise.resolve();
   #closed = false;
   message?: UIMessage;
-  interruptedText?: string;
+  interrupted = false;
 
   constructor(
     callback: TextStreamCallback,
@@ -121,20 +120,9 @@ class VoiceChannelTextStream implements AsyncIterable<unknown> {
 
   prepareMessage(message: UIMessage): UIMessage | null {
     this.message = message;
-    if (this.interruptedText === undefined) return message;
-    let insertedText = false;
-    const parts: UIMessage["parts"] = [];
-    for (const part of message.parts) {
-      if (part.type !== "text") {
-        parts.push(part);
-      } else if (!insertedText && this.interruptedText) {
-        parts.push({ type: "text", text: this.interruptedText });
-        insertedText = true;
-      }
-    }
-    if (!insertedText && this.interruptedText) {
-      parts.push({ type: "text", text: this.interruptedText });
-    }
+    if (!this.interrupted) return message;
+    // No playback measurement: interrupted text is dropped, tool parts stay.
+    const parts = message.parts.filter((part) => part.type !== "text");
     if (!parts.some((part) => part.type !== "step-start")) return null;
     return {
       ...message,
@@ -333,17 +321,13 @@ export function createVoiceThink<
     }
 
     override async onInterrupt(
-      connection: Parameters<VoiceAgentMixinMembers["onInterrupt"]>[0],
-      context: VoiceInterruptContext
+      connection: Parameters<VoiceAgentMixinMembers["onInterrupt"]>[0]
     ): Promise<void> {
       const stream = this.#voiceOutputs.get(connection.id);
       stream?.discard();
-      if (
-        stream &&
-        (context.spokenText !== undefined || stream.signal.aborted)
-      ) {
+      if (stream?.signal.aborted) {
         this.#voiceOutputs.delete(connection.id);
-        stream.interruptedText = (context.spokenText ?? "").trim();
+        stream.interrupted = true;
         // An in-flight reply is prepared by Think's normal persistence path.
         // If it already committed, update its own row, never the latest leaf.
         if (stream.message) {
@@ -358,7 +342,7 @@ export function createVoiceThink<
           }
         }
       }
-      await super.onInterrupt(connection, context);
+      await super.onInterrupt(connection);
     }
 
     protected override _strippedForPersist(

@@ -156,8 +156,6 @@ export type VoiceClientMessage =
       type: "start_call";
       preferred_format?: VoiceAudioFormat;
       resumed?: boolean;
-      /** Transport can acknowledge server playback checkpoints. */
-      playback_checkpoints?: boolean;
     }
   | { type: "end_call" }
   | {
@@ -171,11 +169,6 @@ export type VoiceClientMessage =
       threshold?: number;
     }
   | { type: "interrupt"; source?: "audio_level" }
-  | {
-      type: "playback_checkpoint_ack";
-      playback_id: string;
-      sequence: number;
-    }
   | { type: "text_message"; text: string };
 
 // --- Wire protocol: Server → Client ---
@@ -194,11 +187,6 @@ export type VoiceServerMessage =
   | { type: "transcript_delta"; text: string }
   | { type: "transcript_end"; text: string }
   | { type: "transcript_interim"; text: string }
-  | {
-      type: "playback_checkpoint";
-      playback_id: string;
-      sequence: number;
-    }
   | { type: "playback_interrupt" }
   | {
       type: "metrics";

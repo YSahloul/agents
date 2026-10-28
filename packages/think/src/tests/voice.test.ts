@@ -86,18 +86,12 @@ describe("Think voice adapter", () => {
     expect(result.toolExecutions).toBe(1);
     expect(result.text).toBe("voice answer");
   });
-  it.each([
-    { mode: "ordinary", eager: false, spokenText: "" },
-    { mode: "confirmed eager", eager: true, spokenText: "" },
-    { mode: "partially spoken", eager: false, spokenText: "voice" },
-    { mode: "unacknowledged", eager: false, spokenText: undefined },
-    { mode: "unacknowledged eager", eager: true, spokenText: undefined }
-  ])(
-    "keeps a $mode tool result after speech interrupts its voice output",
-    async ({ eager, spokenText }) => {
+  it.each([false, true])(
+    "keeps the tool result after speech interrupts its voice output (eager: %s)",
+    async (eager) => {
       const agent = await freshAgent(`voice-tool-${crypto.randomUUID()}`);
       const result = JSON.parse(
-        await agent.runInterruptedToolVoiceTurnForTest(eager, spokenText)
+        await agent.runInterruptedToolVoiceTurnForTest(eager)
       ) as {
         stored: UIMessage[];
         toolExecutions: number;
@@ -120,30 +114,11 @@ describe("Think voice adapter", () => {
           })
         ])
       );
-      expect(textOf(result.stored[1])).toBe(spokenText ?? "");
+      expect(textOf(result.stored[1])).toBe("");
       expect(result.resolvesBeforeToolRelease).toBe(true);
     }
   );
 
-  it("replaces an interrupted assistant response with acknowledged speech", async () => {
-    const agent = await freshAgent(`voice-interrupted-${crypto.randomUUID()}`);
-
-    const { stored: messages, nextPrompt } = JSON.parse(
-      await agent.reconcileInterruptedVoiceTurnForTest("voice")
-    ) as { stored: UIMessage[]; nextPrompt: unknown };
-    const prompt = JSON.stringify(nextPrompt);
-    expect(messages.map((message) => message.role)).toEqual([
-      "user",
-      "assistant"
-    ]);
-    expect(textOf(messages[0])).toBe("interrupted question");
-    expect(textOf(messages[1])).toBe("voice");
-    expect(messages[1].metadata).toMatchObject({ interrupted: true });
-    expect(prompt).toContain("interrupted question");
-    expect(prompt).toContain("voice");
-    expect(prompt).toContain("follow up");
-    expect(prompt).not.toContain("voice answer");
-  });
   it("interrupts the owning completed response, not newer history", async () => {
     const agent = await freshAgent(`voice-owner-${crypto.randomUUID()}`);
     const result = JSON.parse(
@@ -162,9 +137,7 @@ describe("Think voice adapter", () => {
     const unrelated = result.stored.find(
       (message) => message.id === result.unrelatedId
     );
-    expect(owner).toBeDefined();
-    expect(textOf(owner)).toBe("acknowledged speech");
-    expect(owner?.metadata).toMatchObject({ interrupted: true });
+    expect(owner).toBeUndefined();
     expect(unrelated).toEqual({
       id: result.unrelatedId,
       role: "assistant",
@@ -173,7 +146,7 @@ describe("Think voice adapter", () => {
     expect(result.outputDiscarded).toBe(true);
     const nextPrompt = JSON.stringify(result.nextPrompt);
     expect(nextPrompt).toContain("unrelated newer response");
-    expect(nextPrompt).toContain("acknowledged speech");
+    expect(nextPrompt).toContain("owning question");
     expect(nextPrompt).not.toContain("voice answer");
   });
 
@@ -182,7 +155,7 @@ describe("Think voice adapter", () => {
     async (eager) => {
       const agent = await freshAgent(`voice-unheard-${crypto.randomUUID()}`);
       const result = JSON.parse(
-        await agent.reconcileInterruptedVoiceTurnForTest(undefined, eager)
+        await agent.reconcileInterruptedVoiceTurnForTest(eager)
       ) as { stored: UIMessage[]; nextPrompt: unknown };
 
       expect(result.stored.map((message) => message.role)).toEqual(["user"]);
