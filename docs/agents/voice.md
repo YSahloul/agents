@@ -228,12 +228,12 @@ For eager turns, model inference may start immediately, but do not persist the t
 
 ### Lifecycle Hooks
 
-| Method                        | Description                                 |
-| ----------------------------- | ------------------------------------------- |
-| `beforeCallStart(connection)` | Return `false` to reject the call           |
-| `onCallStart(connection)`     | Called after a call is accepted             |
-| `onCallEnd(connection)`       | Called when a call ends                     |
-| `onInterrupt(connection)`     | Called when user interrupts during playback |
+| Method                             | Description                                                                                                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `beforeCallStart(connection)`      | Return `false` to reject the call                                                                                                                                                 |
+| `onCallStart(connection)`          | Called after a call is accepted                                                                                                                                                   |
+| `onCallEnd(connection)`            | Called when a call ends                                                                                                                                                           |
+| `onInterrupt(connection, context)` | Called when user interrupts during playback. `context.heardText` is the part of the interrupted reply that played (raw `pcm16`/`mulaw` output only); history keeps only that part |
 
 If startup is rejected or fails, the server sends the client back to `idle` and calls `onCallEnd()` so cleanup logic can run.
 

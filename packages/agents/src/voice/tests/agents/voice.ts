@@ -1404,6 +1404,45 @@ export class TestPcm24kVoiceAgent extends Pcm24kVoiceBase {
   }
 }
 
+const HeardTextVoiceBase = withVoice(Agent, {
+  audioFormat: "pcm16",
+  sampleRate: 16000
+});
+
+/** Two-sentence reply with 1 s of pcm16 audio per sentence, for heard-text tests. */
+export class TestHeardTextVoiceAgent extends HeardTextVoiceBase {
+  transcriber = new TestTranscriber();
+  tts: TTSProvider = {
+    async synthesize() {
+      return new ArrayBuffer(32000);
+    }
+  };
+
+  async onTurn(): Promise<TextSource> {
+    return (async function* () {
+      yield "First sentence is here. ";
+      yield "Second sentence is here.";
+    })();
+  }
+
+  onMessage(connection: Connection, message: WSMessage) {
+    if (typeof message !== "string") return;
+    const parsed = JSON.parse(message) as Record<string, unknown>;
+    if (parsed.type === "_get_history") {
+      connection.send(
+        JSON.stringify({
+          type: "_history",
+          messages: this.getConversationHistory(Number.MAX_SAFE_INTEGER)
+        })
+      );
+    } else if (parsed.type === "_emit_speech_start") {
+      this.transcriber.lastSession?.emitSpeechStart(
+        typeof parsed.text === "string" ? parsed.text : undefined
+      );
+    }
+  }
+}
+
 /**
  * Test VoiceAgent that holds its pipeline open until the abort signal fires.
  */

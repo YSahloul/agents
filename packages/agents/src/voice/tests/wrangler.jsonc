@@ -44,6 +44,10 @@
         "name": "TestPcm24kVoiceAgent"
       },
       {
+        "class_name": "TestHeardTextVoiceAgent",
+        "name": "TestHeardTextVoiceAgent"
+      },
+      {
         "class_name": "TestStreamingTtsVoiceAgent",
         "name": "TestStreamingTtsVoiceAgent"
       },
@@ -89,6 +93,7 @@
         "TestAiSdkFullStreamVoiceAgent",
         "TestAiSdkTextStreamVoiceAgent",
         "TestPcm24kVoiceAgent",
+        "TestHeardTextVoiceAgent",
         "TestStreamingTtsVoiceAgent",
         "TestInterruptVoiceAgent",
         "TestVoiceInputAgent",

@@ -18,6 +18,7 @@ import type {
   Transcriber,
   VoiceAgentMixinMembers,
   VoiceAgentOptions,
+  VoiceInterruptContext,
   VoiceTurnContext,
   TTSProvider
 } from "agents/voice";
@@ -101,7 +102,7 @@ class VoiceChannelTextStream implements AsyncIterable<unknown> {
   #postTail: Promise<void> = Promise.resolve();
   #closed = false;
   message?: UIMessage;
-  interrupted = false;
+  heardText?: string;
 
   constructor(
     callback: TextStreamCallback,
@@ -120,9 +121,20 @@ class VoiceChannelTextStream implements AsyncIterable<unknown> {
 
   prepareMessage(message: UIMessage): UIMessage | null {
     this.message = message;
-    if (!this.interrupted) return message;
-    // No playback measurement: interrupted text is dropped, tool parts stay.
-    const parts = message.parts.filter((part) => part.type !== "text");
+    if (this.heardText === undefined) return message;
+    // Keep only the heard text, in place of the first text part; tool parts stay.
+    let inserted = false;
+    const parts: UIMessage["parts"] = [];
+    for (const part of message.parts) {
+      if (part.type !== "text") parts.push(part);
+      else if (!inserted && this.heardText) {
+        parts.push({ type: "text", text: this.heardText });
+        inserted = true;
+      }
+    }
+    if (!inserted && this.heardText) {
+      parts.push({ type: "text", text: this.heardText });
+    }
     if (!parts.some((part) => part.type !== "step-start")) return null;
     return {
       ...message,
@@ -321,13 +333,17 @@ export function createVoiceThink<
     }
 
     override async onInterrupt(
-      connection: Parameters<VoiceAgentMixinMembers["onInterrupt"]>[0]
+      connection: Parameters<VoiceAgentMixinMembers["onInterrupt"]>[0],
+      context: VoiceInterruptContext
     ): Promise<void> {
       const stream = this.#voiceOutputs.get(connection.id);
       stream?.discard();
-      if (stream?.signal.aborted) {
+      if (
+        stream &&
+        (context.heardText !== undefined || stream.signal.aborted)
+      ) {
         this.#voiceOutputs.delete(connection.id);
-        stream.interrupted = true;
+        stream.heardText = context.heardText ?? "";
         // An in-flight reply is prepared by Think's normal persistence path.
         // If it already committed, update its own row, never the latest leaf.
         if (stream.message) {
@@ -342,7 +358,7 @@ export function createVoiceThink<
           }
         }
       }
-      await super.onInterrupt(connection);
+      await super.onInterrupt(connection, context);
     }
 
     protected override _strippedForPersist(

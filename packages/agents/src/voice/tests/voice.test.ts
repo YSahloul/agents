@@ -965,6 +965,40 @@ describe("VoiceAgent — diagnostics", () => {
   });
 });
 
+describe("VoiceAgent — heard text on interruption", () => {
+  const full = "First sentence is here. Second sentence is here.";
+
+  async function replyThenInterrupt(waitMs: number) {
+    const { ws } = await connectWS(
+      `/agents/test-heard-text-voice-agent/voice-test-${++instanceCounter}`
+    );
+    await startCall(ws);
+    const speaking = waitForStatus(ws, "speaking");
+    const listening = waitForStatus(ws, "listening");
+    sendJSON(ws, { type: "text_message", text: "question" });
+    await speaking;
+    await listening;
+    // Real delay: the agent's playback clock reads Date.now() inside the Durable Object.
+    if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    const interrupted = waitForType(ws, "playback_interrupt");
+    sendJSON(ws, { type: "_emit_speech_start", text: "stop" });
+    await interrupted;
+    const history = await getHistory(ws);
+    ws.close();
+    return history.find((m) => m.role === "assistant")?.content ?? "";
+  }
+
+  it("keeps only the played prefix when interrupted during playback", async () => {
+    const content = await replyThenInterrupt(0);
+    expect(content).not.toBe(full);
+    expect(full.startsWith(content)).toBe(true);
+  });
+
+  it("keeps the whole reply when interrupted after playback ended", async () => {
+    expect(await replyThenInterrupt(2100)).toBe(full);
+  });
+});
+
 describe("VoiceAgent — transcriber readiness", () => {
   it("does not send listening or run onCallStart before readiness resolves", async () => {
     const { ws } = await connectWS(uniquePath());
