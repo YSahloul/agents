@@ -1838,6 +1838,7 @@ export function withVoice<TBase extends AgentLike>(
           signal
         };
 
+        this.tts?.prepare?.();
         const model = turn.startModel();
         active.model = model;
         const turnResult = await this.onTurn(userText, context);
@@ -2087,6 +2088,8 @@ export function withVoice<TBase extends AgentLike>(
         );
         latency.mark("llmStart");
         this.#turnLatency.set(connection.id, latency);
+        // Connection setup runs while the model thinks, not before the first phrase.
+        this.tts?.prepare?.();
         const model = turn.startModel();
         active.model = model;
         const pendingTurnResult = Promise.resolve()

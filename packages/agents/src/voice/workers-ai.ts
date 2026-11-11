@@ -208,6 +208,12 @@ export type WorkersAIRealtimeTTSOptions = {
  * generator returning *is* completion. Interruption is the consumer abandoning
  * the iterator (or aborting the signal), which closes the socket.
  *
+ * One socket per sentence keeps each socket to a single `Flush`: Deepgram
+ * accepts at most 20 flushes per 60 seconds on one connection. {@link prepare}
+ * opens the next sentence's socket ahead of time instead, so the first phrase
+ * of a reply does not wait for connection setup (measured on Workers: 119–331
+ * ms of setup; first audio 77–95 ms on an open socket vs 238–437 ms on a new one).
+ *
  * Inherits {@link WorkersAITTS.synthesize} as the non-streaming fallback.
  *
  * @example
@@ -227,6 +233,7 @@ export class WorkersAIRealtimeTTS
   #model: string;
   #speaker: string;
   #encoding: "mulaw" | "linear16";
+  #prepared: PreparedSocket | null = null;
 
   constructor(ai: AiLike, options?: WorkersAIRealtimeTTSOptions) {
     const model = options?.model ?? "@cf/deepgram/aura-2-en";
@@ -259,13 +266,31 @@ export class WorkersAIRealtimeTTS
     this.#encoding = encoding;
   }
 
+  /**
+   * Opens the socket the next sentence will use. The server closes an idle
+   * socket within 4–6 seconds (measured: still open at 4 s, closed with 1011 by
+   * 6 s), so a socket older than {@link PREPARED_SOCKET_MAX_AGE_MS} or already
+   * closed is discarded and the sentence opens a new one, as without prepare.
+   */
+  prepare(): void {
+    const current = this.#prepared;
+    if (current && !current.closed && Date.now() - current.openedAt < PREPARED_SOCKET_MAX_AGE_MS) return;
+    if (current) this.#discard(current);
+    const prepared: PreparedSocket = { openedAt: Date.now(), closed: false, socket: this.#open() };
+    prepared.socket.then(
+      (ws) => ws.addEventListener("close", () => { prepared.closed = true; }),
+      () => { prepared.closed = true; }
+    );
+    this.#prepared = prepared;
+  }
+
   async *synthesizeStream(
     text: string,
     signal?: AbortSignal
   ): AsyncGenerator<ArrayBuffer> {
     if (!text || signal?.aborted) return;
 
-    const ws = await this.#open();
+    const ws = await this.#take();
     const sampleBytes = this.#encoding === "mulaw" ? 1 : 2;
     const frameBytes = (this.sampleRate * FRAME_MS * sampleBytes) / 1000;
     const frames = new AudioFrameStream(frameBytes, sampleBytes);
@@ -342,6 +367,38 @@ export class WorkersAIRealtimeTTS
         // Already closed.
       }
     }
+  }
+
+  /** The prepared socket if it is still usable, otherwise a new one. */
+  async #take(): Promise<WebSocket> {
+    const prepared = this.#prepared;
+    this.#prepared = null;
+    if (prepared) {
+      if (!prepared.closed && Date.now() - prepared.openedAt < PREPARED_SOCKET_MAX_AGE_MS) {
+        try {
+          const ws = await prepared.socket;
+          if (!prepared.closed && ws.readyState === WEBSOCKET_OPEN) return ws;
+        } catch {
+          // Preparation failed; open a socket the normal way below.
+        }
+      }
+      this.#discard(prepared);
+    }
+    return this.#open();
+  }
+
+  #discard(prepared: PreparedSocket): void {
+    prepared.closed = true;
+    prepared.socket.then(
+      (ws) => {
+        try {
+          ws.close();
+        } catch {
+          // Already closed.
+        }
+      },
+      () => {}
+    );
   }
 
   async #open(): Promise<WebSocket> {
@@ -645,6 +702,17 @@ export class WorkersAIGrokTTS
 }
 
 const FRAME_MS = 20;
+
+/** Under the server's idle close (still open at 4 s, closed by 6 s on Workers AI Aura-2). */
+const PREPARED_SOCKET_MAX_AGE_MS = 4000;
+/** `WebSocket.OPEN`, without depending on the global in tests. */
+const WEBSOCKET_OPEN = 1;
+
+type PreparedSocket = {
+  openedAt: number;
+  closed: boolean;
+  socket: Promise<WebSocket>;
+};
 
 /**
  * Queues encoded chunks directly or bridges raw audio fragments into

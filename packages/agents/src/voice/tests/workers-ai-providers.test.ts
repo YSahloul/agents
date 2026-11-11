@@ -322,6 +322,90 @@ describe("WorkersAIRealtimeTTS", () => {
       expect.objectContaining({ returnRawResponse: true })
     );
   });
+
+  describe("prepare()", () => {
+    const speak = async (ai: MockAi, tts: WorkersAIRealtimeTTS) => {
+      const done = (async () => {
+        for await (const _frame of tts.synthesizeStream("hello")) {
+          // drain
+        }
+      })();
+      let speaking: MockWebSocket | undefined;
+      await vi.waitFor(() => {
+        speaking = ai.sockets.find((socket) => socket.sent.length > 0 && !socket.closed);
+        expect(speaking).toBeDefined();
+      });
+      speaking!.message(JSON.stringify({ type: "Flushed" }));
+      await done;
+      return speaking!;
+    };
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("speaks the next sentence on the socket it opened ahead of time", async () => {
+      const ai = new MockAi();
+      const tts = new WorkersAIRealtimeTTS(ai);
+      tts.prepare();
+      tts.prepare();
+      const prepared = await waitForConnect(ai);
+
+      const speaking = await speak(ai, tts);
+      expect(speaking).toBe(prepared);
+      expect(ai.calls).toHaveLength(1);
+    });
+
+    it("uses the prepared socket only once", async () => {
+      const ai = new MockAi();
+      const tts = new WorkersAIRealtimeTTS(ai);
+      tts.prepare();
+      const prepared = await waitForConnect(ai);
+      await speak(ai, tts);
+
+      const second = await speak(ai, tts);
+      expect(second).not.toBe(prepared);
+      expect(ai.calls).toHaveLength(2);
+    });
+
+    it("opens a new socket when the prepared one was closed by the server", async () => {
+      const ai = new MockAi();
+      const tts = new WorkersAIRealtimeTTS(ai);
+      tts.prepare();
+      const prepared = await waitForConnect(ai);
+      prepared.dispatch("close", {});
+
+      const speaking = await speak(ai, tts);
+      expect(speaking).not.toBe(prepared);
+      expect(prepared.sent).toHaveLength(0);
+    });
+
+    it("discards a prepared socket older than the server's idle window", async () => {
+      const ai = new MockAi();
+      const tts = new WorkersAIRealtimeTTS(ai);
+      const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+      tts.prepare();
+      const prepared = await waitForConnect(ai);
+      now.mockReturnValue(1_000_000 + 4_000);
+
+      const speaking = await speak(ai, tts);
+      expect(speaking).not.toBe(prepared);
+      expect(prepared.sent).toHaveLength(0);
+      expect(prepared.closed).toBe(true);
+    });
+
+    it("falls back to a new socket when preparing failed", async () => {
+      const ai = new MockAi();
+      const tts = new WorkersAIRealtimeTTS(ai);
+      ai.mode = "throw";
+      tts.prepare();
+      await Promise.resolve();
+      ai.mode = "socket";
+
+      await speak(ai, tts);
+      expect(ai.calls).toHaveLength(2);
+    });
+  });
 });
 
 describe("WorkersAIGrokTTS", () => {

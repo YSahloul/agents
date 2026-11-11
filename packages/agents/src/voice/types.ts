@@ -262,6 +262,13 @@ export interface TTSProvider {
   /** Sample rate of raw PCM output. */
   readonly sampleRate?: number;
   synthesize(text: string, signal?: AbortSignal): Promise<ArrayBuffer | null>;
+  /**
+   * Called when a turn is handed to the model, before any text exists, so a
+   * provider can do its connection setup while the model is thinking and the
+   * first phrase does not wait for it. Must not throw; a failed or expired
+   * preparation falls back to the provider's normal path.
+   */
+  prepare?(): void;
 }
 
 /**

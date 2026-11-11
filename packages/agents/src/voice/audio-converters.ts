@@ -350,6 +350,7 @@ export function convertTTSProvider({
       )
   };
 
+  if (provider.prepare) converted.prepare = () => provider.prepare?.();
   if (hasStreamingText(provider)) {
     converted.synthesizeTextStream = (text, signal) =>
       convertAudio(provider.synthesizeTextStream(text, signal), converter);
