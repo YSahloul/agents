@@ -21,7 +21,7 @@ Cloudflare Agent driven from a chat UI", for non-technical users.
   `save_artifact` and `advance_stage` move it forward. Checkpoints are chat
   pauses.
 - **Per-user isolation** — each browser gets its own DO instance (`name:
-getUserId()`), so each user has their own workspace and pipeline progress.
+  getUserId()`), so each user has their own workspace and pipeline progress.
 - **Glass box** — the sidebar shows each stage's status, its stage contract (the
   agent's instructions), and the saved output artifact.
 

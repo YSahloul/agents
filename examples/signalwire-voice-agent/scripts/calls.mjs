@@ -227,8 +227,7 @@ function printCall(call, index) {
     if (r.kind === "adapter") {
       if (r.text.includes("BARGE-IN"))
         console.log(`${rel}  ⟲ carrier barge-in`);
-      else if (r.text.includes("GATE RELEASED"))
-        continue; // status echo, low value
+      else if (r.text.includes("GATE RELEASED")) continue; // status echo, low value
       else console.log(`${rel}  ${r.text}`);
       continue;
     }

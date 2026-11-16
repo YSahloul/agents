@@ -332,7 +332,9 @@ describe("WorkersAIRealtimeTTS", () => {
       })();
       let speaking: MockWebSocket | undefined;
       await vi.waitFor(() => {
-        speaking = ai.sockets.find((socket) => socket.sent.length > 0 && !socket.closed);
+        speaking = ai.sockets.find(
+          (socket) => socket.sent.length > 0 && !socket.closed
+        );
         expect(speaking).toBeDefined();
       });
       speaking!.message(JSON.stringify({ type: "Flushed" }));

@@ -274,12 +274,26 @@ export class WorkersAIRealtimeTTS
    */
   prepare(): void {
     const current = this.#prepared;
-    if (current && !current.closed && Date.now() - current.openedAt < PREPARED_SOCKET_MAX_AGE_MS) return;
+    if (
+      current &&
+      !current.closed &&
+      Date.now() - current.openedAt < PREPARED_SOCKET_MAX_AGE_MS
+    )
+      return;
     if (current) this.#discard(current);
-    const prepared: PreparedSocket = { openedAt: Date.now(), closed: false, socket: this.#open() };
+    const prepared: PreparedSocket = {
+      openedAt: Date.now(),
+      closed: false,
+      socket: this.#open()
+    };
     prepared.socket.then(
-      (ws) => ws.addEventListener("close", () => { prepared.closed = true; }),
-      () => { prepared.closed = true; }
+      (ws) =>
+        ws.addEventListener("close", () => {
+          prepared.closed = true;
+        }),
+      () => {
+        prepared.closed = true;
+      }
     );
     this.#prepared = prepared;
   }
@@ -374,7 +388,10 @@ export class WorkersAIRealtimeTTS
     const prepared = this.#prepared;
     this.#prepared = null;
     if (prepared) {
-      if (!prepared.closed && Date.now() - prepared.openedAt < PREPARED_SOCKET_MAX_AGE_MS) {
+      if (
+        !prepared.closed &&
+        Date.now() - prepared.openedAt < PREPARED_SOCKET_MAX_AGE_MS
+      ) {
         try {
           const ws = await prepared.socket;
           if (!prepared.closed && ws.readyState === WEBSOCKET_OPEN) return ws;

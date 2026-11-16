@@ -23,11 +23,7 @@ export class Assistant extends Think<Env> {
         ingress: { transport: "websocket" },
         instructions: "Use markdown freely in the browser."
       },
-      telegram: messengerChannel(
-        telegram({
-          /* adapter config */
-        })
-      )
+      telegram: messengerChannel(telegram({/* adapter config */}))
     };
   }
 }
