@@ -1,11 +1,14 @@
-import type { RpcTarget as CloudflareRpcTarget } from "cloudflare:workers";
+import type { RpcTarget as WorkersRpcTarget } from "cloudflare:workers";
 
 // `cloudflare:workers` only exists in workerd; the fallback keeps package
 // export inspection usable in Node without changing the Workers runtime base.
-const RpcTarget: typeof CloudflareRpcTarget | (new () => object) =
-  await import("cloudflare:workers")
-    .then((module) => module.RpcTarget)
-    .catch(() => class {});
+const workers = import("cloudflare:workers") as unknown as Promise<{
+  RpcTarget: typeof WorkersRpcTarget;
+}>;
+const RpcTarget = await workers.then(
+  (module) => module.RpcTarget,
+  () => class {} as unknown as typeof WorkersRpcTarget
+);
 import { TextSegmentJoiner } from "agents/chat";
 
 type Wake = () => void;

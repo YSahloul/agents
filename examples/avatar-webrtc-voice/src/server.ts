@@ -127,7 +127,6 @@ const VoiceThink = createSFUVoiceThink<Env>();
 
 /** One Durable Object owns Think Session, Voice, SFU, tools, and workspace. */
 export class MyThinkAgent extends VoiceThink {
-  override workspaceBash = false;
   readonly #workersAi = createWorkersAI({ binding: this.env.AI });
 
   override getModel() {
@@ -263,8 +262,19 @@ export class MyThinkAgent extends VoiceThink {
   @callable()
   async listWorkspaceFiles() {
     try {
-      return (await this.workspace.glob("**/*")).filter(
-        (entry) => entry.type === "file"
+      const found = await this.workspace.fs.find("/", "**");
+      return await Promise.all(
+        found
+          .filter((entry) => entry.type === "file")
+          .map(async ({ path }) => {
+            const stat = await this.workspace.fs.stat(path);
+            return {
+              path,
+              name: stat.name,
+              size: stat.size,
+              updatedAt: stat.mtime
+            };
+          })
       );
     } catch {
       return [];

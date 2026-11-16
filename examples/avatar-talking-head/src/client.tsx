@@ -152,10 +152,17 @@ function helperStatus(run: AgentToolRunState): string {
   return run.error ?? run.status;
 }
 
+async function listAudioOutputs(): Promise<MediaDeviceInfo[] | undefined> {
+  if (!navigator.mediaDevices?.enumerateDevices) return undefined;
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices.filter((device) => device.kind === "audiooutput");
+}
+
 // --- Main App ---
 
 function App() {
-  const sessionId = useRef(getSessionId()).current;
+  const [sessionId] = useState(getSessionId);
   const thinkAgent = useAgent({
     agent: "my-think-agent",
     name: sessionId
@@ -241,8 +248,17 @@ function App() {
   }, [panels]);
 
   useEffect(() => {
-    if (connected) void refreshWorkspaceFiles();
-  }, [connected, transcript.length, refreshWorkspaceFiles]);
+    if (!connected) return;
+    thinkAgent.call("listWorkspaceFiles", []).then(
+      (files) => {
+        setWorkspaceFiles(
+          Array.isArray(files) ? (files as WorkspaceFile[]) : []
+        );
+        setFilesError(false);
+      },
+      () => setFilesError(true)
+    );
+  }, [connected, transcript.length, thinkAgent]);
 
   // Auto-clear toasts
   useEffect(() => {
@@ -253,18 +269,19 @@ function App() {
   }, [toast]);
 
   const refreshAudioOutputs = useCallback(async () => {
-    if (!navigator.mediaDevices?.enumerateDevices) return;
-
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    setAudioOutputDevices(
-      devices.filter((device) => device.kind === "audiooutput")
-    );
+    const devices = await listAudioOutputs();
+    if (devices) setAudioOutputDevices(devices);
   }, []);
 
   useEffect(() => {
-    refreshAudioOutputs().catch(() => {
-      setToast("Could not list speakers for this browser.");
-    });
+    listAudioOutputs().then(
+      (devices) => {
+        if (devices) setAudioOutputDevices(devices);
+      },
+      () => {
+        setToast("Could not list speakers for this browser.");
+      }
+    );
 
     navigator.mediaDevices?.addEventListener(
       "devicechange",

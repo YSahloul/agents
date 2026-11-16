@@ -208,10 +208,47 @@ function RobotAvatar({ isTalking }: { isTalking: boolean }) {
   );
 }
 
+async function listAudioOutputs(): Promise<MediaDeviceInfo[] | undefined> {
+  if (!navigator.mediaDevices?.enumerateDevices) return undefined;
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices.filter((device) => device.kind === "audiooutput");
+}
+
+/** Audio input that reports when Think's playback is audible. */
+function createAudioInput(
+  sessionId: string,
+  onPlayback: (active: boolean) => void
+) {
+  let active = false;
+  let silenceTimer: number | undefined;
+  return new SFUVoiceAudioInput({
+    endpoint: `/agents/my-think-agent/${encodeURIComponent(sessionId)}/voice`,
+    onPlaybackAudioLevel: (rms) => {
+      if (rms > 0.01) {
+        if (silenceTimer !== undefined) {
+          clearTimeout(silenceTimer);
+          silenceTimer = undefined;
+        }
+        if (!active) {
+          active = true;
+          onPlayback(true);
+        }
+      } else if (active && silenceTimer === undefined) {
+        silenceTimer = window.setTimeout(() => {
+          active = false;
+          silenceTimer = undefined;
+          onPlayback(false);
+        }, 160);
+      }
+    }
+  });
+}
+
 // --- Main App ---
 
 function App() {
-  const sessionId = useRef(getSessionId()).current;
+  const [sessionId] = useState(getSessionId);
   const thinkAgent = useAgent({
     agent: "my-think-agent",
     name: sessionId
@@ -230,38 +267,10 @@ function App() {
   const [reasoning, setReasoning] = useState<ReasoningEffort>("off");
   const [outputDeviceId, setOutputDeviceId] = useState("default");
   const [hasPlaybackAudio, setHasPlaybackAudio] = useState(false);
-  const playbackActive = useRef(false);
-  const playbackSilenceTimer = useRef<number | undefined>(undefined);
   const audioInput = useMemo(
-    () =>
-      new SFUVoiceAudioInput({
-        endpoint: `/agents/my-think-agent/${encodeURIComponent(sessionId)}/voice`,
-        onPlaybackAudioLevel: (rms) => {
-          if (rms > 0.01) {
-            if (playbackSilenceTimer.current !== undefined) {
-              clearTimeout(playbackSilenceTimer.current);
-              playbackSilenceTimer.current = undefined;
-            }
-            if (!playbackActive.current) {
-              playbackActive.current = true;
-              setHasPlaybackAudio(true);
-            }
-          } else if (
-            playbackActive.current &&
-            playbackSilenceTimer.current === undefined
-          ) {
-            playbackSilenceTimer.current = window.setTimeout(() => {
-              playbackActive.current = false;
-              playbackSilenceTimer.current = undefined;
-              setHasPlaybackAudio(false);
-            }, 160);
-          }
-        }
-      }),
+    () => createAudioInput(sessionId, setHasPlaybackAudio),
     [sessionId]
   );
-
-  useEffect(() => () => clearTimeout(playbackSilenceTimer.current), []);
 
   const {
     status,
@@ -316,8 +325,17 @@ function App() {
   }, [panels]);
 
   useEffect(() => {
-    if (connected) void refreshWorkspaceFiles();
-  }, [connected, transcript.length, refreshWorkspaceFiles]);
+    if (!connected) return;
+    thinkAgent.call("listWorkspaceFiles", []).then(
+      (files) => {
+        setWorkspaceFiles(
+          Array.isArray(files) ? (files as WorkspaceFile[]) : []
+        );
+        setFilesError(false);
+      },
+      () => setFilesError(true)
+    );
+  }, [connected, transcript.length, thinkAgent]);
 
   // Auto-clear toasts
   useEffect(() => {
@@ -328,18 +346,19 @@ function App() {
   }, [toast]);
 
   const refreshAudioOutputs = useCallback(async () => {
-    if (!navigator.mediaDevices?.enumerateDevices) return;
-
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    setAudioOutputDevices(
-      devices.filter((device) => device.kind === "audiooutput")
-    );
+    const devices = await listAudioOutputs();
+    if (devices) setAudioOutputDevices(devices);
   }, []);
 
   useEffect(() => {
-    refreshAudioOutputs().catch(() => {
-      setToast("Could not list speakers for this browser.");
-    });
+    listAudioOutputs().then(
+      (devices) => {
+        if (devices) setAudioOutputDevices(devices);
+      },
+      () => {
+        setToast("Could not list speakers for this browser.");
+      }
+    );
 
     navigator.mediaDevices?.addEventListener(
       "devicechange",
