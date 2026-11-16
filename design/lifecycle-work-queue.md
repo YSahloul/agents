@@ -111,10 +111,16 @@ Four named rules define what a job owner can and cannot rely on:
    (default 30s) logs a warning and emits `job:slow_dispatch`. Work that must
    continue after a bounded handoff registers its promise with
    `trackAlarmWork()` so it remains part of the current alarm's breaker domain.
-3. **Newer pushes win over drive results.** Every dispatched job carries
-   a durable in-flight marker; a same-id `push()` or `reschedule()` made
-   while the job executes clears it, and `applyOutcome` only applies a
-   drive result to a still-marked job. The drive loop also refetches each
+3. **Newer pushes win over drive results.** Every change of a job's
+   durable intent (`push()`, `reschedule()`, `cancel()`, the breaker's
+   retimes), and a takeover of a hung single-flight job, bumps its
+   in-memory revision, which exists only while a dispatch of that job is
+   in flight. A dispatch records the revision when it claims the job; a
+   retry runs, and `applyOutcome` applies a drive result, only while the
+   revision is unchanged. Another dispatch of the
+   same unchanged job (overlapping alarms) does not bump it. Each dispatch
+   still sets the durable `running` marker, which single-flight skipping
+   and hung recovery read. The drive loop also refetches each
    due job before claiming it, so a job replaced earlier in the same
    alarm cycle dispatches with fresh data — or, if no longer due, is
    skipped. An owner can therefore never lose a wake it explicitly
@@ -144,7 +150,14 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
 
 `Lifecycle.alarm()`:
 
-1. Ensure startup.
+1. If the queue holds jobs: arm a **startup fallback alarm** at the next
+   job's time, but no sooner than now + 30s, so a startup that throws (or an
+   isolate that dies mid-startup) still leaves a wake, whether or not the
+   platform's own alarm retries run, and is retried then. Then ensure
+   startup. Queue mutations during startup defer their re-arm until startup
+   ends; if startup throws after one, `Lifecycle` arms the same fallback from
+   the current queue (on alarm and request paths alike), so jobs pushed
+   during a failed startup keep a wake.
 2. If jobs are due: arm the **deadman pre-alarm** (now + 30s) so an isolate
    death mid-drive still wakes the object; the final re-arm overwrites it.
 3. Drive due jobs (`time <= now`, ordered by time). For each:

@@ -1,7 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import { createGitClient } from "@cloudflare/computer/git";
+import { createGitModule } from "@cloudflare/computer/modules/git";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
@@ -10,9 +11,9 @@ import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "./sockets";
-import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "./workspace";
+import { createWorkspaceTools } from "./workspace";
 
-const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
+const MODEL_ID = "@cf/zai-org/glm-5.3-flash";
 
 const PREAMBLE =
   "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
@@ -23,24 +24,23 @@ export class PiAgent extends DurableObject<Env> {
   readonly ai = createAI({ binding: this.env.AI });
   // A durable filesystem on the object's SQLite, beside pi's own tables.
   // `exec` runs JavaScript modules in a fresh Dynamic Worker per call, with
-  // no network of its own. `git` turns on `workspace.git`, which `ws:git`
-  // calls in the host; `allowGitNetwork` lets it clone, fetch and push.
+  // no network of its own. `git` turns on `workspace.git`, which the `codemode:git`
+  // module calls in the host; `allowNetwork` lets it clone, fetch and push.
   readonly workspace = new Workspace({
     storage: this.ctx.storage as unknown as DurableObjectStorageLike,
     git: createGitClient(),
     backends: [
-      new WorkerJavaScriptBackend({
-        id: JAVASCRIPT_BACKEND,
+      new CodemodeBackend({
         loader: this.env.LOADER,
         root: "/workspace",
         access: "read-write",
-        allowGitNetwork: true
+        modules: { "codemode:git": createGitModule({ allowNetwork: true }) }
       })
     ]
   });
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: async ({ storage, context }) => {
+    harness: async ({ storage, context, onWake }) => {
       // pi's own extension: the system prompt and the workspace tools.
       this.registry.install({
         name: "playground",
@@ -54,12 +54,13 @@ export class PiAgent extends DurableObject<Env> {
         {
           models,
           registry: this.registry,
+          onWake,
           settings: {
             // pi doubles the delay before each retry: 1, 2, 4, 8 and 16 seconds,
             // so a rate-limited model gets about 30 seconds to recover.
             retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 }
           },
-          onReport: (error) => console.warn("pi report", error)
+          onReport: (report) => console.warn("pi report", report)
         },
         context
       );

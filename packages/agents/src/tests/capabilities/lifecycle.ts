@@ -13,6 +13,7 @@ import {
 } from "../../lifecycle";
 import { State } from "../../state";
 import { WebSockets } from "../../websockets";
+import { LiveInstances } from "../shared/live-instances";
 
 type StartupProps = { label: string };
 
@@ -226,6 +227,14 @@ function currentWebSocketContext(
  */
 class PlainHostCallables extends RpcTarget {
   readonly #greeting = "host";
+  /** How many times `bump()` ran, for the closed-connection tests. */
+  bumps = 0;
+
+  /** A callable with a side effect, for the closed-connection tests. */
+  bump(): number {
+    this.bumps += 1;
+    return this.bumps;
+  }
 
   add(a: number, b: number): number {
     return a + b;
@@ -292,11 +301,18 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   readonly #startupEvent = new StartupEventProbe();
   readonly #routedCapability = new RoutedCapabilityProbe();
   readonly #hostBoundary = new HostBoundaryProbe();
+  readonly #callables = new PlainHostCallables();
   readonly #webSockets = new WebSockets({
     handlers: {
-      onConnect: (connection) => {
+      onConnect: async (connection, { request }) => {
         this.#webSocketContexts.push(currentWebSocketContext("connect"));
         connection.send(`connected:${this.lifecycle.name}`);
+        // `?rejectAfterMs=N` stands in for async auth in onConnect: wait
+        // N ms, then reject the connection with 4001.
+        const delay = new URL(request.url).searchParams.get("rejectAfterMs");
+        if (delay === null) return;
+        await new Promise((resolve) => setTimeout(resolve, Number(delay)));
+        connection.close(4001, "Unauthorized");
       },
       onMessage: (connection, message) => {
         this.#webSocketContexts.push(currentWebSocketContext("message"));
@@ -311,7 +327,7 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
       const count = Number(new URL(request.url).searchParams.get("tags") ?? 0);
       return Array.from({ length: count }, (_, i) => `t${i}`);
     },
-    callables: new PlainHostCallables()
+    callables: this.#callables
   });
   readonly #hostContexts: HostContextEvent[] = [];
   readonly #webSocketContexts: WebSocketContextEvent[] = [];
@@ -353,6 +369,11 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   /** Open connections on either wire, for transport tests. */
   connectionCount(): number {
     return [...this.#webSockets.getConnections()].length;
+  }
+
+  /** How many times the `bump` callable ran, for closed-connection tests. */
+  bumpCount(): number {
+    return this.#callables.bumps;
   }
 
   /** Tags of one connection, for transport tests. */
@@ -693,6 +714,124 @@ export class RetryableStartObject extends DurableObject<Cloudflare.Env> {
   }
 }
 
+/**
+ * Fails startup while its object's storage holds `fail-start`. When storage
+ * also holds `push-during-start`, a failing startup first pushes a job due at
+ * that time, so a test can check the job still gets a wake.
+ */
+class StoredStartFailureProbe extends LifecycleCapability {
+  constructor() {
+    super("stored-start-failure-probe");
+  }
+
+  async onStart(): Promise<void> {
+    if (!(await this.lifecycle.storage.get<boolean>("fail-start"))) return;
+    const pushTime =
+      await this.lifecycle.storage.get<number>("push-during-start");
+    if (pushTime !== undefined) {
+      await this.push({
+        id: "pushed-during-start",
+        fn: "tick",
+        time: pushTime
+      });
+    }
+    throw new Error("intentional startup failure");
+  }
+
+  async onJob(): Promise<void> {}
+
+  push(options: LifecycleJobPushOptions) {
+    return this.lifecycle.jobs.push(options);
+  }
+}
+
+/** Every {@link EvictableStartObject} instance, by object name. */
+const evictableStartInstances = new LiveInstances();
+
+/**
+ * Starts by storing a promise that never settles but has a reaction, as
+ * pi's Harness does. Every promise reaction keeps the async context it was
+ * created in, so the capability is reachable from its startup context.
+ */
+class PendingReactionProbe extends LifecycleCapability {
+  pending: Promise<void> | undefined;
+
+  constructor() {
+    super("pending-reaction-probe");
+  }
+
+  onStart(): void {
+    const pending = new Promise<void>(() => {});
+    void pending.then(() => {});
+    this.pending = pending;
+  }
+}
+
+/**
+ * Holds a queued job whose alarm runs into a failing startup, so a test can
+ * check the queue still has a wake after that alarm fails.
+ */
+export class AlarmStartFailureObject extends DurableObject<Cloudflare.Env> {
+  readonly #probe = new StoredStartFailureProbe();
+  readonly lifecycle = Lifecycle.install(this).use(this.#probe);
+
+  /** Queue a job due at `time`, then make every later startup fail. */
+  async queueJobThenFailStartup(time: number): Promise<void> {
+    await this.lifecycle.start();
+    await this.#probe.push({ id: "pending", fn: "tick", time });
+    await this.ctx.storage.put("fail-start", true);
+  }
+
+  /**
+   * Make every later startup push a job due at `pushTime` and then fail. When
+   * `queuedTime` is given, first queue a job due then.
+   */
+  async failStartupAfterPushing(
+    pushTime: number,
+    queuedTime?: number
+  ): Promise<void> {
+    await this.lifecycle.start();
+    if (queuedTime !== undefined) {
+      await this.#probe.push({ id: "pending", fn: "tick", time: queuedTime });
+    }
+    await this.ctx.storage.put("push-during-start", pushTime);
+    await this.ctx.storage.put("fail-start", true);
+  }
+
+  /** Start the lifecycle from a request, returning the startup error. */
+  async tryStart(): Promise<string> {
+    try {
+      await this.lifecycle.start();
+      return "started";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+}
+
+/**
+ * Proves an evicted object can be garbage collected after a capability
+ * started work that never settles. Tests evict it repeatedly, then count
+ * the instances still alive after a forced GC.
+ */
+export class EvictableStartObject extends DurableObject<Cloudflare.Env> {
+  readonly lifecycle = Lifecycle.install(this).use(new PendingReactionProbe());
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    evictableStartInstances.track(ctx.id.name ?? "", this);
+  }
+
+  async startLifecycle(): Promise<void> {
+    await this.lifecycle.start();
+  }
+
+  /** Count this object's instances still alive after a forced GC. */
+  countLiveInstances(): Promise<number> {
+    return evictableStartInstances.countAfterGC(this.ctx.id.name ?? "");
+  }
+}
+
 export type ConcurrentStartOptions = {
   /** Make the capability's start throw after yielding. */
   readonly failCapability?: boolean;
@@ -876,5 +1015,83 @@ export class StatefulPlainObject extends DurableObject<Cloudflare.Env> {
   async getCount(): Promise<number | undefined> {
     await this.lifecycle.start();
     return this.#state.get()?.count;
+  }
+}
+
+/** The message every {@link FetchErrorObject} failure throws. */
+export const FETCH_ERROR_SECRET = "DATABASE_URL could not be resolved";
+
+/** What a {@link FetchErrorObject}'s `onFetchError` hook observed. */
+export type FetchErrorHookCall = {
+  readonly error: string;
+  readonly requestUrl: string;
+  readonly inHostContext: boolean;
+};
+
+/** Where a {@link FetchErrorObject} request fails, from its `fail` query. */
+function fetchFailure(request: Request): string | null {
+  return new URL(request.url).searchParams.get("fail");
+}
+
+/**
+ * A Lifecycle host with an `onFetchError` hook. A request's `fail` query
+ * picks where handling throws (`capability`, `host`, or `non-error`), and
+ * its `hook` query picks the hook's answer (`respond`, `socket`, `throw`, or
+ * none, which declines). `failStartup()` makes startup throw instead.
+ */
+export class FetchErrorObject extends DurableObject<Cloudflare.Env> {
+  readonly #hookCalls: FetchErrorHookCall[] = [];
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(new StoredStartFailureProbe())
+    .use({
+      onRequest: ({ request }) => {
+        if (fetchFailure(request) === "capability") {
+          throw new Error(FETCH_ERROR_SECRET);
+        }
+      }
+    });
+
+  onRequest(request: Request): Response {
+    const failure = fetchFailure(request);
+    if (failure === "host") throw new Error(FETCH_ERROR_SECRET);
+    if (failure === "non-error") {
+      throw FETCH_ERROR_SECRET;
+    }
+    return new Response("ok");
+  }
+
+  onFetchError(request: Request, error: unknown): Response | undefined {
+    const message = error instanceof Error ? error.message : String(error);
+    this.#hookCalls.push({
+      error: message,
+      requestUrl: request.url,
+      inHostContext: getCurrentAgent().agent === this
+    });
+
+    switch (new URL(request.url).searchParams.get("hook")) {
+      case "respond":
+        return Response.json({ error: message }, { status: 503 });
+      case "socket": {
+        const pair = new WebSocketPair();
+        pair[1].accept();
+        pair[1].send(JSON.stringify({ error: message }));
+        pair[1].close(4000, "startup failed");
+        return new Response(null, { status: 101, webSocket: pair[0] });
+      }
+      case "throw":
+        throw new Error("onFetchError failed");
+      default:
+        return undefined;
+    }
+  }
+
+  /** Make every later startup throw {@link StoredStartFailureProbe}'s error. */
+  async failStartup(): Promise<void> {
+    await this.ctx.storage.put("fail-start", true);
+  }
+
+  getHookCalls(): FetchErrorHookCall[] {
+    return this.#hookCalls;
   }
 }

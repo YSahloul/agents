@@ -52,6 +52,10 @@ export type DynamicAgentConnectionMeta = {
 
 export type DynamicAgentConnectionBridgeLike = {
   send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
+  /** Sends `messages` in order, in one call. */
+  sendMany(
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): void | Promise<void>;
   close(code?: number, reason?: string): void | Promise<void>;
   setState(state: unknown): unknown | Promise<unknown>;
   broadcast(
@@ -119,11 +123,13 @@ type Promisify<T> = T extends Promise<unknown> ? T : Promise<T>;
  * are excluded — only user-defined methods on the subclass are exposed.
  */
 export type DynamicAgentStub<T extends Agent> = {
-  [K in keyof T as K extends keyof Agent
-    ? never
-    : T[K] extends (...args: never[]) => unknown
-      ? K
-      : never]: T[K] extends (...args: infer A) => infer R
+  [
+    K in keyof T as K extends keyof Agent
+      ? never
+      : T[K] extends (...args: never[]) => unknown
+        ? K
+        : never
+  ]: T[K] extends (...args: infer A) => infer R
     ? (...args: A) => Promisify<R>
     : never;
 };
@@ -174,6 +180,10 @@ export type RootFacetRpcSurface = {
   _cf_sendToSubAgentConnection(
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void>;
+  _cf_sendManyToSubAgentConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
   ): Promise<void>;
   _cf_closeSubAgentConnection(
     connectionId: string,

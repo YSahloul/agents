@@ -19,7 +19,8 @@ const usage = {
 
 /** What the scripted model answers with, one entry per model call. */
 export type ScriptedReply =
-  | { text: string; delayMs?: number }
+  /** A `held` reply starts only once the test calls `release()`. */
+  | { text: string; delayMs?: number; held?: boolean }
   | { call: string; toolCallId: string };
 
 const finish = (reason: "stop" | "tool-calls") => ({
@@ -62,6 +63,10 @@ function stream(reply: ScriptedReply) {
  */
 export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
   #script: ScriptedReply[] = [];
+  #release!: () => void;
+  readonly #held = new Promise<void>((resolve) => {
+    this.#release = resolve;
+  });
   /** Model calls so far, with the prompt each saw. */
   readonly prompts: unknown[] = [];
 
@@ -70,6 +75,7 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
       doStream: async ({ prompt }) => {
         this.prompts.push(prompt);
         const reply = this.#script.shift() ?? { text: "(no script)" };
+        if ("held" in reply && reply.held) await this.#held;
         return { stream: stream(reply) };
       }
     }),
@@ -83,6 +89,12 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
         inputSchema: z.object({}),
         needsApproval: true,
         execute: async () => "Heads"
+      }),
+      lookUp: tool({
+        description: "Look something up",
+        inputSchema: z.object({}),
+        execute: async () => ({ raw: "full host-side output" }),
+        toModelOutput: () => ({ type: "text", value: "shaped for the model" })
       })
     }
   });
@@ -99,8 +111,18 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
     this.#script = script;
   }
 
+  /** Let a `held` reply start. */
+  release(): void {
+    this.#release();
+  }
+
   getPromptCount(): number {
     return this.prompts.length;
+  }
+
+  /** The prompt the model saw on call `index`, as JSON. */
+  getPrompt(index: number): string {
+    return JSON.stringify(this.prompts[index]);
   }
 
   /** Submit straight to the harness, bypassing Channels. */
@@ -112,6 +134,21 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
 
   wait(session: string, operationId: string): Promise<OperationResult> {
     return this.harness.session(session).wait(operationId);
+  }
+
+  /** Wait with a signal aborted before the wait begins. */
+  async waitAborted(
+    session: string,
+    operationId: string
+  ): Promise<"rejected" | OperationResult["status"]> {
+    try {
+      const result = await this.harness
+        .session(session)
+        .wait(operationId, AbortSignal.abort(new Error("stop")));
+      return result.status;
+    } catch {
+      return "rejected";
+    }
   }
 
   async state(session: string) {

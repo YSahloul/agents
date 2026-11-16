@@ -3,20 +3,23 @@ import {
   fauxProvider,
   fauxText,
   fauxToolCall,
-  Type,
   type AssistantMessage,
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
+import { BACKGROUND_CONTEXT as BG } from "@earendil-works/chord/context";
+import { num, obj } from "@earendil-works/pi-schema";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
+  ConversationTranscript,
   createRegistry,
   Harness,
-  type AgentEvent,
   type Extension,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
+import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
+import { CodemodeBackend } from "@cloudflare/computer/backends/codemode";
 import {
   PiHarness,
   type PiOperationResult,
@@ -26,7 +29,8 @@ import {
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "../sockets";
-import { EMPTY_VIEW, reduceEvents } from "../view";
+import { projectView } from "../view";
+import { createWorkspaceTools } from "../workspace";
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
@@ -46,7 +50,8 @@ function textOf(content: Message["content"] | undefined): string {
  * the same answer after an eviction as before it:
  *
  * - `multiply N` calls `multiply`, `gate` calls `gate`, `gate-unsafe` calls
- *   `gate_unsafe`; anything else is echoed back.
+ *   `gate_unsafe`, `read PATH` calls the workspace's `read`; anything else
+ *   is echoed back.
  * - After a tool result it answers `tool said: <result>`.
  */
 function script(context: TranscriptContext): AssistantMessage {
@@ -68,6 +73,12 @@ function script(context: TranscriptContext): AssistantMessage {
       { stopReason: "toolUse" }
     );
   }
+  const read = /^read (\S+)$/.exec(prompt);
+  if (read) {
+    return fauxAssistantMessage([fauxToolCall("read", { path: read[1] })], {
+      stopReason: "toolUse"
+    });
+  }
   if (prompt === "gate" || prompt === "gate-unsafe") {
     return fauxAssistantMessage(
       [fauxToolCall(prompt === "gate" ? "gate" : "gate_unsafe", {})],
@@ -83,10 +94,28 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
+  // The example's workspace, over the object's SQLite.
+  readonly workspace = new Workspace({
+    storage: this.ctx.storage as unknown as DurableObjectStorageLike,
+    backends: [
+      new CodemodeBackend({
+        loader: this.env.LOADER,
+        root: "/workspace",
+        access: "read-write"
+      })
+    ]
+  });
   readonly registry = createRegistry();
+  /** While set, pi does not open, as when its storage keeps failing. */
+  #failOpens = false;
   readonly harness = new PiHarness({
-    harness: async ({ storage, context }) => {
+    harness: async ({ storage, context, onWake }) => {
+      if (this.#failOpens) throw new Error("pi failed to open");
       this.registry.install(this.#testTools());
+      this.registry.install({
+        name: "workspace",
+        tools: createWorkspaceTools(this.workspace)
+      });
       const models = createModels();
       models.setProvider(this.#faux.provider);
       return Harness.open(
@@ -94,10 +123,14 @@ export class PiHarnessTestObject extends DurableObject<Env> {
         {
           models,
           registry: this.registry,
+          onWake,
           settings: {
-            retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+            retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
+            // Only `compact()` compacts, and it keeps little verbatim, so a
+            // short transcript has something to summarize.
+            compaction: { enabled: false, keepRecentTokens: 1 }
           },
-          onReport: (error) => console.warn("pi report", error)
+          onReport: (report) => console.warn("pi report", report)
         },
         context
       );
@@ -142,6 +175,17 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     return this.harness.wait(operationId, session ? { session } : {});
   }
 
+  /** Reset the root session's context. */
+  async reset(): Promise<void> {
+    await this.harness.session().reset();
+  }
+
+  /** Write a file into the workspace, as a test's setup. */
+  async writeWorkspaceFile(path: string, text: string): Promise<void> {
+    await this.workspace.fs.mkdir("/workspace", { recursive: true });
+    await this.workspace.fs.writeFile(path, text);
+  }
+
   /** Resolve once the gate tool has started `runs` times. */
   async gateStarted(runs: number): Promise<number> {
     for (let i = 0; i < 200; i++) {
@@ -156,28 +200,89 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     await this.ctx.storage.put(RELEASE_KEY, true);
   }
 
-  /** Watch the root session's events until a run ends. */
-  async watch(): Promise<{ view: string; types: string[] }> {
-    const stream = await this.harness.session().events();
-    let view = reduceEvents(EMPTY_VIEW, [stream.snapshot]);
-    const types: string[] = ["snapshot"];
+  /** Watch the root session through one run: the view projected from its last value. */
+  async watch(): Promise<string> {
+    const watch = await this.harness.session().watch();
+    const transcript = this.#transcript();
+    let sawRun = false;
+    let view = projectView(transcript.merge(watch.value));
     await new Promise<void>((resolve) => {
-      stream.start(async (events: readonly AgentEvent[]) => {
-        types.push(...events.map((event) => event.type));
-        view = reduceEvents(view, events);
-        if (events.some((event) => event.type === "run_end")) resolve();
+      watch.start(async (call) => {
+        if (call.kind !== "value") return;
+        view = projectView(transcript.merge(call.value));
+        if (view.running) sawRun = true;
+        if (sawRun && !view.running) resolve();
       });
     });
-    await stream.stop();
+    await watch.stop();
     // JSON, so the RPC type stays shallow for the test's type checker.
-    return { view: JSON.stringify(view), types };
+    return JSON.stringify(view);
   }
 
-  /** The view folded from a fresh snapshot, as a client joining now sees it. */
+  /** The view projected from a new watch, as a client joining now sees it. */
   async snapshotView(): Promise<string> {
-    const stream = await this.harness.session().events();
-    await stream.stop();
-    return JSON.stringify(reduceEvents(EMPTY_VIEW, [stream.snapshot]));
+    const watch = await this.harness.session().watch();
+    await watch.stop();
+    return JSON.stringify(projectView(this.#transcript().merge(watch.value)));
+  }
+
+  /**
+   * Append `count` user-message entries to the root session, `perCommit` to
+   * a commit, with the texts `${prefix} 1` to `${prefix} ${count}`.
+   */
+  async appendNotes(
+    prefix: string,
+    count: number,
+    perCommit = count
+  ): Promise<void> {
+    const root = await (await this.harness.pi()).root(BG);
+    for (let start = 1; start <= count; start += perCommit) {
+      const end = Math.min(start + perCommit - 1, count);
+      await root.commit(async (tx) => {
+        for (let n = start; n <= end; n++) {
+          await tx.appendEntry(root.id, {
+            kind: "test.note",
+            model: [
+              { role: "user", content: `${prefix} ${n}`, timestamp: Date.now() }
+            ]
+          });
+        }
+      }, BG);
+    }
+  }
+
+  /**
+   * Close pi, as a storage error does. The harness opens it again on the
+   * next call, and every watch of the closed pi has ended.
+   */
+  async closePi(): Promise<void> {
+    await (await this.harness.pi()).close(BG);
+  }
+
+  /** Make pi fail to open, or open again. */
+  failOpens(fail: boolean): void {
+    this.#failOpens = fail;
+  }
+
+  /** Compact the root session and wait for the summary to be placed. */
+  async compact(): Promise<void> {
+    const pi = await this.harness.pi();
+    const root = await pi.root(BG);
+    const task = await root.compact(undefined, BG);
+    const { state } = await pi.waitForTask(task, BG);
+    if (state.status !== "terminal" || state.outcome.status !== "completed") {
+      throw new Error(`Compaction did not complete: ${JSON.stringify(state)}`);
+    }
+    const { submissionId } = state.outcome.result;
+    if (submissionId === undefined) throw new Error("Nothing was compacted");
+    await (await pi.submission(submissionId, BG))?.wait(BG);
+  }
+
+  #transcript(): ConversationTranscript {
+    const session = this.harness.session();
+    return new ConversationTranscript((query, limit) =>
+      session.entries(query, limit)
+    );
   }
 
   /** The fixture's tools and preamble, as one pi extension. */
@@ -200,7 +305,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         return {
-          content: [{ type: "text", text: `released after ${runs} runs` }]
+          output: [{ type: "text", text: `released after ${runs} runs` }]
         };
       }
     });
@@ -222,8 +327,8 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   }
 }
 
-const NoParameters = Type.Object({});
-const MultiplyParameters = Type.Object({ value: Type.Number() });
+const NoParameters = obj({});
+const MultiplyParameters = obj({ value: num() });
 
 /** Multiplies by three. */
 function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
@@ -234,7 +339,7 @@ function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
     replay: "safe",
     async execute({ value }) {
       return {
-        content: [{ type: "text", text: String(value * 3) }],
+        output: [{ type: "text", text: String(value * 3) }],
         details: { result: value * 3 }
       };
     }

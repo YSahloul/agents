@@ -73,6 +73,77 @@ describe("pi-ai: Workers AI chat completions", () => {
     });
   });
 
+  it("runs an AI Gateway dynamic route on the binding", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse([
+        JSON.stringify({
+          choices: [
+            { delta: { content: "Routed", role: "assistant" }, index: 0 }
+          ],
+          id: "chatcmpl-route",
+          model: "gpt-4o",
+          object: "chat.completion.chunk"
+        }),
+        JSON.stringify({
+          choices: [{ delta: {}, finish_reason: "stop", index: 0 }],
+          id: "chatcmpl-route",
+          model: "gpt-4o",
+          object: "chat.completion.chunk"
+        }),
+        "[DONE]"
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding), id: "prod" });
+    const { message } = await collectEvents(
+      ai.stream(ai("dynamic/support"), userContext("hi"))
+    );
+
+    expect(binding.native).toHaveLength(0);
+    expect(binding.calls[0]?.model).toBe("dynamic/support");
+    expect(binding.calls[0]?.input).not.toHaveProperty("model");
+    expect(binding.calls[0]?.options).toMatchObject({
+      gateway: { id: "prod" }
+    });
+    expect(message.content).toEqual([{ text: "Routed", type: "text" }]);
+    expect(message.stopReason).toBe("stop");
+  });
+
+  it("reads OpenAI chunks that carry usage: null until the last one", async () => {
+    // A dynamic route served by an OpenAI model streams OpenAI's own chunks:
+    // `usage` is `null` on every chunk but the final one (live capture).
+    const chunk = (extra: Record<string, unknown>) =>
+      JSON.stringify({
+        id: "chatcmpl-1",
+        model: "gpt-5-mini-2025-08-07",
+        object: "chat.completion.chunk",
+        usage: null,
+        ...extra
+      });
+    const binding = fakeBinding(() =>
+      sseResponse([
+        chunk({
+          choices: [
+            { delta: { content: "one, two", role: "assistant" }, index: 0 }
+          ]
+        }),
+        chunk({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] }),
+        chunk({
+          choices: [],
+          usage: { completion_tokens: 4, prompt_tokens: 9, total_tokens: 13 }
+        }),
+        "[DONE]"
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(ai("dynamic/support"), userContext("count"))
+    );
+    expect(message.stopReason).toBe("stop");
+    expect(message.content).toEqual([{ text: "one, two", type: "text" }]);
+    expect(message.usage.input).toBe(9);
+    expect(message.usage.output).toBe(4);
+  });
+
   it("sends the chat-completions body through the binding with gateway options", async () => {
     const binding = fakeBinding(() => sseResponse(workersAITextStream()));
     const ai = createAI({
@@ -132,7 +203,7 @@ describe("pi-ai: Workers AI chat completions", () => {
         { sessionId: "s" }
       )
     );
-    expect(binding.universal[0]?.options.extraHeaders).toBeUndefined();
+    expect(binding.native[0]?.headers).not.toHaveProperty("x-session-affinity");
   });
 
   it("emits a tool call that arrives complete in one delta", async () => {
@@ -198,6 +269,94 @@ describe("pi-ai: Workers AI chat completions", () => {
       name: "getWeather"
     });
     expect(message.usage.input).toBe(100);
+  });
+
+  /** OpenAI chunks for one `getWeather` call whose arguments arrive in `pieces`. */
+  function streamedToolCall(pieces: string[]): string[] {
+    const chunk = (delta: Record<string, unknown>, finish?: string) =>
+      JSON.stringify({
+        choices: [{ delta, finish_reason: finish ?? null, index: 0 }],
+        id: "chatcmpl-args",
+        model: "gpt-5-mini-2025-08-07",
+        object: "chat.completion.chunk",
+        usage: null
+      });
+    return [
+      chunk({
+        role: "assistant",
+        tool_calls: [
+          {
+            function: { arguments: "", name: "getWeather" },
+            id: "call_a",
+            index: 0,
+            type: "function"
+          }
+        ]
+      }),
+      ...pieces.map((piece) =>
+        chunk({ tool_calls: [{ function: { arguments: piece }, index: 0 }] })
+      ),
+      chunk({}, "tool_calls"),
+      "[DONE]"
+    ];
+  }
+
+  it("shows a tool call's arguments as they stream, without the raw text", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse(
+        streamedToolCall(['{"city": "Lon', 'don", "unit', 's": "metric"}'])
+      )
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const stream = ai.stream(
+      ai("dynamic/support"),
+      userContext("Weather in London?")
+    );
+    // `partial` is the message being built, so copy each block as it arrives.
+    const partials: Record<string, unknown>[] = [];
+    for await (const event of stream) {
+      const block = event.type === "toolcall_delta" && event.partial.content[0];
+      if (block && block.type === "toolCall") partials.push({ ...block });
+    }
+    const message = await stream.result();
+
+    expect(partials.map((block) => block.arguments)).toEqual([
+      { city: "Lon" },
+      { city: "London" },
+      { city: "London", units: "metric" }
+    ]);
+    for (const block of partials) {
+      expect(Object.keys(block).sort()).toEqual([
+        "arguments",
+        "id",
+        "name",
+        "type"
+      ]);
+    }
+    expect(message.content).toEqual([
+      {
+        arguments: { city: "London", units: "metric" },
+        id: "call_a",
+        name: "getWeather",
+        type: "toolCall"
+      }
+    ]);
+  });
+
+  it("reports malformed final arguments instead of keeping a parsed prefix", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse(streamedToolCall(['{"city": "London"', " oops"]))
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(ai("dynamic/support"), userContext("Weather in London?"))
+    );
+
+    const block = message.content[0];
+    expect(block?.type).toBe("toolCall");
+    if (block?.type !== "toolCall") return;
+    expect(block.arguments).toEqual({});
+    expect(block.argumentsError).toContain('{"city": "London" oops');
   });
 
   it("terminates with an error event on a gateway error response", async () => {
@@ -339,7 +498,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
 
     expect(events.at(-1)?.type).toBe("error");
     expect(message.stopReason).toBe("error");
-    expect(message.errorMessage).toContain("before the model finished");
+    expect(message.errorMessage).toContain("without the model finishing");
     // What arrived is kept on the failed message.
     expect(message.content[0]).toEqual({ text: "The answer is", type: "text" });
   });
@@ -563,7 +722,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
       )
     );
 
-    const query = binding.universal[0]?.query;
+    const query = binding.native[0]?.query;
     expect(query).not.toHaveProperty("chat_template_kwargs");
     expect(query).not.toHaveProperty("reasoning_effort");
     const warnings = (
@@ -585,7 +744,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
         userContext("hi")
       )
     );
-    expect(binding.universal[0]?.query).not.toHaveProperty("reasoning_effort");
+    expect(binding.native[0]?.query).not.toHaveProperty("reasoning_effort");
     const warnings = (
       message.diagnostics?.find((d) => d.type === "cloudflare-compat")
         ?.details as { warnings: { feature: string }[] } | undefined
@@ -605,7 +764,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
         { reasoning: "high" }
       )
     );
-    expect(binding.universal[0]?.query).not.toHaveProperty("reasoning_effort");
+    expect(binding.native[0]?.query).not.toHaveProperty("reasoning_effort");
   });
 
   it("remaps the level through the model's own thinkingLevelMap", async () => {
@@ -618,7 +777,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
         { reasoning: "xhigh" }
       )
     );
-    expect(binding.universal[0]?.query.reasoning_effort).toBe("max");
+    expect(binding.native[0]?.query.reasoning_effort).toBe("max");
   });
 
   it("says so when the model asks for a thinking shape this wire does not build", async () => {
@@ -631,7 +790,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
         { reasoning: "high" }
       )
     );
-    expect(binding.universal[0]?.query).not.toHaveProperty("reasoning_effort");
+    expect(binding.native[0]?.query).not.toHaveProperty("reasoning_effort");
     const warnings = (
       message.diagnostics?.find((d) => d.type === "cloudflare-compat")
         ?.details as { warnings: { feature: string }[] } | undefined

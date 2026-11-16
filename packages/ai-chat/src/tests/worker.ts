@@ -17,6 +17,7 @@ import {
 } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
 import type {
+  Connection,
   AgentToolEventMessage,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
@@ -178,6 +179,7 @@ export type Env = {
   OverridingPersistAgent: DurableObjectNamespace<OverridingPersistAgent>;
   AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
   AgentWithoutSuperCall: DurableObjectNamespace<AgentWithoutSuperCall>;
+  LogOnlyOnErrorAgent: DurableObjectNamespace<LogOnlyOnErrorAgent>;
   SlowStreamAgent: DurableObjectNamespace<SlowStreamAgent>;
   ResponseAgent: DurableObjectNamespace<ResponseAgent>;
   ResponseContinuationAgent: DurableObjectNamespace<ResponseContinuationAgent>;
@@ -1482,6 +1484,10 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     this.resetTurnState();
   }
 
+  getLastBodyForTest(): Record<string, unknown> | undefined {
+    return this._lastBody;
+  }
+
   async saveSyntheticUserMessage(text: string): Promise<void> {
     const message: ChatMessage = {
       id: `saved-${crypto.randomUUID()}`,
@@ -2098,6 +2104,31 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
   }
 }
 
+// Test agent whose onRequest throws and whose onError only logs, as the docs
+// show. Its onFetchError answers with the error it received.
+export class LogOnlyOnErrorAgent extends AIChatAgent<Env> {
+  async onRequest(): Promise<Response> {
+    throw new Error("chat request failed");
+  }
+
+  override onError(connection: Connection, error: unknown): void;
+  override onError(error: unknown): void;
+  override onError(_connectionOrError: Connection | unknown, _error?: unknown) {
+    // Log only: return instead of rethrowing.
+  }
+
+  override onFetchError(_request: Request, error: unknown): Response {
+    return Response.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 503 }
+    );
+  }
+
+  async onChatMessage() {
+    return new Response("chat response");
+  }
+}
+
 // ── ChatRecoveryTestAgent (chat recovery) ─────────────────────────────
 
 export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
@@ -2121,6 +2152,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.onChatMessageCallCount++;
     this.onChatMessageBodies.push(ctx?.body);
     this.onChatMessageClientTools.push(ctx?.clientTools);
+
+    const hold = this._turnHold;
+    if (hold && !hold.waiting) {
+      hold.waiting = true;
+      await hold.released;
+    }
 
     if (this._hangTurnsRemaining > 0) {
       this._hangTurnsRemaining--;
@@ -2174,6 +2211,30 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   private _emitStreamError: string | null = null;
+
+  /** Holds the next onChatMessage call until released: the model is slow. */
+  private _turnHold: {
+    waiting: boolean;
+    released: Promise<void>;
+    release: () => void;
+  } | null = null;
+
+  holdNextTurnForTest(): void {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this._turnHold = { waiting: false, released, release };
+  }
+
+  isTurnHeldForTest(): boolean {
+    return this._turnHold?.waiting ?? false;
+  }
+
+  releaseHeldTurnForTest(): void {
+    this._turnHold?.release();
+    this._turnHold = null;
+  }
 
   setStashData(data: unknown): void {
     this._stashData = data;
@@ -2367,25 +2428,39 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     latestUserMessageId?: string | null;
     recoveryKind: "retry" | "continue";
     nowMs?: number;
+    /** Why the incident opens. Defaults to a stall, which counts nothing. */
+    trigger?: "interrupted" | "stalled";
   }): Promise<{
     incidentId: string;
     attempt: number;
     exhausted: boolean;
     reason?: string;
+    interruptedAttempts?: number;
   }> {
+    const { trigger = "stalled", ...identity } = input;
     const self = this as unknown as {
-      _beginChatRecoveryIncident(i: typeof input): Promise<{
-        incident: { incidentId: string; attempt: number; reason?: string };
+      _beginChatRecoveryIncident(
+        i: typeof identity & { trigger: "interrupted" | "stalled" }
+      ): Promise<{
+        incident: {
+          incidentId: string;
+          attempt: number;
+          reason?: string;
+          interruptedAttempts?: number;
+        };
         exhausted: boolean;
       }>;
     };
-    const { incident, exhausted } =
-      await self._beginChatRecoveryIncident(input);
+    const { incident, exhausted } = await self._beginChatRecoveryIncident({
+      ...identity,
+      trigger
+    });
     return {
       incidentId: incident.incidentId,
       attempt: incident.attempt,
       exhausted,
-      reason: incident.reason
+      reason: incident.reason,
+      interruptedAttempts: incident.interruptedAttempts
     };
   }
 
@@ -2427,11 +2502,41 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     lastProgressAt?: number;
     progress?: number;
     workBaseline?: number;
+    interruptedAttempts?: number;
   }): Promise<void> {
     await this.ctx.storage.put(
       `cf:chat-recovery:incident:${encodeURIComponent(incident.incidentId)}`,
       incident
     );
+  }
+
+  /**
+   * Leave the entry an attempt writes before its isolate dies: an
+   * `attemptsInFlight` entry from an isolate that no longer exists (#2613). A
+   * test isolate never dies, so this is how a test reproduces a real reset.
+   */
+  async simulateDeadAttemptForTest(incidentId: string): Promise<void> {
+    const key = `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`;
+    const incident = await this.ctx.storage.get<Record<string, unknown>>(key);
+    if (!incident) throw new Error(`No recovery incident ${incidentId}`);
+    await this.ctx.storage.put(key, {
+      ...incident,
+      attemptsInFlight: [
+        { isolate: `dead-${crypto.randomUUID()}`, token: crypto.randomUUID() }
+      ]
+    });
+  }
+
+  /** Run a recovery callback through its real entry point. */
+  async runRecoveryCallbackForTest(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    data: Record<string, unknown>
+  ): Promise<void> {
+    if (callback === "_chatRecoveryContinue") {
+      await this._chatRecoveryContinue(data);
+    } else {
+      await this._chatRecoveryRetry(data);
+    }
   }
 
   async getChatRecoveryIncidentsForTest(): Promise<unknown[]> {
@@ -2742,11 +2847,41 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this._forceStableTimeout = value;
   }
 
+  /** Holds the next waitUntilStable until released, then times it out. */
+  private _stableHold: {
+    waiting: boolean;
+    released: Promise<void>;
+    release: () => void;
+  } | null = null;
+
+  holdStableWaitForTest(): void {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this._stableHold = { waiting: false, released, release };
+  }
+
+  isStableWaitHeldForTest(): boolean {
+    return this._stableHold?.waiting ?? false;
+  }
+
+  releaseStableWaitForTest(): void {
+    this._stableHold?.release();
+    this._stableHold = null;
+  }
+
   override async waitUntilStable(options?: {
     timeout?: number;
     pendingInteraction?: () => boolean;
   }): Promise<boolean> {
     if (this._forceStableTimeout) return false;
+    const hold = this._stableHold;
+    if (hold && !hold.waiting) {
+      hold.waiting = true;
+      await hold.released;
+      return false;
+    }
     return super.waitUntilStable(options);
   }
 

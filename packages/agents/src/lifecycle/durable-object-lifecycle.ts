@@ -94,6 +94,23 @@ export type LifecycleRouteTransport = {
   ) => Promise<unknown>;
 };
 
+/**
+ * The response to a failed `fetch` when the host's `onFetchError` gives none.
+ * It never carries the error: its message and stack can reveal internals to
+ * callers that are not authenticated.
+ */
+function defaultFetchErrorResponse(request: Request): Response {
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response("Internal Server Error", { status: 500 });
+  }
+  // Accept the socket and close it at once: browsers show a failed upgrade's
+  // close code, but devtools hide the body of an HTTP error response to one.
+  const pair = new WebSocketPair();
+  pair[1].accept();
+  pair[1].close(1011, "Uncaught exception during session setup");
+  return new Response(null, { status: 101, webSocket: pair[0] });
+}
+
 type LifecycleHost<Env extends object, Props extends object> = LifecycleObject<
   Env,
   Props
@@ -118,7 +135,13 @@ const lifecycleEventSinks = new WeakMap<object, LifecycleEventSink>();
 const lifecycleRouteTransports = new WeakMap<object, LifecycleRouteTransport>();
 const lifecycleHostInvokers = new WeakMap<object, LifecycleHostInvoker>();
 
-/** Lifecycles whose startup the current async context is running inside. */
+/**
+ * Startup tokens of the Lifecycles whose startup the current async context
+ * is running inside. The scope holds opaque tokens, never a Lifecycle: every
+ * promise reaction created during startup keeps this async context, and
+ * workerd does not trace async context values during GC. A pending promise
+ * stored on a capability would otherwise keep an evicted object alive.
+ */
 const lifecycleStartupScope = new AsyncLocalStorage<ReadonlySet<object>>();
 
 /** @internal Adapt the host invocation boundary at a composition root. */
@@ -161,8 +184,6 @@ export type LifecycleOptions = {
  * Construct this as an instance field on a class that directly extends
  * `DurableObject`, then call {@link Lifecycle.installHandlers}
  * from that class's constructor.
- *
- * @experimental The API surface may change before stabilizing.
  */
 /** The dispatch hooks a catch-all can monopolize; uniqueness is per hook. */
 const CATCH_ALL_HOOKS = ["onRequest", "onWebSocketUpgrade"] as const;
@@ -560,24 +581,37 @@ export class Lifecycle<
         );
       }
     } catch (err) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} fetch:`,
-        err
-      );
-      if (!(err instanceof Error)) throw err;
-      if (request.headers.get("Upgrade") === "websocket") {
-        // Annoyingly, if we return an HTTP error in response to a WebSocket request, Chrome devtools
-        // won't show us the response body! So... let's send a WebSocket response with an error
-        // frame instead.
-        const pair = new WebSocketPair();
-        pair[1].accept();
-        pair[1].send(JSON.stringify({ error: err.stack }));
-        pair[1].close(1011, "Uncaught exception during session setup");
-        return new Response(null, { status: 101, webSocket: pair[0] });
-      } else {
-        return new Response(err.stack, { status: 500 });
+      console.error(this.#errorLogPrefix("fetch"), err);
+      return this.#respondToFetchError(request, err);
+    }
+  }
+
+  /** The prefix for an error logged from one of this object's handlers. */
+  #errorLogPrefix(handler: string): string {
+    return `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} ${handler}:`;
+  }
+
+  /**
+   * Answer a failed `fetch`: the host's `onFetchError` response if it gives
+   * one, otherwise a default that never carries the error.
+   */
+  async #respondToFetchError(
+    request: Request,
+    error: unknown
+  ): Promise<Response> {
+    if (this.#host.onFetchError) {
+      try {
+        const response = await runInLifecycleHostContext(
+          { host: this.#host, request },
+          () => this.#host.onFetchError!(request, error)
+        );
+        if (response instanceof Response) return response;
+      } catch (hookError) {
+        console.error(this.#errorLogPrefix("onFetchError"), hookError);
       }
     }
+    if (!(error instanceof Error)) throw error;
+    return defaultFetchErrorResponse(request);
   }
 
   /** @internal Dispatch a hibernating WebSocket message. */
@@ -593,10 +627,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketMessage(ws, message)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketMessage:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketMessage"), e);
     }
   }
 
@@ -615,10 +646,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketClose(ws, code, reason, wasClean)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketClose:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketClose"), e);
     }
   }
 
@@ -638,10 +666,7 @@ export class Lifecycle<
         this.#capabilityRunner.webSocketError(ws, error)
       );
     } catch (e) {
-      console.error(
-        `Error in ${this.#parentClassName}:${this.#ctx.id.name ?? "<unnamed>"} webSocketError:`,
-        e
-      );
+      console.error(this.#errorLogPrefix("webSocketError"), e);
     }
   }
 
@@ -675,6 +700,8 @@ export class Lifecycle<
   }
 
   #startup: Promise<void> | undefined;
+  /** Marks this Lifecycle in {@link lifecycleStartupScope}. */
+  readonly #startupToken = {};
 
   #ensureInitialized(): Promise<void> {
     if (this.#status === "started") return Promise.resolve();
@@ -689,7 +716,9 @@ export class Lifecycle<
       this.#startup = startup;
       return startup;
     }
-    if (lifecycleStartupScope.getStore()?.has(this)) return Promise.resolve();
+    if (lifecycleStartupScope.getStore()?.has(this.#startupToken)) {
+      return Promise.resolve();
+    }
     return this.#startup;
   }
 
@@ -704,7 +733,7 @@ export class Lifecycle<
 
     this.#capabilitiesLocked = true;
     const scope = new Set(lifecycleStartupScope.getStore());
-    scope.add(this);
+    scope.add(this.#startupToken);
     let error: unknown;
     await this.#ctx.blockConcurrencyWhile(() =>
       lifecycleStartupScope.run(scope, async () => {
@@ -726,8 +755,17 @@ export class Lifecycle<
     // Re-throw outside blockConcurrencyWhile so the input gate is not
     // permanently broken and a later invocation can retry startup.
     if (error) {
+      const rearmRequested = this.#rearmRequestedDuringStart;
       this.#rearmRequestedDuringStart = false;
       this.#pendingEvents.length = 0;
+      if (rearmRequested) {
+        // Jobs pushed or re-timed during the failed startup deferred their
+        // re-arm to here. Arm the startup fallback from the current queue so
+        // they keep a wake. Best-effort: the startup error is what surfaces.
+        await this.#serializeAlarmWrite(() =>
+          this.#jobDriver.armStartupFallback()
+        ).catch(() => {});
+      }
       throw error;
     }
     this.#deliverPendingEvents();
@@ -803,20 +841,25 @@ export class Lifecycle<
       return;
     }
 
-    const prior = this.#alarmRearmQueue;
-    const next = prior
-      .catch(() => {})
-      .then(async () => {
-        if (this.#alarmsDisabled) return;
-        const alarm = this.#jobQueue.nextAlarmTime(Date.now());
-        if (alarm === null) {
-          await this.#ctx.storage.deleteAlarm();
-        } else {
-          await this.#ctx.storage.setAlarm(alarm);
-        }
-      });
+    await this.#serializeAlarmWrite(async () => {
+      if (this.#alarmsDisabled) return;
+      const alarm = this.#jobQueue.nextAlarmTime(Date.now());
+      if (alarm === null) {
+        await this.#ctx.storage.deleteAlarm();
+      } else {
+        await this.#ctx.storage.setAlarm(alarm);
+      }
+    });
+  }
+
+  /**
+   * Run an alarm write after every earlier one settles, so a later
+   * calculation from fresher queue state always lands last.
+   */
+  #serializeAlarmWrite(write: () => Promise<void>): Promise<void> {
+    const next = this.#alarmRearmQueue.catch(() => {}).then(write);
     this.#alarmRearmQueue = next;
-    await next;
+    return next;
   }
 
   /**

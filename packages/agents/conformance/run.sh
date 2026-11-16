@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the exact-pinned MCP conformance referee (alpha.10) against Agents
+# Runs the exact-pinned MCP conformance referee (alpha.12) against Agents
 # implementations inside workerd. run-suite.mjs bounds client concurrency,
 # makes baseline coverage fail-closed, and treats client process failures and
 # server warning checks as failures even when the referee exits successfully.
@@ -99,7 +99,7 @@ case "$MODE" in
     run_client 2026-07-28 conformance/baseline-client-2026-07-28.yml "$@"
     ;;
   client-2025-11-25)
-    run_client 2025-11-25 conformance/baseline-client-2025-11-25.yml "$@"
+    run_client 2025-11-25 "" "$@"
     ;;
   client-2025-06-18)
     run_client 2025-06-18 "" "$@"
@@ -116,7 +116,7 @@ case "$MODE" in
     ;;
   server-handler-legacy)
     run_server "$WORKER_ORIGIN/mcp-handler-legacy" 2025-11-25 \
-      conformance/baseline-server-handler.yml "$@"
+      conformance/baseline-server-handler-legacy.yml "$@"
     ;;
   server-mcp-agent)
     run_server "$WORKER_ORIGIN/mcp-agent" 2025-11-25 \

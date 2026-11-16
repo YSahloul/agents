@@ -8,6 +8,9 @@
     "packages/channels/live-tests/snapshots",
     "site/agents/.astro",
     "**/routeTree.gen.ts",
-    "**/think.d.ts"
+    "**/think.d.ts",
+    "**/*.generated.ts",
+    ".gardener",
+    ".github/workflows/gardener-*.yml"
   ]
 }

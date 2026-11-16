@@ -2,8 +2,6 @@
  * pi-durable hosted in a Durable Object. `PiHarness` is a Lifecycle
  * capability that opens pi over the object's SQLite database and wakes it
  * after eviction; pi owns the transcript, the inbox, and every run.
- *
- * @beta The API may change between releases.
  */
 export {
   PiHarness,
@@ -22,6 +20,7 @@ export {
 } from "./session-store";
 export { skills } from "./skills";
 export type {
+  PiContinueOptions,
   PiOperationResult,
   PiPendingOperation,
   PiPromptResponse,
@@ -30,5 +29,6 @@ export type {
   PiSessionInfo,
   PiSessionOptions,
   PiSubmitOptions,
-  PiWhenBusy
+  PiWhenBusy,
+  PiWhenIdle
 } from "./types";

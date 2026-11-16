@@ -144,10 +144,12 @@ export class AiSdkHarness<TOOLS extends ToolSet = ToolSet>
 
   override async onStart(): Promise<void> {
     // Sessions with unsettled operations: an earlier instance was running
-    // them, or was about to.
-    for (const [, session] of this.#kv.list<StoredSession>({
-      prefix: `${PREFIX}s:`
-    })) {
+    // them, or was about to. Read them all first: storage allows one open
+    // kv.list() at a time, and #pending() lists too.
+    const sessions = [
+      ...this.#kv.list<StoredSession>({ prefix: `${PREFIX}s:` })
+    ];
+    for (const [, session] of sessions) {
       if (this.#pending(session.id).length > 0) await this.#wake(session.id);
     }
   }
@@ -241,6 +243,12 @@ export class AiSdkHarness<TOOLS extends ToolSet = ToolSet>
     }
     const settled = isPending(op)
       ? await new Promise<StoredOperation>((resolve, reject) => {
+          // An abort event fires once, so a signal aborted before the wait
+          // began would never reach the listener below.
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
           const key = waiterKey(session, operationId);
           const waiters = this.#waiters.get(key) ?? new Set();
           this.#waiters.set(key, waiters);
@@ -393,7 +401,9 @@ export class AiSdkHarness<TOOLS extends ToolSet = ToolSet>
         ...(system !== undefined && { system }),
         ...(tools && { tools }),
         stopWhen: this.#options.stopWhen ?? stepCountIs(5),
-        messages: await convertToModelMessages(messages),
+        // `tools` lets `toModelOutput` shape earlier results; without it
+        // they go back to the model as raw JSON.
+        messages: await convertToModelMessages(messages, tools && { tools }),
         abortSignal: run.abort.signal
       });
       const stream = toUIMessageStream<TOOLS, Message>({
@@ -536,7 +546,10 @@ export class AiSdkHarness<TOOLS extends ToolSet = ToolSet>
     return this.session(session.id);
   }
 
-  /** Sessions are created on first use, so any id names one. */
+  /**
+   * Sessions are created on first use, so any id names one. That is not an
+   * authorization gap: whoever reaches the agent may create sessions anyway.
+   */
   #ensure(session: SessionId): void {
     if (this.#kv.get(`${PREFIX}s:${session}`) === undefined) {
       this.#create({ id: session });

@@ -1,5 +1,11 @@
 # @cloudflare/ai-chat
 
+## 0.12.2
+
+### Patch Changes
+
+- [#2615](https://github.com/cloudflare/agents/pull/2615) [`05843e4`](https://github.com/cloudflare/agents/commit/05843e428be0d8b43a5bf1923d8e40adce6f213d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Chat recovery now seals a turn after `chatRecovery.maxInterruptedAttempts` interrupted attempts (default 5), so a turn that exceeds the Durable Object memory limit on every run no longer retries forever; `maxOomRetries` is deprecated. See [Stream Recovery](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md#stream-recovery).
+
 ## 0.12.1
 
 ### Patch Changes
@@ -175,7 +181,7 @@
     helper and `result.stream` are v7-only.
   - The workspace read tool emits `{ type: "file-data", data, mediaType, filename }`
     model output, accepted by both majors (v7's newer `{ type: "file", data: {
-type: "data", data } }` shape does not exist in v6).
+    type: "data", data } }` shape does not exist in v6).
 
   Public API notes:
 

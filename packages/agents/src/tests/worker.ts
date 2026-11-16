@@ -10,13 +10,19 @@ import {
 export { CapabilityHarnessObject } from "./capabilities/harness.ts";
 import type { CapabilityHarnessObject } from "./capabilities/harness.ts";
 export {
+  AlarmStartFailureObject,
   ConcurrentStartObject,
+  EvictableStartObject,
+  FetchErrorObject,
   PlainLifecycleObject,
   RetryableStartObject,
   StatefulPlainObject
 } from "./capabilities/lifecycle.ts";
 import type {
+  AlarmStartFailureObject,
   ConcurrentStartObject,
+  EvictableStartObject,
+  FetchErrorObject,
   PlainLifecycleObject,
   RetryableStartObject,
   StatefulPlainObject
@@ -71,11 +77,22 @@ import type {
 } from "./capabilities/tasks.ts";
 export { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
-export { BrowserHarnessObject } from "./capabilities/browser.ts";
-import type { BrowserHarnessObject } from "./capabilities/browser.ts";
+export {
+  BrowserHarnessObject,
+  InternalHostsDocsSite,
+  InternalHostsNoMethodObject,
+  InternalHostsPlainObject
+} from "./capabilities/browser.ts";
+import type {
+  BrowserHarnessObject,
+  InternalHostsNoMethodObject,
+  InternalHostsPlainObject
+} from "./capabilities/browser.ts";
 export { TestBrowserAgent } from "./agents/browser.ts";
 // The browser tool's codemode runtime runs as a facet of the host agent.
 export { CodemodeRuntime } from "@cloudflare/codemode";
+// Carries the browser's internal-hostname requests back to the agent.
+export { InternalHostRouter } from "../browser/internal-hosts";
 import type { TestBrowserAgent } from "./agents/browser.ts";
 
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
@@ -91,6 +108,7 @@ export {
   TestCaseSensitiveAgent,
   TestUserNotificationAgent,
   TestStateAgent,
+  TestFetchErrorAgent,
   TestStateAgentNoInitial,
   TestThrowingStateAgent,
   TestPersistedStateAgent,
@@ -110,6 +128,7 @@ export {
   TestAgentToolStubChild,
   TestOAuthAgent,
   TestCustomOAuthAgent,
+  McpIntegrationAgent,
   TestReadonlyAgent,
   TestProtocolMessagesAgent,
   TestCallableAgent,
@@ -181,6 +200,7 @@ import type {
   TestUserNotificationAgent,
   TestOAuthAgent,
   TestCustomOAuthAgent,
+  McpIntegrationAgent,
   TestMcpJurisdiction,
   TestAlarmInitAgent,
   TestDestroyScheduleAgent,
@@ -196,6 +216,7 @@ import type {
   TestAddMcpServerAgent,
   TestHttpMcpDedupAgent,
   TestStateAgent,
+  TestFetchErrorAgent,
   TestStateAgentNoInitial,
   TestThrowingStateAgent,
   TestPersistedStateAgent,
@@ -227,10 +248,14 @@ import type {
 
 export type Env = {
   LOADER: WorkerLoader;
+  SKILLS_BUCKET: R2Bucket;
   CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
   RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
+  AlarmStartFailureObject: DurableObjectNamespace<AlarmStartFailureObject>;
   ConcurrentStartObject: DurableObjectNamespace<ConcurrentStartObject>;
+  EvictableStartObject: DurableObjectNamespace<EvictableStartObject>;
+  FetchErrorObject: DurableObjectNamespace<FetchErrorObject>;
   StatefulPlainObject: DurableObjectNamespace<StatefulPlainObject>;
   ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
   SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
@@ -251,6 +276,8 @@ export type Env = {
   SessionBenchObject: DurableObjectNamespace<SessionBenchObject>;
   PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
   BrowserHarnessObject: DurableObjectNamespace<BrowserHarnessObject>;
+  InternalHostsPlainObject: DurableObjectNamespace<InternalHostsPlainObject>;
+  InternalHostsNoMethodObject: DurableObjectNamespace<InternalHostsNoMethodObject>;
   TestBrowserAgent: DurableObjectNamespace<TestBrowserAgent>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
@@ -259,6 +286,7 @@ export type Env = {
   UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TestCustomOAuthAgent: DurableObjectNamespace<TestCustomOAuthAgent>;
+  McpIntegrationAgent: DurableObjectNamespace<McpIntegrationAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestAlarmInitAgent: DurableObjectNamespace<TestAlarmInitAgent>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
@@ -275,6 +303,7 @@ export type Env = {
   TestRpcMcpClientAgent: DurableObjectNamespace<TestRpcMcpClientAgent>;
   TestHttpMcpDedupAgent: DurableObjectNamespace<TestHttpMcpDedupAgent>;
   TestStateAgent: DurableObjectNamespace<TestStateAgent>;
+  TestFetchErrorAgent: DurableObjectNamespace<TestFetchErrorAgent>;
   TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
   TestThrowingStateAgent: DurableObjectNamespace<TestThrowingStateAgent>;
   TestPersistedStateAgent: DurableObjectNamespace<TestPersistedStateAgent>;

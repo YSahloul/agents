@@ -1,10 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import { Type } from "@earendil-works/pi-ai";
 import {
   createRegistry,
   Harness,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
+import { obj } from "@earendil-works/pi-schema";
 import {
   Channels,
   type GatewayEvent,
@@ -25,11 +25,11 @@ const PREAMBLE =
 const currentTime: ToolRegistration = {
   name: "current_time",
   description: "Return the current UTC time.",
-  parameters: Type.Object({}),
+  parameters: obj({}),
   replay: "safe",
   async execute() {
     const iso = new Date().toISOString();
-    return { content: [{ type: "text", text: iso }], details: { iso } };
+    return { output: [{ type: "text", text: iso }], details: { iso } };
   }
 };
 
@@ -43,7 +43,7 @@ export class PiAgent extends DurableObject<Env> {
   readonly ai = createAI({ binding: this.env.AI });
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: async ({ storage, context }) => {
+    harness: async ({ storage, context, onWake }) => {
       this.registry.install({
         name: "channels-example",
         sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
@@ -56,7 +56,8 @@ export class PiAgent extends DurableObject<Env> {
         {
           models,
           registry: this.registry,
-          onReport: (error) => console.warn("pi report", error)
+          onWake,
+          onReport: (report) => console.warn("pi report", report)
         },
         context
       );

@@ -7,15 +7,15 @@ here is in `agents`.
 
 ## What changed
 
-| Before (#2210)                               | Now                                                             |
-| -------------------------------------------- | --------------------------------------------------------------- |
-| pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                            |
-| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job per session                              |
-| intake table for queued submissions          | pi's own inbox                                                  |
-| `Streams` log per operation, cursors, replay | pi's `watchEvents`: snapshot, then one batch per commit         |
-| pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store) |
-| own event and message projections            | pi's `AgentEvent`s on the wire, one reducer (`view.ts`)         |
-| compaction config                            | none; pi-durable has no compaction yet                          |
+| Before (#2210)                               | Now                                                              |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                             |
+| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job, driven by pi's `onWake`                  |
+| intake table for queued submissions          | pi's own inbox                                                   |
+| `Streams` log per operation, cursors, replay | pi's conversation view (`session.watch()`), with its operations  |
+| pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store)  |
+| own event and message projections            | pi's view and operations on the wire, one projection (`view.ts`) |
+| compaction config                            | pi's own compaction, on by default; shown as a summary notice    |
 
 The harness went from about 3,600 lines to under 2,000, with no other SDK
 primitive besides Lifecycle jobs. It now lives in `packages/agents` as
@@ -28,8 +28,9 @@ pi-durable already is a durable execution engine. It has checkpointed tasks,
 ownership trees, abort, replay-safe and unsafe tools, retries, and an inbox,
 and its `submit()` is durable before it resolves. Around it, the SDK only has
 to do one thing: wake the object when pi has work but no memory. That is one
-Lifecycle job per session, owned by `PiHarness` (`#wake`, `#wakeStep`,
-`#waitForIdle` in `pi-harness.ts`, about 90 lines).
+Lifecycle job, owned by `PiHarness` (`#wake`, `#wakeStep`,
+`#waitWhileActive` in `harness.ts`). Before Pi 1.4 it was one job per
+session; Pi 1.4's `Harness.wake()` made one job for the whole object enough.
 
 - **Tasks.** This was the old design. Tasks journals steps for replay, and pi
   is already the replay authority, so every Tasks step was a no-op wrapper
@@ -47,36 +48,45 @@ Lifecycle job per session, owned by `PiHarness` (`#wake`, `#wakeStep`,
   leaves nothing to drive in passes, and child machines (#2333) overlap with
   pi's own task ownership.
 
-### One admission, one wake job per session
+### One admission, one wake job
 
 `submit()` does three things, in this order:
 
-1. `#wake(session)`: push the session's wake job (`pi-wake:<session>`, due
-   now). From here on, if the object dies, that job's alarm restarts it.
+1. `#wake()`: push the wake job (`pi-wake`, due now). From here on, if the
+   object dies, that job's alarm restarts it.
 2. `conversation.submit({ requestId })`: the one admission. pi's inbox
    places steers and follow-ups while a run is going, and deduplicates by
    request id.
-3. `#wake(session)` again: re-check now, so a wake that ran before the
+3. `#wake()` again: re-check now, so a wake that ran before the
    admission and was about to complete sees the new work.
 
-A run of the job (`#wakeStep`) never admits or replays anything:
+A run of the job (`#wakeStep`) never admits or replays anything. It calls
+`pi.resume()`, so sleeping tasks that are due run, then reads `pi.wake()`,
+which covers every conversation, background tasks included:
 
-- **No live pi tasks in the session:** complete the job, so there is no alarm.
-  If a submit is between steps 1 and 2 (an in-memory counter), reschedule
-  instead.
-- **A pi wait more than 60 s away:** reschedule to that deadline.
-- **Only background tasks:** reschedule in 30 s.
-- **Otherwise:** start `conversation.waitForIdle()` in the background,
-  inside the alarm's work (`trackAlarmWork`), and reschedule the job 30 s out
-  as a heartbeat. When the wait ends, push the job due now to re-check.
+- **`active`:** pi has work running or ready. Start a wait in the
+  background, inside the alarm's work (`trackAlarmWork`), until
+  `pi.wake()` is no longer active, for at most 10 minutes. pi's `onWake`
+  ends the wait when it changes; without `onWake`, the wait re-reads it
+  every second. Reschedule the job 30 s out as a heartbeat. When the wait ends,
+  push the job due now to re-check.
+- **`at`:** pi's tasks are asleep until then. Reschedule the job to `at`.
+- **Neither:** complete the job, so there is no alarm. If a submit is
+  between steps 1 and 2 (an in-memory counter), reschedule instead.
+
+Before Pi 1.5, the restart limit parked a crash-looping task
+until `pi.retryTask()`, and the step had to leave parked tasks out, or it
+would keep the object awake forever. Pi now ends such a task, so it is
+never left waiting.
 
 The whole thing relies on one Lifecycle rule: a same-id `push()` made while
 the job is dispatching supersedes that dispatch's outcome. So a submit
 cannot be lost to a wake that is completing.
 
-`onStart` pushes a wake for every session with live pi tasks. That covers
+`onStart` pushes the wake if `pi.wake()` says pi has work. That covers
 restarts and conversations a subagent created without going through
-`submit()`. `wait()`, `pending()`, and `abort(operationId)` read or change
+`submit()`. A per-session job left by an older version hands over to the
+one wake when it runs. `wait()`, `pending()`, and `abort(operationId)` read or change
 pi's submissions directly. The wake holds no per-submission state.
 
 ## The harness interface
@@ -84,12 +94,12 @@ pi's submissions directly. The wake holds no per-submission state.
 `PiHarness` has the shape the other `examples/next/harnesses` share:
 `harness.prompt()`, `harness.submit()`, `harness.abort()`, `harness.wait()`,
 `harness.messages()` (pi's own `EntryRecord`s), `harness.sessions` (`create`, `get`, `fork`, `list`),
-`harness.session(id)` handles, and `session.events()`. A session is a pi
+`harness.session(id)` handles, and `session.watch()`. A session is a pi
 conversation. The root is `"1"`.
 
 Transport is not part of the harness. The socket protocol (one session per
 socket, a tool list on connect, commands) lives in the app's `sockets.ts` and
-`protocol.ts`, and the UI reducer in `view.ts`. They use only the harness's
+`protocol.ts`, and the UI projection in `view.ts`. They use only the harness's
 public API, so another app could put the same sessions on SSE or RPC
 instead.
 
@@ -98,27 +108,33 @@ The shared `Harness` capability in #2285 goes further than this. It has
 round trips, `compact`/`rewind`/`configure`, and capability flags. Gaps
 against it:
 
-- **Events have no cursor.** pi's watch always starts from a snapshot, and
-  there is nothing to replay. That is simpler and correct for UIs, but an
+- **Events have no cursor.** pi's watch always starts from the current view
+  (a window can start after the newest entry a client has), and there is no
+  event log to replay. That is simpler and correct for UIs, but an
   API that promises "replay from any cursor" cannot be built without a log
   that pi does not keep.
 - **No requests or replies.** pi-durable has no approval or permission
   primitive yet. A tool could park on a pi document and a hook, but that is
   ours to invent.
-- **No compaction.** `session.reset(handoff)` is the stand-in.
+
+## Decision: table prefixing belongs to pi
+
+pi's SQLite schema uses names such as `tasks`, `entries`, `conversations`,
+and `documents`, which can collide with other state in the same object.
+The old session store rewrote SQL identifiers using names from pi's
+exported `SQLITE_MIGRATIONS`. That rewrite was replaced in #2616.
+
+The current `openPiSessionStore()` in
+`packages/agents/src/harness/pi/session-store.ts` delegates to pi's
+`openDurableObjectSqliteStorage(storage, { prefix })` adapter from
+`@earendil-works/pi-durable/storage/sqlite/cloudflare`. The prefix defaults
+to `pi_`; the wrapper rejects prefixes starting with `_cf_` (case-insensitive),
+which Durable Objects reserve. Pi owns the schema and prefixing, so a
+storage prefix option is no longer an unresolved upstream request.
 
 ## Hard or unresolved
 
-### Background work is polled
-
-The wake waits with `conversation.waitForIdle()`, which ignores background
-tasks, such as a background subagent's anchor (pi-durable example 23). When
-only background tasks are left, the wake sleeps 30 s and checks again. The
-alarm keeps the object alive, but a background task that finishes is only
-noticed at the next check. A background task in another conversation shows
-up under that conversation's wake, which `onStart` creates.
-
-### pi's timers are in memory
+### pi's timers were in memory
 
 pi sleeps with `setTimeout`: `runtime.sleep(until)` in the scheduler, which
 the generation task uses for retry backoff (`{ phase: "retry", until }`) and
@@ -128,45 +144,53 @@ correctly. But a pending timer does not keep a Durable Object alive. If
 nothing else is in flight, the object is evicted, the timer is gone, and
 nothing wakes it until the next request.
 
-While a wake step is waiting, it keeps the object alive through its alarm
-invocation, so pi's timer fires. `#longWait` turns a wait more than 60 s
-away into a reschedule of the wake job at the deadline. It finds the deadline by
-reading pi's `LiveDoc` (`generation.retry.at`, `generation.deferred.pollAt`).
-That is a presentation document used as a control signal, and it only
-covers the generation task. A custom task's `runtime.sleep` is invisible,
-and a wait under 60 s holds the alarm invocation open (billed wall time).
+Pi 1.4 records sleeps as scheduler state, and `pi.wake()` returns the
+earliest one as `at`. The wake job reschedules itself to `at`, so an
+evicted object is restarted when the sleep ends.
 
-**Ask Mario** (either would do):
+The factory passes the harness's `onWake` to `Harness.open`. pi calls it
+after open and whenever `pi.wake()` changes, and then sets no in-memory
+timer for a sleeping task: the host's alarm calls `resume()`. So the object
+can hibernate while a task sleeps. A factory that leaves `onWake` out still
+works: pi's own timer runs the task, but keeps the object in memory, billed,
+for up to the platform's limit on pending timers, and the harness warns
+once when it opens pi.
 
-- **Scheduler-owned sleeps.** `runtime.sleep(until)` records the deadline
-  as scheduler state, and `inspect()` returns `nextWakeAt`, the earliest
-  deadline over live tasks, with a way to subscribe to changes. The host
-  sets its alarm to `nextWakeAt`, and pi's own timer becomes an
-  optimization.
-- **An injectable timer.** `HarnessOptions.timers: { sleep(until, signal) }`,
-  or an `onWakeNeeded(at)` callback, so a host can back every pi sleep
-  with its alarm.
+Before Pi 1.4 the job read the deadline from pi's `LiveDoc`
+(`generation.retry.at`, `generation.deferred.pollAt`), a presentation
+document that only covered the generation task.
 
-Either removes `#longWait` and makes custom task sleeps safe on Durable
-Objects.
+Pi 1.4 shipped what we asked for here: scheduler-owned sleeps
+(`runtime.sleepUntil`, `pi.wake()`) and a callback for the host's alarm
+(`onWake`). That removed `#longWait` and made custom task sleeps safe on
+Durable Objects.
 
 ### Alarm wall time
 
-The wake's wait runs inside an alarm invocation (`trackAlarmWork`), and
-alarm handlers have a 15 minute wall-time limit. Outbound model streams keep
-an object alive for at most 15 minutes too. A wait therefore lasts at most 10
-minutes and then pushes the job due now, which starts a new alarm
-invocation. A single model request that streams for more than 15 minutes
-is still at the platform's mercy.
+The wake's wait runs inside an alarm invocation (`trackAlarmWork`), and so
+does pi's own work that the alarm starts or resumes: a 12 s model run
+started from an alarm shows up as a 12 s alarm. Alarm handlers have a 15
+minute wall-time limit, and outbound model streams keep an object alive for
+at most 15 minutes too. The wait budget keeps a long run under the limit: a
+wait lasts at most 10 minutes, then ends and pushes the job due now, so a
+new alarm takes over. A single model request that streams for more than 15
+minutes is still at the platform's mercy.
 
 ### Graceful eviction waits for the wake
 
 `evictDurableObject` waits for in-flight work to drain. The wake's purpose
 is to keep a wait in flight, so the tests crash the object with
-`abortAllDurableObjects()` instead. A deploy behaves the same way: the
-runtime gives in-flight work 30 s and then kills it. The recovery path is the
-same either way, but it is worth knowing that a running pi turn never lets
-the object drain.
+`abortAllDurableObjects()` to test recovery. A deploy behaves the same way:
+the runtime gives in-flight work 30 s and then kills it. The recovery path is
+the same either way, but it is worth knowing that a running pi turn never
+lets the object drain.
+
+The test pool never evicts an idle object by itself, because
+vitest-pool-workers sets `unsafePreventEviction`, so a test cannot see work
+that only lives in memory being lost when nothing holds the object. The
+tests' `evictWhenIdle` asks for a graceful eviction and reports whether the
+object was kept, which is how they check that the wake still holds the
+object while a pi tool waits without I/O.
 
 ### Reads the Harness does not offer
 
@@ -182,16 +206,6 @@ commits:
 Both read committed state only, so they are safe here. **Ask for:**
 `harness.submissionByRequest()` and `harness.conversations()`.
 
-### Table prefix is a SQL rewrite
-
-pi's SQLite schema uses bare names such as `tasks`, `entries`,
-`conversations`, and `documents`, which easily collide in an object that
-also hosts other state. The session store rewrites identifiers outside
-string literals, using the names it reads from pi's exported
-`SQLITE_MIGRATIONS`. pi's conformance suite passes against it. It breaks if
-a future pi statement puts a table name in a string literal or builds SQL
-dynamically. **Ask for:** a `tablePrefix` option on `SqliteStorage`.
-
 ### Abort needs tools that honor their signal
 
 `conversation.abort()` resolves only once the conversation is idle. A tool
@@ -201,9 +215,13 @@ check the signal. pi's abort has no grace period.
 ### Watches are per socket and in memory
 
 This is app glue in `sockets.ts`, not the harness. Each socket gets its own
-`session.events()` stream. After hibernation or eviction, the host's
-`onStart` calls `sockets.reattach()`, which re-watches every socket and
-sends a fresh snapshot, and the client replaces its state.
+`session.watch()`, with pi's default window, after the client asks with a
+`watch` message that carries where its transcript ends. The client merges
+every view into a `ConversationTranscript` (`mirror.ts`), so a new view
+never replaces what it has. After hibernation or eviction, the host's
+`onStart` calls `sockets.reattach()`, which re-watches every socket. A watch
+that ends because pi closed (the harness reopens a pi that failed) is
+re-watched from right after the last entry the socket got.
 `ctx.getWebSockets(tag)` finds sockets by tag, but nothing gives the tags of
 a socket, so the re-watch walks `sessions.list()` and looks up each
 session's tag.
@@ -235,8 +253,8 @@ schemas, and its `exec` runs on a Workspace backend. What came up:
 - **Two loop models.** `createPiTools` returns declarations and one
   `execute(call)` for a hand-written loop. pi-durable wants a
   `ToolRegistration` per tool, so the adapter pairs them by name. The
-  declarations are JSON Schema, not TypeBox. pi validates with TypeBox, which
-  accepts either, so only the static type needs a cast.
+  declarations are plain JSON Schema. pi validates any JSON Schema with
+  pi-schema, so only the static type needs a cast.
 - **Replay is ours to choose.** computer has no replay notion. Reads,
   searches, whole-file `write` and forced `delete` are marked safe. `edit`
   would fail on text it already replaced, and `exec` runs arbitrary code, so
@@ -244,17 +262,17 @@ schemas, and its `exec` runs on a Workspace backend. What came up:
 - **`exec`'s description assumes shells.** It is built for a choice of
   backends and talks about `npm test`. With one JavaScript backend that
   misleads the model, so the adapter replaces the description and the
-  `command` parameter's text. It documents the typed `ws:git` interface
-  rather than its `cli()`, which gives the model return values it can use
-  directly. The model still sometimes tries `node:path` first; the error
+  `command` parameter's text. It documents the typed `codemode:git`
+  interface rather than its `cli()`, which gives the model return values it
+  can use directly. The model still sometimes tries `node:path` first; the error
   names the module and it recovers.
-- **Git is opt-in twice.** The backend installs `ws:git`, but every call
-  fails until the `Workspace` gets `git: createGitClient()`, which needs the
-  optional `@platformatic/vfs` peer. Network operations also need
-  `allowGitNetwork: true` on the backend.
-- **`ws:git` paths are not the client's.** The git client's types say `dir`
-  defaults to `/`. Through `ws:git` the host resolves `dir` against the
-  module's working directory and keeps it inside the backend root. The
+- **Git is opt-in twice.** The backend gets `codemode:git` from
+  `createGitModule()`, but every call fails until the `Workspace` gets
+  `git: createGitClient()`, which needs the optional `@platformatic/vfs`
+  peer. Network operations also need `createGitModule({ allowNetwork: true })`.
+- **`codemode:git` paths are not the client's.** The git client's types say
+  `dir` defaults to `/`. Through `codemode:git` the host resolves `dir`
+  against the module's working directory and keeps it inside the backend root. The
   `exec` description follows the bridge.
 - **Tool calls run in parallel.** pi runs one round's tool calls at once by
   default. In testing the model sent a `clone` and a `log` in the same
@@ -272,9 +290,9 @@ example.
 - Subagents. pi-durable's subagent tools (examples 22 and 23) should work
   unchanged as registered tools. The background variant needs the "live work
   keep-alive" above.
-- Compaction. No longer pending upstream: 0.99.2 ships `CompactionPolicy`,
-  `CompactionHooks` and the rest, wired into `HarnessOptions`. Not yet used
-  or tested here.
+- Compaction. pi compacts on its own by default; the UI shows each
+  `pi.compaction` entry as an "Earlier messages summarized" notice. The
+  example sets no `CompactionPolicy` or hooks of its own.
 - `ExecutionEnv` for pi's own `read`/`bash`/`edit`/`write`. Unused here:
   the Workspace tools come from computer instead (see "Workspace tools").
 - Session deletion. pi has no conversation delete.

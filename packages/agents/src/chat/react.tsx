@@ -2649,6 +2649,10 @@ export function useAgentChat<
           });
 
           streamStateRef.current = result.state;
+          // A server-started turn can stream here without a resume handshake
+          // (e.g. `continueLastTurn()`). Register it so `stop()` cancels it,
+          // like the resume-fallback path does (#2803).
+          if (result.isStreaming) customTransport.observeServerTurn(data.id);
           if (result.messagesUpdate) {
             setMessages(
               result.messagesUpdate as unknown as (
@@ -2737,6 +2741,12 @@ export function useAgentChat<
       sawClose = true;
       serverReportsRecovery = false;
       fallbackAckedResumeRequestIds.clear();
+      // Streaming protection keeps a live local assistant ahead of behind
+      // snapshots until its done/error frame. The transport ends every local
+      // stream on close, and that frame never arrives here, so the cut-off
+      // local copy would replace every later snapshot (#2464). A resumed
+      // replay re-arms protection from its `start` chunk.
+      protectedStreamingAssistantRef.current = null;
 
       const unfinishedTurnId = customTransport.activeServerTurnId;
       if (unfinishedTurnId !== null) {

@@ -1,8 +1,7 @@
 # Durable Object lifecycle
 
-> **Experimental.** Everything exported from `agents/lifecycle` — and the
-> capabilities built on it, including `Scheduler` — may change between
-> releases while the composition surface stabilizes.
+`agents/lifecycle` is stable. Most capabilities built on it are still
+experimental; each capability's page says which.
 
 `agents/lifecycle` lets reusable durable capabilities work in both `Agent` and a
 plain Cloudflare Durable Object. It uses composition: your class extends the
@@ -94,6 +93,57 @@ A warm object skips startup but still offers every request to its middleware.
 There is no `next()` today: a capability either handles a request or declines
 it, and cannot wrap or observe a downstream response.
 
+## Failed requests
+
+When startup, a capability's request or upgrade hook, or `onRequest` throws,
+the lifecycle logs the error with `console.error` and sends a response that
+does not include it:
+
+- an HTTP request gets `500 Internal Server Error`;
+- a WebSocket upgrade gets a socket that closes at once with code `1011`.
+
+An error's message and stack can reveal internals, such as secret names or
+file paths, to callers who are not authenticated. To send something else,
+implement `onFetchError`. It runs after the error is logged, with the request
+and the thrown value:
+
+```ts
+export class MyObject extends DurableObject<Env> {
+  readonly lifecycle = Lifecycle.install(this);
+
+  onFetchError(request: Request, error: unknown): Response | undefined {
+    // Show details only in local development.
+    if (this.env.ENVIRONMENT !== "development") return;
+    const detail = error instanceof Error ? error.stack : String(error);
+    return new Response(detail, { status: 500 });
+  }
+}
+```
+
+Return nothing to send the default response. If `onFetchError` throws, the
+lifecycle logs that error and also sends the default. In both cases, if the
+original thrown value is not an `Error`, the lifecycle rethrows it to the
+runtime instead. `error` is whatever was thrown, so narrow it before you read
+it. `request` may already have had its body read.
+
+For a WebSocket upgrade, return either an HTTP error response or a `101`
+response with your own socket:
+
+```ts
+onFetchError(request: Request, error: unknown): Response | undefined {
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return;
+  const pair = new WebSocketPair();
+  pair[1].accept();
+  pair[1].send(JSON.stringify({ error: "unavailable" }));
+  pair[1].close(1011, "Startup failed");
+  return new Response(null, { status: 101, webSocket: pair[0] });
+}
+```
+
+`onFetchError` runs in the object's context, so `getCurrentAgent()` returns
+the object and the request. After a failed startup, `onStart` has not
+finished, so do not rely on state it sets up.
+
 ## Reusable capabilities
 
 A capability implements only the phases it needs:
@@ -156,6 +206,46 @@ Host-specific bindings, authentication, and protocol adapters remain explicit
 constructor dependencies. Lifecycle never grants a capability the complete
 host implicitly.
 
+A capability's public operations can run before startup, because
+[native RPC](#native-rpc) bypasses the automatic startup on fetch, alarm and
+WebSocket events. If an operation starts work that `onStart` also awaits, such
+as lazily opening a store, it must call `await this.lifecycle.ready()` first:
+
+```ts
+class Store extends LifecycleCapability {
+  #opening: Promise<Database> | undefined;
+
+  constructor() {
+    super("store");
+  }
+
+  async onStart(): Promise<void> {
+    await this.#open();
+  }
+
+  async get(key: string): Promise<string | undefined> {
+    const db = await this.#open();
+    return db.get(key);
+  }
+
+  async #open(): Promise<Database> {
+    // Without this, an RPC that calls get() before startup begins the open
+    // outside startup, and onStart then waits on it behind a closed gate.
+    await this.lifecycle.ready();
+    this.#opening ??= openDatabase(this.lifecycle.storage);
+    return this.#opening;
+  }
+}
+```
+
+Startup holds the input gate (`blockConcurrencyWhile`) while `onStart` runs, so
+work begun outside startup has its timers and I/O held back and never finishes.
+`onStart` waits on it until startup times out after 30 seconds and the object
+is reset. Whether it happens depends on whether the RPC arrives first, so it
+shows up as an intermittent timeout. `ready()` resolves immediately inside
+startup, so `onStart` can call the same guarded method. `Tasks`, `Streams`,
+`Scheduler`, `Queue` and `PiHarness` guard their operations this way.
+
 Capability hooks run outside host context, but user callbacks run through
 `this.lifecycle.runInHostContext(fn)` inside the host invocation context.
 Scheduler and Queue dispatch their registered callbacks through this
@@ -195,7 +285,13 @@ physical alarm automatically — there is no explicit rearm call. When the
 alarm fires, Lifecycle drives due jobs in due order as an event loop, then
 runs host `onAlarm()`, then re-arms from queue state. Before driving any job
 it arms a deadman pre-alarm so an isolate death mid-drive still wakes the
-object to resume.
+object to resume. While the queue holds jobs, it also arms a fallback alarm
+before startup runs, at the next job's time but at least 30 seconds out. An
+alarm whose startup throws still leaves that wake, whether or not the
+platform's own alarm retries run, so the failed startup is retried then. A
+startup that pushes or reschedules jobs and then throws, from an alarm or a
+request, arms the same fallback from the queue as it stands, so those jobs
+keep a wake too.
 
 A job's drive result decides what happens next: returning nothing completes
 and deletes it, `{ rescheduleAt }` suspends it until a future time, and
@@ -420,6 +516,11 @@ The client chooses how frames travel:
 Handlers are wire-agnostic. Both kinds of connection dispatch the same
 `onConnect`/`onMessage`/`onClose`/`onError`, appear in `getConnections()`,
 and honour `connection.close(code, reason)`.
+
+Once the host closes a connection, neither wire runs another message or
+callable from it. This holds for frames the client sent before it received
+the Close frame, so a client that `onConnect` rejects cannot run anything.
+Messages the client sent before closing the connection itself still run.
 
 ## Native RPC
 

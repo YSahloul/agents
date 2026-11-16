@@ -29,8 +29,24 @@
         "name": "RetryableStartObject"
       },
       {
+        "class_name": "AlarmStartFailureObject",
+        "name": "AlarmStartFailureObject"
+      },
+      {
         "class_name": "ConcurrentStartObject",
         "name": "ConcurrentStartObject"
+      },
+      {
+        "class_name": "EvictableStartObject",
+        "name": "EvictableStartObject"
+      },
+      {
+        "class_name": "FetchErrorObject",
+        "name": "FetchErrorObject"
+      },
+      {
+        "class_name": "TestFetchErrorAgent",
+        "name": "TestFetchErrorAgent"
       },
       {
         "class_name": "ScheduledLifecycleObject",
@@ -51,6 +67,14 @@
       {
         "class_name": "BrowserHarnessObject",
         "name": "BrowserHarnessObject"
+      },
+      {
+        "class_name": "InternalHostsPlainObject",
+        "name": "InternalHostsPlainObject"
+      },
+      {
+        "class_name": "InternalHostsNoMethodObject",
+        "name": "InternalHostsNoMethodObject"
       },
       {
         "class_name": "TestBrowserAgent",
@@ -132,6 +156,10 @@
       {
         "class_name": "TestOAuthAgent",
         "name": "TestOAuthAgent"
+      },
+      {
+        "class_name": "McpIntegrationAgent",
+        "name": "McpIntegrationAgent"
       },
       {
         "class_name": "TestCustomOAuthAgent",
@@ -394,6 +422,7 @@
     ]
   },
   "worker_loaders": [{ "binding": "LOADER" }],
+  "r2_buckets": [{ "binding": "SKILLS_BUCKET", "bucket_name": "skills-test" }],
   "workflows": [
     {
       "name": "test-processing-workflow",
@@ -449,12 +478,18 @@
         "PlainLifecycleObject",
         "StatefulPlainObject",
         "RetryableStartObject",
+        "AlarmStartFailureObject",
         "ConcurrentStartObject",
+        "EvictableStartObject",
+        "FetchErrorObject",
+        "TestFetchErrorAgent",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
         "QueueHarnessObject",
         "BrowserHarnessObject",
+        "InternalHostsPlainObject",
+        "InternalHostsNoMethodObject",
         "TestBrowserAgent",
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
@@ -476,6 +511,7 @@
         "TestUserNotificationAgent",
         "TestRaceAgent",
         "TestOAuthAgent",
+        "McpIntegrationAgent",
         "TestCustomOAuthAgent",
         "TestMcpJurisdiction",
         "TestAlarmInitAgent",

@@ -22,6 +22,7 @@ import {
   hungTimeoutMs,
   isHungRow,
   jobFromRow,
+  type JobClaim,
   type JobQueue,
   type JobStorageRow,
   type LifecycleJob,
@@ -50,6 +51,9 @@ const JOB_BACKLOG_WARNING_THRESHOLD = 10;
  * isolate death mid-drive still wakes this object to resume its queue.
  */
 const DEADMAN_ALARM_DELAY_MS = 30_000;
+
+/** A retry found its job cancelled or replaced, so it did not run. */
+const SUPERSEDED = Symbol("superseded");
 
 /** The dispatch hooks one job owner exposes to the driver. */
 export type JobDispatch = {
@@ -158,16 +162,16 @@ export class JobDriver {
   }
 
   /**
-   * Run one alarm invocation: initialize the lifecycle, drive due jobs, run
-   * the host's alarm callback, and re-arm the physical alarm from queue
-   * state — all inside the alarm memory-limit circuit breaker (#1825). A
-   * memory-limit reset that propagates here is intercepted — every other
-   * error re-throws unchanged so platform alarm-retry semantics hold — and
-   * broken from this outermost frame, where the heavy turn has unwound and
-   * small writes can land. Initialization runs inside the breaker because a
-   * severe reset can be thrown before any job runs (boot hydration, #1825);
-   * left unhandled it would re-throw to the platform, which auto-retries
-   * the alarm forever.
+   * Run one alarm invocation: arm a startup fallback wake, initialize the
+   * lifecycle, drive due jobs, run the host's alarm callback, and re-arm the
+   * physical alarm from queue state — all inside the alarm memory-limit
+   * circuit breaker (#1825). A memory-limit reset that propagates here is
+   * intercepted — every other error re-throws unchanged so platform
+   * alarm-retry semantics hold — and broken from this outermost frame, where
+   * the heavy turn has unwound and small writes can land. Initialization
+   * runs inside the breaker because a severe reset can be thrown before any
+   * job runs (boot hydration, #1825); left unhandled it would re-throw to
+   * the platform, which auto-retries the alarm forever.
    */
   async runAlarm(
     initialize: () => Promise<void>,
@@ -182,6 +186,7 @@ export class JobDriver {
     let clean = false;
     try {
       try {
+        await this.armStartupFallback();
         await initialize();
         await this.#driveDueJobs();
         await this.#alarmScope.run({ executing: undefined }, runHostAlarm);
@@ -280,6 +285,31 @@ export class JobDriver {
     await this.#clearMemoryLimitStrikes();
   }
 
+  /**
+   * Arm a startup fallback alarm while the queue holds jobs. An alarm arms
+   * one before startup runs: the platform clears the alarm when it fires, so
+   * a startup that throws (or an isolate that dies mid-startup) would
+   * otherwise leave the queue with no wake but the platform's own few, short
+   * retries. Lifecycle arms one again after a failed startup that pushed or
+   * re-timed jobs, whose deferred re-arm never ran. The fallback keeps the
+   * object woken whether or not the platform's retries run: a failed startup
+   * is retried at the fallback time. A clean alarm's final re-arm, or any
+   * later queue mutation's, replaces it.
+   *
+   * The fallback is the queue's own next wake, but never sooner than the
+   * deadman delay: an overdue job would otherwise make a failing startup
+   * retry in a tight loop.
+   */
+  async armStartupFallback(): Promise<void> {
+    if (this.#options.disabled()) return;
+    const nowMs = Date.now();
+    const next = this.#options.queue.nextAlarmTime(nowMs);
+    if (next === null) return;
+    await this.#options.storage.setAlarm(
+      Math.max(next, nowMs + DEADMAN_ALARM_DELAY_MS)
+    );
+  }
+
   /** Drive every due job once, in due-time order. */
   async #driveDueJobs(): Promise<void> {
     const nowMs = Date.now();
@@ -307,6 +337,7 @@ export class JobDriver {
       const row = this.#options.queue.dueRow(stale.id, nowMs);
       if (!row) continue;
 
+      let takeover = false;
       if (row.singleflight === 1 && row.running === 1) {
         if (!isHungRow(row, nowMs)) {
           console.warn(
@@ -319,19 +350,27 @@ export class JobDriver {
             (nowMs - (row.execution_started_at ?? 0)) / 1000
           )}s ago)`
         );
+        takeover = true;
       }
-      // Every dispatch is marked, not just single-flight: the marker is
-      // what lets a same-id push made mid-dispatch supersede the returned
-      // drive result (see JobQueue.applyOutcome).
-      this.#options.queue.markRunning(row.id, nowMs);
-
-      await this.#driveJob(row);
+      // The claim's revision lets a cancel, push, reschedule or hung
+      // takeover made mid-dispatch supersede this dispatch's retries and
+      // drive result (see JobQueue.applyOutcome). The running marker it
+      // sets feeds single-flight skipping and hung recovery.
+      const claim = this.#options.queue.claim(row.id, nowMs, takeover);
+      try {
+        await this.#driveJob(row, claim);
+      } finally {
+        this.#options.queue.release(claim);
+      }
     }
   }
 
   /** Dispatch one due row to its owner with retry and failure policy. */
-  async #driveJob(row: JobStorageRow): Promise<void> {
+  async #driveJob(row: JobStorageRow, claim: JobClaim): Promise<void> {
     const { queue, resolveDispatch, disabled } = this.#options;
+    // Whether the job is still the one this dispatch claimed: no cancel,
+    // push, reschedule or hung takeover changed it since.
+    const owned = () => queue.isCurrent(claim);
     const job = jobFromRow(row);
     const dispatch = await resolveDispatch(row.capability);
     if (!dispatch) {
@@ -369,21 +408,32 @@ export class JobDriver {
       }
     }, hungTimeoutMs(row));
 
-    let outcome: LifecycleJobOutcome | void;
+    let outcome: LifecycleJobOutcome | void | typeof SUPERSEDED;
     try {
       outcome = await this.#alarmScope.run({ executing: row }, () =>
-        tryN(maxAttempts, (attempt) => dispatch.onJob({ job, attempt }), {
-          baseDelayMs: job.retry?.baseDelayMs ?? DEFAULT_JOB_RETRY.baseDelayMs,
-          maxDelayMs: job.retry?.maxDelayMs ?? DEFAULT_JOB_RETRY.maxDelayMs,
-          // In-process retries are futile on a superseded isolate (code
-          // never reloads mid-invocation) and on a memory-limit reset (the
-          // isolate is condemned, and a retry can read half-claimed state
-          // as "nothing to do", converting the reset into a silent success
-          // that the breaker never sees). Defer both to the alarm boundary.
-          shouldRetry: (error) =>
-            !isDurableObjectCodeUpdateReset(error) &&
-            !isDurableObjectMemoryLimitReset(error)
-        })
+        tryN(
+          maxAttempts,
+          async (attempt) => {
+            // A retry waits in tryN's backoff, and requests run meanwhile.
+            // A cancel or same-id push made then is newer intent: do not
+            // run the job this dispatch captured again.
+            if (attempt > 1 && !owned()) return SUPERSEDED;
+            return dispatch.onJob({ job, attempt });
+          },
+          {
+            baseDelayMs:
+              job.retry?.baseDelayMs ?? DEFAULT_JOB_RETRY.baseDelayMs,
+            maxDelayMs: job.retry?.maxDelayMs ?? DEFAULT_JOB_RETRY.maxDelayMs,
+            // In-process retries are futile on a superseded isolate (code
+            // never reloads mid-invocation) and on a memory-limit reset (the
+            // isolate is condemned, and a retry can read half-claimed state
+            // as "nothing to do", converting the reset into a silent success
+            // that the breaker never sees). Defer both to the alarm boundary.
+            shouldRetry: (error) =>
+              !isDurableObjectCodeUpdateReset(error) &&
+              !isDurableObjectMemoryLimitReset(error)
+          }
+        )
       );
     } catch (error) {
       if (disabled()) return;
@@ -394,7 +444,7 @@ export class JobDriver {
         // so the preserved job is not mistaken for one still in flight (and
         // a single-flight job does not wait out its hung timeout first).
         try {
-          queue.clearRunning(row.id);
+          if (owned()) queue.clearRunning(row.id);
         } catch {
           // the hung timeout eventually recovers the flag
         }
@@ -423,7 +473,8 @@ export class JobDriver {
     }
 
     if (disabled()) return;
-    queue.applyOutcome(row.id, outcome ?? undefined);
+    if (outcome === SUPERSEDED) return;
+    queue.applyOutcome(claim, outcome ?? undefined);
   }
 
   #warnBacklog(due: ReadonlyArray<JobStorageRow>): void {
@@ -557,20 +608,28 @@ export class JobDriver {
     const { queue, storage } = this.#options;
 
     let strikes = 1;
+    let counted = true;
     try {
       const prior = await storage.get<number>(OOM_ALARM_STRIKES_KEY);
       strikes = (typeof prior === "number" ? prior : 0) + 1;
       await storage.put(OOM_ALARM_STRIKES_KEY, strikes);
     } catch {
-      // even the strike write OOMed; still progress toward sealing
+      // The reset isolate's storage rejects every call, so this strike cannot
+      // be counted and the counter cannot reach the seal from here. Chat
+      // recovery bounds that loop itself: the next isolate counts the
+      // interrupted attempt before re-running it (#2613).
+      counted = false;
     }
 
     const limit =
       this.#options.maxMemoryLimitStrikes() ??
       DEFAULT_MAX_ALARM_MEMORY_LIMIT_STRIKES;
     const sealed = strikes >= limit;
+    const strikeLabel = counted
+      ? `strike ${strikes}/${limit}`
+      : "strike not counted: storage rejected it after the reset";
     console.error(
-      `Alarm hit a Durable Object memory-limit reset (strike ${strikes}/${limit}` +
+      `Alarm hit a Durable Object memory-limit reset (${strikeLabel}` +
         `${sealed ? ", sealing recovery" : ", will retry with backoff"}). ` +
         "Breaking the platform alarm-retry loop (#1825).",
       error instanceof Error ? error.message : String(error)

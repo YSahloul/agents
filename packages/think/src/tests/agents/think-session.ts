@@ -63,6 +63,7 @@ import type { Schedule } from "agents";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
 import { z } from "zod";
+import { WorkspaceFiles } from "../../workspace-files";
 
 // ── Test result type ────────────────────────────────────────────
 
@@ -721,12 +722,24 @@ export class ThinkTestAgent extends Think {
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): Promise<void> {
+    await this._delayNextSubAgentConnectionSend();
+    await super._cf_sendToSubAgentConnection(connectionId, message);
+  }
+
+  override async _cf_sendManyToSubAgentConnection(
+    connectionId: string,
+    messages: ReadonlyArray<string | ArrayBuffer | ArrayBufferView>
+  ): Promise<void> {
+    await this._delayNextSubAgentConnectionSend();
+    await super._cf_sendManyToSubAgentConnection(connectionId, messages);
+  }
+
+  private async _delayNextSubAgentConnectionSend(): Promise<void> {
     if (this._nextSubAgentConnectionSendDelayMs > 0) {
       const delayMs = this._nextSubAgentConnectionSendDelayMs;
       this._nextSubAgentConnectionSendDelayMs = 0;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
-    await super._cf_sendToSubAgentConnection(connectionId, message);
   }
 
   /** Slow the streamed turn so the parent tails it while it's still live. */
@@ -2508,18 +2521,9 @@ export class ThinkTestAgent extends Think {
   async seedWorkspaceBytes(
     path: string,
     bytes: number[],
-    mimeType?: string
+    _mimeType?: string
   ): Promise<void> {
-    const parent = path.replace(/\/[^/]+$/, "");
-    const workspace = this.workspace;
-    const writeFileBytes = Reflect.get(workspace, "writeFileBytes");
-    if (typeof writeFileBytes !== "function") {
-      throw new Error("Test workspace does not support writeFileBytes");
-    }
-    if (parent && parent !== "/") {
-      await workspace.mkdir(parent, { recursive: true });
-    }
-    await writeFileBytes.call(workspace, path, new Uint8Array(bytes), mimeType);
+    await new WorkspaceFiles(this.workspace).write(path, new Uint8Array(bytes));
   }
 
   async testChatWithError(errorMessage?: string): Promise<TestChatResult> {
@@ -5187,8 +5191,11 @@ export class ThinkSessionTestAgent extends Think {
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.context.freezeSystemPrompt();
-    return frozenPrompt || this.getSystemPrompt();
+    return this._buildBaseSystemPrompt();
+  }
+
+  async getContextReminder(): Promise<string | null> {
+    return this.context.reminder();
   }
 
   async addDynamicContext(label: string, description?: string): Promise<void> {
@@ -5244,9 +5251,8 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
 
   override getSkills() {
     return [
-      skills.fromManifest({
+      skills.manifest({
         id: "test-skills",
-        fingerprint: "v1",
         skills: [
           {
             name: "knot-tying",
@@ -5256,6 +5262,10 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
         ]
       })
     ];
+  }
+
+  async getAssembledSystemPrompt(): Promise<string> {
+    return this._buildBaseSystemPrompt();
   }
 
   async runChatTurnForWarningTest(): Promise<TestChatResult> {
@@ -5275,9 +5285,8 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
 // system prompt must not be mistaken for an override.
 function mapReadingSkills() {
   return [
-    skills.fromManifest({
+    skills.manifest({
       id: "default-prompt-test-skills",
-      fingerprint: "v1",
       skills: [
         {
           name: "map-reading",
@@ -5313,6 +5322,48 @@ export class ThinkSystemPromptFieldSkillsAgent extends ThinkSessionTestAgent {
   }
 
   override getSystemPrompt = () => "You are an experienced cartographer.";
+}
+
+// ── ThinkWorkspaceSkillsAgent ───────────────────────────────
+// Skills are plain files in the agent's Workspace: writing, editing, or
+// deleting a SKILL.md changes the catalog on the next turn.
+
+export class ThinkWorkspaceSkillsAgent extends ThinkSessionTestAgent {
+  private _turnToolNames: string[] = [];
+
+  override getSkills() {
+    return [skills.workspace(this.workspace)];
+  }
+
+  override beforeTurn(ctx: TurnContext): void {
+    this._turnToolNames = Object.keys(ctx.tools).sort();
+  }
+
+  async writeSkill(name: string, description: string): Promise<void> {
+    await this.workspace.fs.mkdir(`/workspace/.agents/skills/${name}`, {
+      recursive: true
+    });
+    await this.workspace.fs.writeFile(
+      `/workspace/.agents/skills/${name}/SKILL.md`,
+      new TextEncoder().encode(
+        `---\nname: ${name}\ndescription: ${description}\n---\nInstructions for ${name}.`
+      )
+    );
+  }
+
+  async deleteSkill(name: string): Promise<void> {
+    await this.workspace.fs.rm(`/workspace/.agents/skills/${name}`, {
+      recursive: true
+    });
+  }
+
+  async getTurnToolNames(): Promise<string[]> {
+    return this._turnToolNames;
+  }
+
+  async clearSkillHistory(): Promise<void> {
+    await this.clearMessages();
+  }
 }
 
 class ThinkClassifierTestAgent extends ThinkSessionTestAgent {
@@ -5381,8 +5432,11 @@ export class ThinkAsyncConfigSessionAgent extends Think {
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.context.freezeSystemPrompt();
-    return frozenPrompt || this.getSystemPrompt();
+    return this._buildBaseSystemPrompt();
+  }
+
+  async getContextReminder(): Promise<string | null> {
+    return this.context.reminder();
   }
 }
 
@@ -8937,6 +8991,31 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
       .getTime();
   }
 
+  async countDateTimeFormatConstructionsForTest(
+    schedule: string,
+    nowIso: string,
+    timezone: string
+  ): Promise<number> {
+    const original = Intl.DateTimeFormat;
+    let constructions = 0;
+    Intl.DateTimeFormat = new Proxy(original, {
+      construct(target, args, newTarget) {
+        constructions++;
+        return Reflect.construct(target, args, newTarget);
+      }
+    });
+    // The work runs synchronously, so restore the original before yielding to
+    // keep other work in the isolate out of the count.
+    let result: Promise<number>;
+    try {
+      result = this.nextScheduleTimeForTest(schedule, nowIso, { timezone });
+    } finally {
+      Intl.DateTimeFormat = original;
+    }
+    await result;
+    return constructions;
+  }
+
   async listDeclaredScheduledTaskRowsForTest(): Promise<
     DeclaredScheduledTaskRowForTest[]
   > {
@@ -9840,25 +9919,39 @@ export class ThinkRecoveryTestAgent extends Think {
     latestUserMessageId?: string | null;
     recoveryKind: "retry" | "continue";
     nowMs?: number;
+    /** Why the incident opens. Defaults to a stall, which counts nothing. */
+    trigger?: "interrupted" | "stalled";
   }): Promise<{
     incidentId: string;
     attempt: number;
     exhausted: boolean;
     reason?: string;
+    interruptedAttempts?: number;
   }> {
+    const { trigger = "stalled", ...identity } = input;
     const self = this as unknown as {
-      _beginChatRecoveryIncident(i: typeof input): Promise<{
-        incident: { incidentId: string; attempt: number; reason?: string };
+      _beginChatRecoveryIncident(
+        i: typeof identity & { trigger: "interrupted" | "stalled" }
+      ): Promise<{
+        incident: {
+          incidentId: string;
+          attempt: number;
+          reason?: string;
+          interruptedAttempts?: number;
+        };
         exhausted: boolean;
       }>;
     };
-    const { incident, exhausted } =
-      await self._beginChatRecoveryIncident(input);
+    const { incident, exhausted } = await self._beginChatRecoveryIncident({
+      ...identity,
+      trigger
+    });
     return {
       incidentId: incident.incidentId,
       attempt: incident.attempt,
       exhausted,
-      reason: incident.reason
+      reason: incident.reason,
+      interruptedAttempts: incident.interruptedAttempts
     };
   }
 
@@ -9901,11 +9994,29 @@ export class ThinkRecoveryTestAgent extends Think {
     lastProgressAt?: number;
     progress?: number;
     workBaseline?: number;
+    interruptedAttempts?: number;
   }): Promise<void> {
     await this.ctx.storage.put(
       `cf:chat-recovery:incident:${encodeURIComponent(incident.incidentId)}`,
       incident
     );
+  }
+
+  /**
+   * Leave the entry an attempt writes before its isolate dies: an
+   * `attemptsInFlight` entry from an isolate that no longer exists (#2613). A
+   * test isolate never dies, so this is how a test reproduces a real reset.
+   */
+  async simulateDeadAttemptForTest(incidentId: string): Promise<void> {
+    const key = `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`;
+    const incident = await this.ctx.storage.get<Record<string, unknown>>(key);
+    if (!incident) throw new Error(`No recovery incident ${incidentId}`);
+    await this.ctx.storage.put(key, {
+      ...incident,
+      attemptsInFlight: [
+        { isolate: `dead-${crypto.randomUUID()}`, token: crypto.randomUUID() }
+      ]
+    });
   }
 
   /**
@@ -11806,13 +11917,6 @@ export class ThinkWindowedHydrationAgent extends Think {
 const BIG_MEDIA_CHARS = 16_000;
 
 /**
- * A payload the message row CANNOT hold, so Sessions splits the message
- * across continuation rows. The part is still an inline `data:` URL, so
- * eviction decodes it exactly as it does a small one.
- */
-export const POINTER_MEDIA_CHARS = 1_600_000;
-
-/**
  * Eviction disabled by default so tests can seed deterministically, then
  * enable a specific config and run passes explicitly.
  */
@@ -11966,17 +12070,14 @@ export class ThinkMediaEvictionAgent extends Think {
   /** The workspace file an eviction marker points at. */
   async readEvictedFileForTest(path: string): Promise<{
     byteLength: number;
-    mimeType: string | null;
     firstBytes: number[];
     allSame: boolean;
   } | null> {
-    const bytes = await this.workspace.readFileBytes(path);
+    const bytes = await new WorkspaceFiles(this.workspace).readBytes(path);
     if (bytes === null) return null;
-    const stat = await this.workspace.stat(path);
     const first = bytes[0] ?? 0;
     return {
       byteLength: bytes.byteLength,
-      mimeType: stat?.mimeType ?? null,
       firstBytes: Array.from(bytes.slice(0, 4)),
       allSame: bytes.every((b) => b === first)
     };

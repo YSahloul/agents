@@ -1,9 +1,13 @@
 import path from "node:path";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { exposeWorkerdGC } from "../../../../../../scripts/vitest/expose-workerd-gc";
 import { stripNodeModulesSourceMapReferences } from "../../../../../../scripts/vitest/strip-node-modules-source-map-references";
 import { defineConfig } from "vitest/config";
 
 const testsDir = import.meta.dirname;
+
+// Memory tests force a full GC to prove evicted objects are released.
+exposeWorkerdGC();
 
 export default defineConfig({
   plugins: [
@@ -14,7 +18,11 @@ export default defineConfig({
   ],
   resolve: {
     // One copy of pi's module state for the harness and the tests.
-    dedupe: ["@earendil-works/pi-ai", "@earendil-works/pi-durable"]
+    dedupe: [
+      "@earendil-works/pi-ai",
+      "@earendil-works/pi-codemode",
+      "@earendil-works/pi-durable"
+    ]
   },
   test: {
     name: "harness-pi",

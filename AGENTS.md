@@ -153,6 +153,8 @@ Test locations:
 
 Each test directory has its own `vitest.config.ts` and (for Workers tests) a `wrangler.jsonc`.
 
+Integration tests fake HTTP servers with [msw](https://mswjs.io), not by mocking `globalThis.fetch` or injecting a fake `fetch`. See "Faking HTTP servers in integration tests" in `packages/agents/AGENTS.md`.
+
 For a repo-wide rollup of **what proves feature X works, at which layer, and which CI run guards it** — plus the tracked skip/quarantine debt — see [`design/test-coverage-matrix.md`](design/test-coverage-matrix.md).
 
 ## Debugging and troubleshooting
@@ -210,11 +212,21 @@ pnpm exec changeset       # interactive prompt — pick packages, semver bump, d
 
 This creates a markdown file in `.changeset/` that gets consumed during release.
 
+Keep the changeset description to a single line. Don't write multi-paragraph explanations — the docs are the source of truth. Link to the relevant documentation when it tells the reader more than the line does, which it usually will; skip the link when it would add nothing. For example:
+
+```md
+---
+"agents": minor
+---
+
+Add `scheduleEvery()` for recurring schedules. See [Schedule tasks](https://developers.cloudflare.com/agents/api-reference/schedule-tasks/).
+```
+
 Examples, guides, and sites don't need changesets.
 
 ### Pull request process
 
-CI runs on every PR (`pnpm install --frozen-lockfile && pnpm run build && pnpm run check && pnpm exec nx affected -t test`); the workflow is in `.github/workflows/pullrequest.yml`. On push to `main` the Release workflow (`.github/workflows/release.yml`) runs the same steps but uses `nx run-many -t test` as a safety net against under-reported affected projects, then publishes via changesets. All checks must pass.
+CI runs on every PR (`pnpm install --frozen-lockfile && pnpm run build && pnpm run check && pnpm exec nx affected -t test`); the workflow is in `.github/workflows/pullrequest.yml`. It splits that work across parallel jobs (`check`, `publish`, and `test (...)` shards of `nx affected -t test`), and a final `ci` job passes only if all of them pass. On push to `main` the Release workflow (`.github/workflows/release.yml`) runs the same steps but uses `nx run-many -t test` as a safety net against under-reported affected projects, then publishes via changesets. All checks must pass.
 
 ### Generated files
 
@@ -223,12 +235,12 @@ CI runs on every PR (`pnpm install --frozen-lockfile && pnpm run build && pnpm r
 
 ## Learned Workspace Facts
 
-- `packages/shell/` is published as `@cloudflare/shell` — an experimental sandboxed JS execution and filesystem runtime for agents, built on the same dynamic Worker loader machinery as `@cloudflare/codemode`.
-- To run code against a `Workspace`: import `stateTools` from `@cloudflare/shell/workers` and `DynamicWorkerExecutor`/`resolveProvider` from `@cloudflare/codemode`; use `executor.execute(code, [resolveProvider(stateTools(workspace))])`.
+- `packages/shell/` (`@cloudflare/shell`) is deprecated. Agent workspaces are a `Workspace` from `@cloudflare/computer` (github.com/cloudflare/computer); do not add new uses of Shell.
+- Think's `workspace` is a Computer `Workspace`. Its workspace tools are Computer's `createAITools`, called with no options; execution backends and their modules are configured on the `Workspace`. Do not add Think options for them.
 
 ## Learned User Preferences
 
-- Keep `Workspace` as a pure durable filesystem — do not embed execution or session logic inside it. Execution is a caller concern wired via `@cloudflare/codemode` + `stateTools`.
+- One way to give an agent a workspace: a `@cloudflare/computer` `Workspace`. Execution goes through its backends, not a separate sandbox wired beside it.
 - When a package boundary feels wrong (e.g., a helper package depending on a larger package just for an adapter), prefer moving the adapter out rather than carrying the dependency.
 
 ## Boundaries

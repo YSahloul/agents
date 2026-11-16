@@ -5,6 +5,8 @@ import type {
 import type { Connection } from "./types";
 import type { LifecycleJobs } from "./job-queue";
 
+type MaybePromise<T> = T | Promise<T>;
+
 /** Opaque address understood by a Lifecycle routing transport. */
 export type LifecycleRouteAddress = {
   /** Stable equality and storage key. */
@@ -69,8 +71,6 @@ export type LifecycleSockets = {
 
 /**
  * Standard services granted to every installed Lifecycle capability.
- *
- * @experimental The API surface may change before stabilizing.
  */
 export type LifecycleServices = {
   /** The host's Durable Object name; see `Lifecycle.name`. */
@@ -83,6 +83,14 @@ export type LifecycleServices = {
    * Resolve once Lifecycle startup has finished, starting it if needed, and
    * reject if that startup fails. Calls made from inside startup resolve
    * immediately.
+   *
+   * Await it first in any operation that can run before startup and starts
+   * work `onStart` also awaits, such as lazily opening a store. Native RPC
+   * bypasses the automatic startup on fetch, alarm and WebSocket events, so
+   * such an operation can begin that work outside startup. `onStart` then
+   * awaits it while startup holds the input gate (`blockConcurrencyWhile`),
+   * which holds back the work's timers and I/O, and startup times out after
+   * 30 seconds and resets the object.
    */
   readonly ready: () => Promise<void>;
   /**
@@ -122,8 +130,6 @@ const installedServices = new WeakMap<object, LifecycleServices>();
 
 /**
  * Base class for capabilities that consume standard Lifecycle services.
- *
- * @experimental The API surface may change before stabilizing.
  */
 export abstract class LifecycleCapability<Props extends object = object> {
   readonly capabilityId: string;
@@ -139,7 +145,7 @@ export abstract class LifecycleCapability<Props extends object = object> {
   }
 
   /** Default startup hook; capabilities override when they own startup work. */
-  onStart(_context: CapabilityStartContext<Props>): void {}
+  onStart(_context: CapabilityStartContext<Props>): MaybePromise<void> {}
 
   /** Standard services when installed, or undefined in isolated unit tests. */
   protected get lifecycleServices(): LifecycleServices | undefined {

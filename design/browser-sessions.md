@@ -22,9 +22,10 @@ const browser = new Browser({
 ```
 
 - **One object, one browser.** The name tells browsers apart when a Durable Object has more than one. The model never sees the name.
-- **Provider.** `browserRun(binding, options)` runs the browser on Browser Run. Its options (`keepAliveMs`, `recording`, `guardrails`) apply every time a browser is created, including replacements. `keepAliveMs` defaults to the platform maximum of 10 minutes. Browser Run is the only provider today; bring-your-own-browser would be another one.
-- **`connect()`** reattaches to the browser if it's still running and starts a new one if not. It returns a `CdpConnection`; closing that connection leaves the browser running. `resolve()` does the same without opening a connection.
-- **`restarted: true`** means an earlier browser was lost (closed, idle too long, or crashed), and its tabs and logins are gone. The very first browser reports `false`.
+- **Provider.** `browserRun(binding, options)` runs the browser on Browser Run. Its options (`keepAliveMs`, `recording`, `guardrails`) apply every time a browser is created, including replacements. `keepAliveMs` defaults to 10 minutes; Browser Run accepts up to 20. Browser Run is the only provider today; bring-your-own-browser would be another one.
+- **`connect({ scope })`** reattaches to the browser if it's still running and starts a new one if not. It returns a `CdpConnection`; closing that connection leaves the browser running. `resolve()` does the same without opening a connection.
+- **Scopes** say who is driving. Each scope remembers its own active tab (`activeTargetId`, `setActiveTarget`), so two conversations on one browser don't drive each other's page. Cookies, logins, and the tabs themselves are shared. Leaving `scope` out uses `"shared"`.
+- **`restarted: true`** means the browser this scope last worked in was lost (closed, idle too long, or crashed), and its tabs and logins are gone, whichever scope noticed first. A scope's first connection reports `false`.
 - **`close()`** shuts the browser down.
 - **`liveView()`** returns fresh Live View links to the browser's tabs, so a person can watch or take over. It returns `undefined` when there's no running browser.
 - **Lifecycle.** Install a `Browser` with `Lifecycle.use()` and it keeps its record in the Durable Object's storage. It never schedules alarms or jobs. Pass your own `store` to use it without Lifecycle.
@@ -59,12 +60,13 @@ On an `Agent`, call `this.lifecycle.use(this.browser)` in the constructor instea
 
 ### Details
 
-- The browser's record is stored at `browser:session:<name>`: the Browser Run session id, timestamps, and the tab the agent last used.
+- The browser's record is stored at `browser:session:<name>`: the Browser Run session id and timestamps.
+- Each scope has a record at `browser:scope:<length of name>:<name>:<scope>`: the Browser Run session it last worked in and its tab there. A scope whose record names an older session was restarted. All of a browser's scope records share one lock. The 100 most recently used are kept; a scope dropped past that starts fresh. Listing them is why `Browser` needs a store with `list`.
 - There's no cleanup job. Browser Run shuts down an idle browser on its own, and the next `connect()` notices and starts a new one.
 - When a browser is lost or closed, a `browser:retired:<name>` marker is left behind. That marker is how the next `connect()` knows to report `restarted: true`. Markers are never deleted.
 - CDP commands and Live View links count as activity and refresh the record at most once a minute. A refresh never brings back a browser that was closed or replaced.
 - If two callers start a browser at the same time, the first one wins and the other closes its extra browser. Storage locks never wait on Browser Run network calls.
-- If the browser dies between the liveness check and the WebSocket connection, `connect()` starts a new one and reports `restarted: true` instead of failing.
+- If the browser dies between the liveness check and the WebSocket connection, `connect()` starts a new one instead of failing, and reports `restarted: true` to a scope that worked in the old one.
 
 ## Key decisions
 
@@ -72,11 +74,11 @@ On an `Agent`, call `this.lifecycle.use(this.browser)` in the constructor instea
 - **The host names the browser, not the model.** `BrowserConnector`, the connector behind `createBrowserTools`, lets the model decide when to keep a browser (its `dynamic` mode). Here the host decides, and a lost browser is always reported, never silently replaced.
 - **One object per browser.** An earlier version had one object that managed every browser by name, on top of a separate internal class. The two were hard to tell apart, and naming the browser once up front is simpler.
 - **Browser Run handles idle browsers.** An earlier version had a cleanup job. It duplicated `keepAliveMs`, woke idle objects, and could shut down a browser a person was using through Live View, because that traffic never reaches the host.
-- **No provider interface yet.** `browserRun()` returns a plain config object. A real interface waits until there's a second provider to shape it.
+- **Providers are data; adapters are internal.** `browserRun()` returns a plain config object. `Browser` turns it into an internal `BrowserProviderAdapter` (`providers/provider-adapter.ts`) with one explicit `switch` case per provider kind, and keeps everything else (the record, locks, restart detection, scopes, activity touches) itself. The adapter isn't exported: the set of providers stays closed until a third one is real. Adapters report a lost session as `false` from `isAlive` or a `BrowserSessionGoneError` from `connect`, and throw when they can't tell, so a flaky probe never replaces a live browser.
 
 ## Tradeoffs
 
 - `createBrowserTools` still has its own ways of keeping a browser across runs (the connector's `reuse` and `dynamic` modes). They overlap `Browser` until that tool moves onto it.
 - Without a cleanup job, the record of a browser that timed out stays in storage until the next `connect()` or `close()`.
-- To shut idle browsers down sooner than 10 minutes, lower `keepAliveMs`.
+- An abandoned browser bills until `keepAliveMs` runs out. Lower it to shut idle browsers down sooner, or raise it (up to 20 minutes) to survive longer gaps between turns.
 - Retired markers pile up, one per name ever used. That's fine for a few fixed names; per-user or per-task names would need a way to forget them.

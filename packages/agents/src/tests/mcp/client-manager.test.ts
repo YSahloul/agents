@@ -1,3 +1,4 @@
+import { env } from "cloudflare:workers";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/client/validators/cf-worker";
 import {
@@ -120,11 +121,14 @@ class TestMCPClientManager extends MCPClientManager {
     this._onObservabilityEvent.fire(event);
   }
 
+  /** Queue `promise` as connection work for `serverId`. */
   trackConnection(serverId: string, promise: Promise<void>): void {
-    type HasTrackConnection = {
-      _trackConnection: (id: string, p: Promise<void>) => void;
+    type HasLanes = {
+      _lanes: { run: (id: string, work: () => Promise<void>) => Promise<void> };
     };
-    (this as unknown as HasTrackConnection)._trackConnection(serverId, promise);
+    void (this as unknown as HasLanes)._lanes
+      .run(serverId, () => promise)
+      .catch(() => {});
   }
 }
 
@@ -1535,7 +1539,7 @@ describe("MCPClientManager OAuth Integration", () => {
     );
 
     it(
-      "should ignore callback that becomes stale while state validation is pending",
+      "queues a callback behind one whose state validation is pending",
       managerTest(async ({ manager, saveServer }) => {
         const serverId = "test-server";
         const callbackUrl = "http://localhost:3000/callback";
@@ -1594,20 +1598,31 @@ describe("MCPClientManager OAuth Integration", () => {
         );
         await state2CheckStarted.promise;
 
-        const result1 = await manager.handleCallbackRequest(
-          new Request(`${callbackUrl}?code=code1&state=${state1}`)
-        );
-        expect(result1.authSuccess).toBe(true);
-        expect(connection.connectionState).toBe("connecting");
+        // Callbacks for one server run one at a time: the second waits.
+        let result1Settled = false;
+        const result1Promise = manager
+          .handleCallbackRequest(
+            new Request(`${callbackUrl}?code=code1&state=${state1}`)
+          )
+          .finally(() => {
+            result1Settled = true;
+          });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(result1Settled).toBe(false);
+        expect(connection.completeAuthorization).not.toHaveBeenCalled();
 
         releaseState2Check.resolve(undefined);
         const result2 = await result2Promise;
-
         expect(result2.authSuccess).toBe(true);
+        expect(connection.connectionState).toBe("connecting");
+        expect(stateStorage.storage.has(state2Nonce)).toBe(false);
+
+        // The first exchange won; the queued callback is a stale success.
+        const result1 = await result1Promise;
+        expect(result1.authSuccess).toBe(true);
         expect(connection.connectionState).toBe("connecting");
         expect(connection.connectionError).toBe(null);
         expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
-        expect(stateStorage.storage.has(state2Nonce)).toBe(false);
       })
     );
 
@@ -1719,7 +1734,7 @@ describe("MCPClientManager OAuth Integration", () => {
     );
 
     it(
-      "should ignore stale OAuth error callback after auth is accepted but before state cleanup finishes",
+      "queues a stale OAuth error callback behind the accepted callback's state cleanup",
       managerTest(async ({ manager, saveServer }) => {
         const serverId = "test-server";
         const callbackUrl = "http://localhost:3000/callback";
@@ -1778,15 +1793,18 @@ describe("MCPClientManager OAuth Integration", () => {
         await consumeStateStarted.promise;
         expect(connection.connectionState).toBe("connecting");
 
-        const result2 = await manager.handleCallbackRequest(
-          new Request(
-            `${callbackUrl}?error=access_denied&state=${state2}&error_description=denied`
+        let result2Settled = false;
+        const result2Promise = manager
+          .handleCallbackRequest(
+            new Request(
+              `${callbackUrl}?error=access_denied&state=${state2}&error_description=denied`
+            )
           )
-        );
-        expect(result2.authSuccess).toBe(true);
-        expect(connection.connectionState).toBe("connecting");
-        expect(connection.connectionError).toBe(null);
-        expect(stateStorage.storage.has(state2Nonce)).toBe(false);
+          .finally(() => {
+            result2Settled = true;
+          });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(result2Settled).toBe(false);
 
         releaseConsumeState.resolve(undefined);
         const result1 = await result1Promise;
@@ -1795,6 +1813,12 @@ describe("MCPClientManager OAuth Integration", () => {
         expect(connection.connectionError).toBe(null);
         expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
         expect(stateStorage.storage.has(state1Nonce)).toBe(false);
+
+        const result2 = await result2Promise;
+        expect(result2.authSuccess).toBe(true);
+        expect(connection.connectionState).toBe("connecting");
+        expect(connection.connectionError).toBe(null);
+        expect(stateStorage.storage.has(state2Nonce)).toBe(false);
       })
     );
 
@@ -1845,15 +1869,18 @@ describe("MCPClientManager OAuth Integration", () => {
         await completeAuthorizationStarted.promise;
         expect(connection.connectionState).toBe("connecting");
 
-        const result2 = await manager.handleCallbackRequest(
+        // The duplicate waits for the active exchange instead of racing it.
+        const result2Promise = manager.handleCallbackRequest(
           new Request(`${callbackUrl}?code=code1&state=${state}`)
         );
-        expect(result2.authSuccess).toBe(true);
+        await new Promise((resolve) => setTimeout(resolve, 10));
         expect(mockAuthProvider.deleteCodeVerifier).not.toHaveBeenCalled();
 
         releaseCompleteAuthorization.resolve(undefined);
         const result1 = await result1Promise;
         expect(result1.authSuccess).toBe(true);
+        const result2 = await result2Promise;
+        expect(result2.authSuccess).toBe(true);
         expect(mockAuthProvider.deleteCodeVerifier).toHaveBeenCalledTimes(1);
         expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
       })
@@ -1908,6 +1935,188 @@ describe("MCPClientManager OAuth Integration", () => {
         expect(result.authSuccess).toBe(true);
         expect(runWithCodeVerifierStateSpy).toHaveBeenCalledTimes(1);
         expect(runWithCodeVerifierStateSpy.mock.calls[0]?.[0]).toBe(state);
+      })
+    );
+  });
+
+  describe("Server Removal", () => {
+    it(
+      "clears the removed server's saved OAuth credentials and keeps other servers'",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        const callbackUrl = "http://localhost:3000/callback";
+        for (const id of ["removed", "kept"]) {
+          saveServer({
+            id,
+            name: id,
+            server_url: `http://${id}.example.com`,
+            callback_url: callbackUrl,
+            client_id: `${id}-client`,
+            auth_url: "https://auth.example.com/authorize",
+            server_options: JSON.stringify({
+              transport: { type: "auto" },
+              client: {}
+            })
+          });
+        }
+
+        await manager.restoreConnectionsFromStorage("test-agent");
+
+        const keysFor = (id: string) => [
+          `/test-agent/${id}/${id}-client/token`,
+          `/test-agent/${id}/${id}-client/client_info/`,
+          `/test-agent/${id}/${id}-client/code_verifier/nonce`,
+          `/test-agent/${id}/old-client/token`,
+          `/test-agent/${id}/state/pending-nonce`,
+          `/test-agent/${id}/oauth_discovery`
+        ];
+        for (const id of ["removed", "kept"]) {
+          for (const key of keysFor(id)) {
+            await harness.storage.put(key, { value: key });
+          }
+        }
+
+        await manager.removeServer("removed");
+
+        const removed = await harness.storage.list({
+          prefix: "/test-agent/removed/"
+        });
+        expect([...removed.keys()]).toEqual([]);
+
+        const kept = await harness.storage.list({
+          prefix: "/test-agent/kept/"
+        });
+        expect([...kept.keys()].sort()).toEqual(keysFor("kept").sort());
+      })
+    );
+
+    it(
+      "clears more than 128 saved OAuth keys for a removed server",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        for (const id of ["many", "other"]) {
+          saveServer({
+            id,
+            name: id,
+            server_url: `http://${id}.example.com`,
+            callback_url: "http://localhost:3000/callback",
+            client_id: `${id}-client`,
+            auth_url: "https://auth.example.com/authorize",
+            server_options: null
+          });
+        }
+        await manager.restoreConnectionsFromStorage("test-client");
+
+        const entries: Record<string, unknown> = {};
+        for (let i = 0; i < 130; i++) {
+          entries[`/test-client/many/state/nonce-${i}`] = { i };
+        }
+        // storage.put also caps batches at 128 keys.
+        const all = Object.entries(entries);
+        for (let i = 0; i < all.length; i += 100) {
+          await harness.storage.put(Object.fromEntries(all.slice(i, i + 100)));
+        }
+        await harness.storage.put("/test-client/other/state/keep", { i: 0 });
+
+        await manager.removeServer("many");
+
+        const left = await harness.storage.list({
+          prefix: "/test-client/many/"
+        });
+        expect(left.size).toBe(0);
+        const other = await harness.storage.list({
+          prefix: "/test-client/other/"
+        });
+        expect([...other.keys()]).toEqual(["/test-client/other/state/keep"]);
+      })
+    );
+
+    it(
+      "clears saved OAuth credentials when the live connection has no auth provider",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        saveServer({
+          id: "plain",
+          name: "plain",
+          server_url: "http://plain.example.com",
+          callback_url: "http://localhost:3000/callback",
+          client_id: "plain-client",
+          auth_url: null,
+          server_options: null
+        });
+        const connection = new MCPClientConnection(
+          new URL("http://plain.example.com"),
+          { name: "test-client", version: "1.0.0" },
+          { transport: { type: "auto" }, client: {} }
+        );
+        connection.client.close = vi.fn().mockResolvedValue(undefined);
+        manager.mcpConnections.plain = connection;
+        await harness.storage.put("/test-client/plain/plain-client/token", {
+          access_token: "secret"
+        });
+
+        await manager.removeServer("plain");
+
+        const left = await harness.storage.list({
+          prefix: "/test-client/plain/"
+        });
+        expect(left.size).toBe(0);
+      })
+    );
+
+    it("removes a closed server even when the auth provider factory throws", () =>
+      withMcpHarness(async (harness) => {
+        const manager = createTestManager(harness, {
+          createAuthProvider: () => {
+            throw new Error("provider config unavailable");
+          }
+        });
+        saveServerRow(harness.storage, {
+          id: "broken",
+          name: "broken",
+          server_url: "http://broken.example.com",
+          callback_url: "http://localhost:3000/callback",
+          client_id: null,
+          auth_url: null,
+          server_options: null
+        });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        await manager.removeServer("broken");
+
+        expect(
+          harness.serverRows().find((row) => row.id === "broken")
+        ).toBeUndefined();
+        warn.mockRestore();
+      }));
+
+    it(
+      "clears saved OAuth credentials for a server whose connection was closed",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        saveServer({
+          id: "closed",
+          name: "closed",
+          server_url: "http://closed.example.com",
+          callback_url: "http://localhost:3000/callback",
+          client_id: "closed-client",
+          auth_url: "https://auth.example.com/authorize",
+          server_options: JSON.stringify({
+            transport: { type: "auto" },
+            client: {}
+          })
+        });
+
+        await manager.restoreConnectionsFromStorage("test-client");
+        await manager.closeConnection("closed");
+        expect(manager.mcpConnections.closed).toBeUndefined();
+
+        await harness.storage.put("/test-client/closed/closed-client/token", {
+          access_token: "secret"
+        });
+
+        await manager.removeServer("closed");
+
+        const left = await harness.storage.list({
+          prefix: "/test-client/closed/"
+        });
+        expect([...left.keys()]).toEqual([]);
       })
     );
   });
@@ -2829,7 +3038,8 @@ describe("MCPClientManager OAuth Integration", () => {
           name: "Test Server",
           callbackUrl: "http://localhost:3000/callback",
           client: {},
-          transport: { type: "auto" }
+          transport: { type: "auto" },
+          retry: { maxAttempts: 1 }
         });
 
         const conn = manager.mcpConnections[id];
@@ -2847,8 +3057,11 @@ describe("MCPClientManager OAuth Integration", () => {
 
         await manager.establishConnection(id);
 
-        // Should fire 3 times: 1 from connectToServer (after init), 1 explicit in establishConnection, 1 from discoverIfConnected
-        expect(onStateChangedSpy).toHaveBeenCalledTimes(3);
+        // Fires 4 times: after init in connectToServer, from
+        // discoverIfConnected, when the failure is recorded, and explicitly
+        // in establishConnection.
+        expect(onStateChangedSpy).toHaveBeenCalledTimes(4);
+        expect(conn.connectionError).toBe("Discovery failed");
       })
     );
 
@@ -5735,6 +5948,47 @@ describe("MCPClientManager OAuth Integration", () => {
         expect(manager.mcpConnections[serverId].connectionState).toBe(
           "authenticating"
         );
+      })
+    );
+  });
+
+  describe("RPC restore", () => {
+    it(
+      "restores RPC servers without holding startup",
+      managerTest(async ({ harness, saveServer }) => {
+        const manager = harness.installManager(
+          new TestMCPClientManager("test-client", "1.0.0", { env })
+        );
+        saveServer({
+          id: "slow-rpc",
+          name: "Slow RPC Server",
+          server_url: "rpc:slow-rpc",
+          client_id: null,
+          auth_url: null,
+          callback_url: "",
+          server_options: JSON.stringify({ bindingName: "MCP_OBJECT" })
+        });
+        const connectStarted = createDeferred<void>();
+        const releaseConnect = createDeferred<void>();
+        vi.spyOn(manager, "connectToServer").mockImplementation(async () => {
+          connectStarted.resolve();
+          await releaseConnect.promise;
+          return { state: "failed", error: "still starting" };
+        });
+
+        await manager.onStart();
+        await connectStarted.promise;
+
+        let settled = false;
+        const waiting = manager.waitForConnections().then(() => {
+          settled = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(settled).toBe(false);
+
+        releaseConnect.resolve();
+        await waiting;
+        expect(settled).toBe(true);
       })
     );
   });
